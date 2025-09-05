@@ -1,8 +1,21 @@
 FROM python:3.11-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates build-essential && rm -rf /var/lib/apt/lists/*
+
+# Install system deps (minimal)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
+
+# Install dependencies
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Copy source code
 COPY . /app
+
+# Cloud Run injects $PORT (default 8080)
 ENV PORT=8080 PYTHONUNBUFFERED=1
-CMD ["bash","-lc","uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+
+# Start the FastAPI app
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
