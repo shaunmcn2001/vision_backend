@@ -16,6 +16,7 @@ COPY . /app
 
 # Cloud Run injects $PORT (default 8080)
 ENV PORT=8080 PYTHONUNBUFFERED=1
+EXPOSE 8080
 
 # Start the FastAPI app
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
