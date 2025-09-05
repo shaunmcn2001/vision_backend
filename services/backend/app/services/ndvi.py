@@ -1,7 +1,9 @@
 import ee
 from ee import ServiceAccountCredentials
 import os, json, pathlib
-from app.services.gcs import upload_json, download_json, exists
+import csv, io
+from app.services.gcs import upload_json, download_json, exists, _bucket
+
 
 SA_EMAIL = os.getenv("EE_SERVICE_ACCOUNT", "ee-agri-worker@baradine-farm.iam.gserviceaccount.com")
 
@@ -49,4 +51,16 @@ def get_or_compute_and_cache_ndvi(field_id: str, geometry: dict, year: int, forc
     data = compute_monthly_ndvi(geometry, year)
     payload = {"field_id": field_id, "year": year, "data": data}
     upload_json(payload, path)
+    csv_path = f"ndvi-results/{field_id}/{year}.csv"
+    upload_csv(data, csv_path)
     return payload
+
+def upload_csv(rows: list[dict], path: str):
+    bucket = _bucket()
+    blob = bucket.blob(path)
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=["month","ndvi"])
+    w.writeheader()
+    w.writerows(rows)
+    blob.cache_control = "no-cache"
+    blob.upload_from_string(buf.getvalue(), content_type="text/csv")
