@@ -3,3 +3,6 @@ uvicorn
 pydantic
 pydantic-settings
 earthengine-api
+google-cloud-storage>=2.14.0
+shapely>=2.0.2
+pyproj>=3.6.1
