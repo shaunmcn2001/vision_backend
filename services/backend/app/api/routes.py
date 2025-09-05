@@ -3,7 +3,7 @@ from pydantic import BaseModel
 import ee, os
 from ee import ServiceAccountCredentials
 from app.services.gcs import download_json, exists
-from app.services.ndvi import get_or_compute_and_cache_ndvi, gcs_ndvi_path
+from app.services.ndvi import get_or_compute_and_cache_ndvi, gcs_ndvi_path, list_cached_years
 
 router = APIRouter()
 
@@ -95,3 +95,7 @@ def ndvi_monthly_by_field(field_id: str, year: int, force: bool = False):
         raise HTTPException(status_code=404, detail="Field not found")
     geometry = download_json(geom_path)
     return get_or_compute_and_cache_ndvi(field_id, geometry, year, force=force)
+
+@router.get("/ndvi/years/{field_id}")
+def ndvi_years(field_id: str):
+    return {"field_id": field_id, "years": list_cached_years(field_id)}
