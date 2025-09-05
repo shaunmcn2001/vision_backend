@@ -1,22 +1,37 @@
-FROM python:3.11-slim
+FROM python:3.11-slim as builder
 
-# Install system deps (minimal)
+# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates build-essential && \
+    build-essential && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install dependencies
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# Install python dependencies to a target directory
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix="/install" -r requirements.txt
+
+# --- Final Stage ---
+FROM python:3.11-slim
+
+# Create a non-root user
+RUN addgroup --system app && adduser --system --group app
+
+WORKDIR /app
+
+# Copy installed dependencies from builder stage
+COPY --from=builder /install /usr/local
 
 # Copy source code
 COPY . /app
+
+# Change ownership to non-root user
+RUN chown -R app:app /app
+USER app
 
 # Cloud Run injects $PORT (default 8080)
 ENV PORT=8080 PYTHONUNBUFFERED=1
 EXPOSE 8080
 
-# Start the FastAPI app
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "${PORT:-8080}"]
+# Start the FastAPI app using shell form to evaluate the PORT variable
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}
