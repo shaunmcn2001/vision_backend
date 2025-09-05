@@ -66,14 +66,17 @@ def upload_csv(rows: list[dict], path: str):
     blob.upload_from_string(buf.getvalue(), content_type="text/csv")
 
 def list_cached_years(field_id: str) -> list[int]:
+    """
+    Inspect GCS under ndvi-results/{field_id}/ and return the years that have a *.json cache.
+    """
     prefix = f"ndvi-results/{field_id}/"
-    names = list_prefix(prefix)
-    years = []
+    names = list_prefix(prefix)  # e.g. ['ndvi-results/<id>/2019.json', '.../2020.json']
+    years: set[int] = set()
     for n in names:
-        base = n.split("/")[-1]
-        if base.endswith(".json"):
+        fname = n.split("/")[-1]
+        if fname.endswith(".json"):
             try:
-                years.append(int(base.replace(".json","")))
-            except:
+                years.add(int(fname[:-5]))  # strip '.json'
+            except ValueError:
                 pass
-    return sorted(set(years))
+    return sorted(years)
