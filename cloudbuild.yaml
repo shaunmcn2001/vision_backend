@@ -1,75 +1,44 @@
 substitutions:
   _REGION: australia-southeast1
-  _REPO: agri
+  _REPO: shaunmcn2001
   _SERVICE: vision-backend
-
-images:
-  - australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA
+  _IMAGE: vision-backend
 
 steps:
+  # Build the container image
   - name: 'gcr.io/cloud-builders/docker'
-    id: 'Build-image'
-    dir: 'services/backend'
+    id: Build
+    dir: 'services/backend' # Assumes you run the build from the project root
     args: [
       'build',
-      '-t', 'australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA',
+      '-t', 'australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:$SHORT_SHA',
       '.'
     ]
- 
+
+  # Push the container image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
-    id: 'Push-image'
-    waitFor: ['Build-image']
+    id: Push
     args: [
       'push',
-      'australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA'
+      'australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:$SHORT_SHA'
     ]
- 
-  # This step runs database migrations before deploying the new service.
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    id: 'Migrate-database'
-    waitFor: ['Push-image']
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        # Install Python dependencies for Alembic
-        pip install -r services/backend/requirements.txt
- 
-        # Install and start Cloud SQL Proxy
-        wget https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.8.2/cloud-sql-proxy.linux.amd64 -O cloud-sql-proxy
-        chmod +x cloud-sql-proxy
-        ./cloud-sql-proxy --quiet --structured-logs $PROJECT_ID:${_REGION}:agri-db=tcp:5432 &
-        # Wait for the proxy to be ready
-        sleep 10
- 
-        # Run migrations using the configuration from your backend service
-        alembic -c services/backend/alembic.ini upgrade head
-    env:
-      - 'DB_HOST=127.0.0.1'
-      - 'DB_PORT=5432'
-      - 'DB_NAME=agri'
-      - 'DB_USER=agri_user'
-      - 'DB_PASS=$$DB_PASSWORD' # This uses the secret defined below
- 
+
+  # Deploy container image to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
-    id: 'Deploy-to-Cloud-Run'
-    waitFor: ['Migrate-database']
+    id: Deploy
     entrypoint: bash
     args:
       - -c
       - |
         gcloud run deploy ${_SERVICE} \
-          --image australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA \
+          --image australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:$SHORT_SHA \
           --region ${_REGION} \
           --platform managed \
-          --set-secrets=DB_HOST=DB_HOST:latest,DB_NAME=DB_NAME:latest,DB_PASS=DB_PASSWORD:latest,DB_USER=DB_USER:latest \
           --allow-unauthenticated \
           --timeout=600
- 
-availableSecrets:
-  secretManager:
-  - versionName: projects/$PROJECT_ID/secrets/DB_PASSWORD/versions/latest
-    env: 'DB_PASSWORD'
- 
+
+images:
+  - australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:$SHORT_SHA
+
 options:
   logging: CLOUD_LOGGING_ONLY
