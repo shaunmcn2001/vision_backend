@@ -1,7 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router as api_router
-from fastapi import Request, HTTPException
+from app.api.fields import router as fields_router  # <-- add fields API
 import os
 
 app = FastAPI(
@@ -26,20 +26,34 @@ def healthz():
         "ok": True,
         "service": "vision-backend",
         "project": os.getenv("GCP_PROJECT"),
-        "region": os.getenv("GCP_REGION")
+        "region": os.getenv("GCP_REGION"),
     }
 
 @app.get("/")
 def root():
     return {"service": "vision-backend", "status": "running"}
-    
+
+# Simple API key middleware (protects everything except health/docs)
 @app.middleware("http")
 async def require_api_key(req: Request, call_next):
-    if req.url.path.startswith(("/docs","/healthz")):  # allow health/docs
+    public_paths = (
+        "/healthz",
+        "/docs",
+        "/redoc",
+        "/openapi.json",           # needed for Swagger UI to load
+        "/docs/oauth2-redirect",   # docs assets
+        "/docs/swagger-ui",
+        "/docs/swagger-ui-init.js",
+        "/docs/swagger-ui-bundle.js",
+        "/docs/swagger-ui.css",
+        "/",
+    )
+    if any(req.url.path.startswith(p) for p in public_paths):
         return await call_next(req)
     if req.headers.get("x-api-key") != os.getenv("API_KEY"):
         raise HTTPException(status_code=401, detail="Invalid API key")
     return await call_next(req)
-    
+
 # Mount API routes
-app.include_router(api_router, prefix="/api")
+app.include_router(api_router, prefix="/api")          # existing EE/NDVI routes
+app.include_router(fields_router, prefix="/api/fields")  # new Fields CRUD (GCS-backed)
