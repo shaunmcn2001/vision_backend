@@ -1,0 +1,38 @@
+# cloudbuild.yaml  (at repo root)
+substitutions:
+  _REGION: australia-southeast1
+  _REPO: agri
+  _SERVICE: vision-backend
+
+images:
+  - australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA
+
+steps:
+  # Build the image from services/backend
+  - name: 'gcr.io/cloud-builders/docker'
+    dir: 'services/backend'
+    args: [
+      'build',
+      '-t', 'australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA',
+      '.'
+    ]
+
+  # Push the image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: [
+      'push',
+      'australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA'
+    ]
+
+  # Deploy to Cloud Run
+  # (We only replace the image; your env vars, secret mount, Cloud SQL, etc. stay as-is.)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    entrypoint: 'bash'
+    args:
+      - -c
+      - |
+        gcloud run deploy ${_SERVICE} \
+          --image australia-southeast1-docker.pkg.dev/$PROJECT_ID/${_REPO}/backend:$SHORT_SHA \
+          --region ${_REGION} \
+          --platform managed \
+          --allow-unauthenticated
