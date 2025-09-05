@@ -2,7 +2,7 @@ import ee
 from ee import ServiceAccountCredentials
 import os, json, pathlib
 import csv, io
-from app.services.gcs import upload_json, download_json, exists, _bucket
+from app.services.gcs import upload_json, download_json, exists, _bucket, list_prefix
 
 
 SA_EMAIL = os.getenv("EE_SERVICE_ACCOUNT", "ee-agri-worker@baradine-farm.iam.gserviceaccount.com")
@@ -64,3 +64,16 @@ def upload_csv(rows: list[dict], path: str):
     w.writerows(rows)
     blob.cache_control = "no-cache"
     blob.upload_from_string(buf.getvalue(), content_type="text/csv")
+
+def list_cached_years(field_id: str) -> list[int]:
+    prefix = f"ndvi-results/{field_id}/"
+    names = list_prefix(prefix)
+    years = []
+    for n in names:
+        base = n.split("/")[-1]
+        if base.endswith(".json"):
+            try:
+                years.append(int(base.replace(".json","")))
+            except:
+                pass
+    return sorted(set(years))
