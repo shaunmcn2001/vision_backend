@@ -15,7 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/healthz")
+@app.get("/healths")
 def healthz():
     return {"ok": True, "project": settings.GCP_PROJECT, "region": settings.GCP_REGION}
 
