@@ -76,3 +76,22 @@ def ndvi_monthly(req: NDVIRequest):
         return {"ok": True, "data": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"NDVI failed: {str(e)}")
+
+@router.get("/ndvi/cache/{field_id}/{year}")
+def ndvi_cache_get(field_id: str, year: int):
+    path = gcs_ndvi_path(field_id, year)
+    if not exists(path):
+        raise HTTPException(status_code=404, detail="No cached NDVI for this field/year")
+    return download_json(path)
+
+@router.post("/ndvi/monthly/by-field/{field_id}")
+def ndvi_monthly_by_field(field_id: str, year: int, force: bool = False):
+    """
+    Compute or return cached monthly NDVI for a field and year.
+    Caches to GCS at ndvi-results/{field_id}/{year}.json
+    """
+    geom_path = f"fields/{field_id}/field.geojson"
+    if not exists(geom_path):
+        raise HTTPException(status_code=404, detail="Field not found")
+    geometry = download_json(geom_path)
+    return get_or_compute_and_cache_ndvi(field_id, geometry, year, force=force)
