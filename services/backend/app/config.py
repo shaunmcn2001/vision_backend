@@ -15,3 +15,6 @@ class Settings(BaseSettings):
     BACKFILL_START: str | None = os.getenv("BACKFILL_START")
     EE_CREDENTIALS_SECRET: str | None = os.getenv("EE_CREDENTIALS_SECRET")
     SENTRY_DSN: str | None = os.getenv("SENTRY_DSN")
+   
+    class Config:
+        env_file = ".env"
