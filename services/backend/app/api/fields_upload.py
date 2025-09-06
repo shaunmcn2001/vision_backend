@@ -4,8 +4,8 @@ import os, io, zipfile, json, tempfile
 import shapefile  # pyshp
 from fastkml import kml
 from shapely.geometry import shape, mapping, Polygon, MultiPolygon
-from shapely.ops import unary_union
 from shapely.validation import make_valid
+from shapely.ops import unary_union, transform as shp_transform
 from pyproj import Transformer
 from app.services.gcs import upload_json, download_json, exists
 from uuid import uuid4
@@ -15,12 +15,11 @@ router = APIRouter()
 
 MIN_FIELD_HA = float(os.getenv("MIN_FIELD_HA", "1.0"))  # default 1 ha
 # Equal-area for AU
-_tx = Transformer.from_crs("EPSG:4326", "EPSG:3577", always_xy=True)
 
 def _area_ha(geom_geojson: dict) -> float:
     g = make_valid(shape(geom_geojson))
-    # reproject to equal-area
-    g2 = shapely.ops.transform(lambda x, y, z=None: _tx.transform(x, y), g)
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+    g2 = shp_transform(lambda x, y, z=None: transformer.transform(x, y), g)
     return float(g2.area) / 10000.0
 
 def _as_multipolygon(geoms: List[Polygon | MultiPolygon]):
