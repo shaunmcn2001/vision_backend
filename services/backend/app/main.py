@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router as api_router
-from app.api.fields import router as fields_router  # <-- add fields API
+from app.api.fields import router as fields_router
+from app.api.fields_upload import router as fields_upload_router
 import os
 
 app = FastAPI(
@@ -57,3 +58,6 @@ async def require_api_key(req: Request, call_next):
 # Mount API routes
 app.include_router(api_router, prefix="/api")          # existing EE/NDVI routes
 app.include_router(fields_router, prefix="/api/fields")  # new Fields CRUD (GCS-backed)
+app.include_router(api_router, prefix="/api")                 # EE/NDVI routes
+app.include_router(fields_router, prefix="/api/fields")       # existing JSON-based fields API
+app.include_router(fields_upload_router, prefix="/api/fields")# new file upload endpoint
