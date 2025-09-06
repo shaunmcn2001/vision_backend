@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router as api_router
 from app.api.fields import router as fields_router
 from app.api.fields_upload import router as fields_upload_router
+from app.api.tiles import router as tiles_router
 import os
 
 app = FastAPI(
@@ -61,3 +62,4 @@ app.include_router(fields_router, prefix="/api/fields")  # new Fields CRUD (GCS-
 app.include_router(api_router, prefix="/api")                 # EE/NDVI routes
 app.include_router(fields_router, prefix="/api/fields")       # existing JSON-based fields API
 app.include_router(fields_upload_router, prefix="/api/fields")# new file upload endpoint
+app.include_router(tiles_router, prefix="/api")
