@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import ee, os
 from ee import ServiceAccountCredentials
-from app.services.gcs import download_json, exists
+from app.services.gcs import download_json, exists, sign_url
 from app.services.ndvi import get_or_compute_and_cache_ndvi, gcs_ndvi_path, list_cached_years
 
 router = APIRouter()
@@ -99,3 +99,12 @@ def ndvi_monthly_by_field(field_id: str, year: int, force: bool = False):
 @router.get("/ndvi/years/{field_id}")
 def ndvi_years(field_id: str):
     return {"field_id": field_id, "years": list_cached_years(field_id)}
+
+@router.get("/ndvi/links/{field_id}/{year}")
+def ndvi_links(field_id: str, year: int):
+    json_path = gcs_ndvi_path(field_id, year)
+    csv_path = f"ndvi-results/{field_id}/{year}.csv"
+    return {
+        "json": {"gs": f"gs://{os.getenv('GCS_BUCKET')}/{json_path}", "signed": sign_url(json_path)},
+        "csv":  {"gs": f"gs://{os.getenv('GCS_BUCKET')}/{csv_path}",  "signed": sign_url(csv_path)}
+    }
