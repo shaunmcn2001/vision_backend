@@ -1,5 +1,6 @@
 import os, json
 from google.cloud import storage
+from datetime import timedelta
 
 def _client():
     return storage.Client()
@@ -30,3 +31,8 @@ def exists(path: str) -> bool:
 def list_prefix(prefix: str):
     bucket = _bucket()
     return [b.name for b in bucket.list_blobs(prefix=prefix)]
+
+def sign_url(path: str, expires_minutes: int = 60) -> str:
+    bucket = _bucket()
+    blob = bucket.blob(path)
+    return blob.generate_signed_url(expiration=timedelta(minutes=expires_minutes), method="GET")
