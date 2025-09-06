@@ -8,3 +8,4 @@ shapely>=2.0.2
 pyproj>=3.6.1
 pyshp>=2.3.1      
 fastkml>=0.12       
+python-multipart>=0.0.9
