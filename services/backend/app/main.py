@@ -63,3 +63,5 @@ app.include_router(api_router, prefix="/api")                 # EE/NDVI routes
 app.include_router(fields_router, prefix="/api/fields")       # existing JSON-based fields API
 app.include_router(fields_upload_router, prefix="/api/fields")# new file upload endpoint
 app.include_router(tiles_router, prefix="/api")
+app.include_router(api_router)
+
