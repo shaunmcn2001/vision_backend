@@ -4,6 +4,7 @@ import ee, os
 from ee import ServiceAccountCredentials
 from app.services.gcs import download_json, exists, sign_url
 from app.services.ndvi import get_or_compute_and_cache_ndvi, gcs_ndvi_path, list_cached_years
+from .export import router as export_router
 
 router = APIRouter()
 
@@ -108,3 +109,6 @@ def ndvi_links(field_id: str, year: int):
         "json": {"gs": f"gs://{os.getenv('GCS_BUCKET')}/{json_path}", "signed": sign_url(json_path)},
         "csv":  {"gs": f"gs://{os.getenv('GCS_BUCKET')}/{csv_path}",  "signed": sign_url(csv_path)}
     }
+
+router = APIRouter()
+router.include_router(export_router, prefix="/api", tags=["export"])
