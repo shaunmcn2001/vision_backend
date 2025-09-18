@@ -110,5 +110,4 @@ def ndvi_links(field_id: str, year: int):
         "csv":  {"gs": f"gs://{os.getenv('GCS_BUCKET')}/{csv_path}",  "signed": sign_url(csv_path)}
     }
 
-router = APIRouter()
-router.include_router(export_router, prefix="/api", tags=["export"])
+router.include_router(export_router, prefix="/export", tags=["export"])
