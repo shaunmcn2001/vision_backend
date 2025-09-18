@@ -3,22 +3,11 @@ from uuid import uuid4
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from shapely.geometry import shape, mapping
-from shapely.validation import make_valid
-from shapely.ops import transform as shp_transform
-from pyproj import Transformer
 from app.services.gcs import upload_json, download_json, exists
+from app.utils.geometry import area_m2
 
 router = APIRouter()
 MIN_FIELD_HA = float(os.getenv("MIN_FIELD_HA", "1.0"))  # default 1 ha
-
-# ---- helpers ----
-_transformer = Transformer.from_crs("EPSG:4326", "EPSG:3577", always_xy=True)  # Australia Albers (equal-area)
-
-def _area_m2(geojson_geom: dict) -> float:
-    geom = make_valid(shape(geojson_geom))
-    reproj = shp_transform(lambda x, y, z=None: _transformer.transform(x, y), geom)
-    return float(reproj.area)
 
 def _validate_geometry(geom: dict):
     t = geom.get("type")
@@ -44,8 +33,8 @@ class FieldDetail(FieldSummary):
 @router.post("", response_model=FieldDetail)
 def create_field(payload: FieldCreate):
     _validate_geometry(payload.geometry)
-    area_m2 = _area_m2(payload.geometry)
-    area_ha = area_m2 / 10000.0
+    area_sq_m = area_m2(payload.geometry)
+    area_ha = area_sq_m / 10000.0
     if area_ha < MIN_FIELD_HA:
         raise HTTPException(
             status_code=400,
