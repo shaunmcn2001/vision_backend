@@ -3,25 +3,15 @@ from typing import Optional, List
 import os, io, zipfile, json
 from fastkml import kml
 from shapely.geometry import shape, mapping, Polygon, MultiPolygon
-from shapely.validation import make_valid
-from shapely.ops import transform as shp_transform
-from pyproj import Transformer
 from app.services.gcs import upload_json, download_json, exists
 from uuid import uuid4
 from datetime import datetime, timezone
 from app.utils.shapefile import as_multipolygon, shapefile_zip_to_geojson
+from app.utils.geometry import area_ha
 
 router = APIRouter()
 
 MIN_FIELD_HA = float(os.getenv("MIN_FIELD_HA", "1.0"))  # default 1 ha
-# Equal-area for AU
-
-def _area_ha(geom_geojson: dict) -> float:
-    g = make_valid(shape(geom_geojson))
-    transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-    g2 = shp_transform(lambda x, y, z=None: transformer.transform(x, y), g)
-    return float(g2.area) / 10000.0
-
 def _kml_or_kmz_to_geojson(file_bytes: bytes, is_kmz: bool) -> dict:
     """
     Extract polygons from KML/KMZ → MultiPolygon (EPSG:4326).
@@ -82,7 +72,7 @@ async def upload_field(
 
     # Area check
     try:
-        area = _area_ha(geom)
+        area = area_ha(geom)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Area calculation failed: {e}")
 
