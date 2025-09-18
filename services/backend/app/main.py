@@ -57,11 +57,8 @@ async def require_api_key(req: Request, call_next):
     return await call_next(req)
 
 # Mount API routes
-app.include_router(api_router, prefix="/api")          # existing EE/NDVI routes
-app.include_router(fields_router, prefix="/api/fields")  # new Fields CRUD (GCS-backed)
-app.include_router(api_router, prefix="/api")                 # EE/NDVI routes
-app.include_router(fields_router, prefix="/api/fields")       # existing JSON-based fields API
-app.include_router(fields_upload_router, prefix="/api/fields")# new file upload endpoint
+app.include_router(api_router, prefix="/api")
+app.include_router(fields_router, prefix="/api/fields")
+app.include_router(fields_upload_router, prefix="/api/fields")
 app.include_router(tiles_router, prefix="/api")
-app.include_router(api_router)
 
