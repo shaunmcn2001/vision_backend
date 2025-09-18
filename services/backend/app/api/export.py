@@ -1,7 +1,7 @@
 import io
 import zipfile
 from datetime import date, datetime, timedelta
-from typing import Iterator, Tuple
+from typing import Iterator, Optional, Tuple
 import urllib.error
 import urllib.request
 
@@ -54,19 +54,35 @@ def _collection_size(collection: ee.ImageCollection) -> int:
     return int(collection.size().getInfo())
 
 
-def _download_bytes(url: str) -> bytes:
+def _download_bytes(url: str) -> Tuple[bytes, Optional[str]]:
     try:
         with urllib.request.urlopen(url) as resp:
             if resp.status != 200:
                 raise HTTPException(status_code=502, detail=f"Earth Engine download failed with status {resp.status}.")
-            return resp.read()
+            return resp.read(), resp.headers.get("Content-Type")
     except urllib.error.URLError as exc:
         raise HTTPException(status_code=502, detail=f"Failed to download GeoTIFF: {exc.reason}") from exc
 
 
-def _extract_first_tif(zip_bytes: bytes) -> bytes:
+def _has_tiff_magic(payload: bytes) -> bool:
+    if len(payload) < 4:
+        return False
+    header = payload[:4]
+    return header in (b"II*\x00", b"MM\x00*")
+
+
+def _looks_like_tiff(content_type: Optional[str], payload: bytes) -> bool:
+    if content_type and "tif" in content_type.lower():
+        return True
+    return _has_tiff_magic(payload)
+
+
+def _extract_tif(payload: bytes, content_type: Optional[str]) -> bytes:
+    if _looks_like_tiff(content_type, payload):
+        return payload
+
     try:
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             tif_names = [name for name in archive.namelist() if name.lower().endswith(".tif")]
             if not tif_names:
                 raise HTTPException(status_code=502, detail="Earth Engine download did not contain a GeoTIFF.")
@@ -149,8 +165,8 @@ async def export_geotiffs(
             except EEException as exc:
                 raise HTTPException(status_code=502, detail=f"Failed to create download URL for {year}-{month:02d}: {exc}") from exc
 
-            zip_bytes = await run_in_threadpool(_download_bytes, url)
-            tif_bytes = _extract_first_tif(zip_bytes)
+            payload, content_type = await run_in_threadpool(_download_bytes, url)
+            tif_bytes = _extract_tif(payload, content_type)
 
             output_name = f"ndvi_{year}_{month:02d}.tif"
             combined_zip.writestr(output_name, tif_bytes)
