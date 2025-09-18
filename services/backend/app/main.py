@@ -165,6 +165,12 @@ def export_ui():
       const form = document.getElementById('export-form');
       const status = document.getElementById('status');
 
+      const { origin, pathname } = window.location;
+      const trimmedPath = pathname.endsWith('/') && pathname !== '/' ? pathname.slice(0, -1) : pathname;
+      const basePath = trimmedPath.replace(/\/[^/]*$/, '/') || '/';
+      const apiUrl = new URL(`${basePath}api/export/export`, origin);
+      form.setAttribute('action', apiUrl.toString());
+
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         status.textContent = 'Uploading shapefile and starting export…';
@@ -193,7 +199,7 @@ def export_ui():
         const headers = apiKey ? { 'x-api-key': apiKey } : {};
 
         try {
-          const response = await fetch('/api/export/export', {
+          const response = await fetch(apiUrl, {
             method: 'POST',
             headers,
             body: formData,
