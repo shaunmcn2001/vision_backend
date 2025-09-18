@@ -1,15 +1,15 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional, List
-import os, io, zipfile, json, tempfile
-import shapefile  # pyshp
+import os, io, zipfile, json
 from fastkml import kml
 from shapely.geometry import shape, mapping, Polygon, MultiPolygon
 from shapely.validation import make_valid
-from shapely.ops import unary_union, transform as shp_transform
+from shapely.ops import transform as shp_transform
 from pyproj import Transformer
 from app.services.gcs import upload_json, download_json, exists
 from uuid import uuid4
 from datetime import datetime, timezone
+from app.utils.shapefile import as_multipolygon, shapefile_zip_to_geojson
 
 router = APIRouter()
 
@@ -21,50 +21,6 @@ def _area_ha(geom_geojson: dict) -> float:
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
     g2 = shp_transform(lambda x, y, z=None: transformer.transform(x, y), g)
     return float(g2.area) / 10000.0
-
-def _as_multipolygon(geoms: List[Polygon | MultiPolygon]):
-    polys = []
-    for g in geoms:
-        if isinstance(g, Polygon):
-            polys.append(g)
-        elif isinstance(g, MultiPolygon):
-            polys.extend(list(g.geoms))
-    if not polys:
-        raise HTTPException(status_code=400, detail="No polygon features found.")
-    merged = unary_union(polys)
-    if isinstance(merged, Polygon):
-        return MultiPolygon([merged])
-    if isinstance(merged, MultiPolygon):
-        return merged
-    raise HTTPException(status_code=400, detail="Could not merge polygons.")
-
-def _shapefile_zip_to_geojson(file_bytes: bytes) -> dict:
-    """
-    Accept a ZIP that contains .shp, .dbf, .shx (and optionally .prj).
-    Returns a GeoJSON MultiPolygon in EPSG:4326.
-    """
-    with tempfile.TemporaryDirectory() as td:
-        with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as z:
-            z.extractall(td)
-        # find .shp
-        shp_path = None
-        for n in os.listdir(td):
-            if n.lower().endswith(".shp"):
-                shp_path = os.path.join(td, n)
-                break
-        if not shp_path:
-            raise HTTPException(status_code=400, detail="ZIP must contain a .shp file.")
-
-        r = shapefile.Reader(shp_path)
-        geoms = []
-        for s in r.shapes():
-            try:
-                geom = shape(s.__geo_interface__)
-                geoms.append(geom)
-            except Exception:
-                continue
-        mp = _as_multipolygon(geoms)
-        return mapping(mp)  # EPSG:4326 assumed
 
 def _kml_or_kmz_to_geojson(file_bytes: bytes, is_kmz: bool) -> dict:
     """
@@ -99,7 +55,7 @@ def _kml_or_kmz_to_geojson(file_bytes: bytes, is_kmz: bool) -> dict:
     for d in k.features():          # Document(s)
         geoms.extend(extract_polys(d))
 
-    mp = _as_multipolygon(geoms)
+    mp = as_multipolygon(geoms)
     return mapping(mp)
 
 @router.post("/upload")
@@ -112,7 +68,7 @@ async def upload_field(
 
     try:
         if fname.endswith(".zip"):
-            geom = _shapefile_zip_to_geojson(content)
+            geom = shapefile_zip_to_geojson(content)
         elif fname.endswith(".kml"):
             geom = _kml_or_kmz_to_geojson(content, is_kmz=False)
         elif fname.endswith(".kmz"):
