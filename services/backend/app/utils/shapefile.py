@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import tempfile
 import zipfile
@@ -8,6 +9,8 @@ import shapefile  # pyshp
 from fastapi import HTTPException
 from shapely.geometry import MultiPolygon, Polygon, mapping, shape
 from shapely.ops import unary_union
+
+logger = logging.getLogger(__name__)
 
 
 def as_multipolygon(geoms: List[Polygon | MultiPolygon]) -> MultiPolygon:
@@ -38,13 +41,19 @@ def shapefile_zip_to_geojson(file_bytes: bytes) -> dict:
             raise HTTPException(status_code=400, detail="Uploaded file is not a valid ZIP archive.") from exc
 
         shp_path = None
-        for name in os.listdir(td):
-            if name.lower().endswith(".shp"):
-                shp_path = os.path.join(td, name)
+        for root, _, files in os.walk(td):
+            for filename in files:
+                if filename.lower().endswith(".shp"):
+                    shp_path = os.path.join(root, filename)
+                    break
+            if shp_path:
                 break
 
         if not shp_path:
-            raise HTTPException(status_code=400, detail="ZIP must contain a .shp file.")
+            logger.warning("ZIP archive contained no .shp file after recursive search.")
+            raise HTTPException(status_code=400, detail="ZIP archive must contain a polygon .shp file.")
+
+        logger.debug("Using shapefile located at %s", shp_path)
 
         try:
             reader = shapefile.Reader(shp_path)
