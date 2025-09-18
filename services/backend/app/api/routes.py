@@ -1,22 +1,12 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import ee, os
-from ee import ServiceAccountCredentials
 from app.services.gcs import download_json, exists, sign_url
 from app.services.ndvi import get_or_compute_and_cache_ndvi, gcs_ndvi_path, list_cached_years
+from app.services.tiles import init_ee
 from .export import router as export_router
 
 router = APIRouter()
-
-# ---- EE init via Service Account (no interactive auth) ----
-SA_EMAIL = "ee-agri-worker@baradine-farm.iam.gserviceaccount.com"
-KEY_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")  # e.g. /opt/render/project/src/ee-key.json
-
-def init_ee():
-    if not KEY_PATH:
-        raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS env var is not set")
-    creds = ServiceAccountCredentials(SA_EMAIL, KEY_PATH)
-    ee.Initialize(credentials=creds, opt_url="https://earthengine.googleapis.com")
 
 # Simple ping endpoint
 @router.get("/ping")
