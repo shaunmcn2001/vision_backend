@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from app.api.routes import router as api_router
 from app.api.fields import router as fields_router
 from app.api.fields_upload import router as fields_upload_router
@@ -246,7 +246,7 @@ def export_ui():
 # Simple API key middleware (protects everything except health/docs)
 @app.middleware("http")
 async def require_api_key(req: Request, call_next):
-    public_paths = (
+    public_paths = {
         "/healthz",
         "/docs",
         "/redoc",
@@ -256,13 +256,13 @@ async def require_api_key(req: Request, call_next):
         "/docs/swagger-ui-init.js",
         "/docs/swagger-ui-bundle.js",
         "/docs/swagger-ui.css",
-        "/",
-        "/ui",
-    )
-    if any(req.url.path.startswith(p) for p in public_paths):
+    }
+    if req.url.path in public_paths or req.url.path.startswith("/docs/swagger-ui"):
+        return await call_next(req)
+    if req.url.path in {"/", "/ui"}:
         return await call_next(req)
     if req.headers.get("x-api-key") != os.getenv("API_KEY"):
-        raise HTTPException(status_code=401, detail="Invalid API key")
+        return JSONResponse(status_code=401, content={"detail": "Invalid API key"})
     return await call_next(req)
 
 # Mount API routes
