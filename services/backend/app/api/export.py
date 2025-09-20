@@ -100,7 +100,13 @@ def _ndvi_image_for_range(geometry_geojson: dict, start_iso: str, end_iso: str) 
         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 60))
         .map(lambda img: img.addBands(img.normalizedDifference(["B8", "B4"]).rename("NDVI")))
     )
-    image = collection.select("NDVI").mean().clip(geom)
+    ndvi_band = (
+        collection.select("NDVI")
+        .mean()
+        .resample("bilinear")
+        .reproject("EPSG:4326", None, 10)
+    )
+    image = ndvi_band.clip(geom)
     image = image.clamp(-1, 1)
     return collection, image
 

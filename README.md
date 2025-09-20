@@ -22,4 +22,11 @@ Example request payload:
 
 This payload succeeds without specifying `collection` or `scale`, relying on the defaults.
 
+
+## NDVI GeoTIFF exports
+
+The `/api/export` endpoint now resamples the NDVI band with bilinear interpolation at 10 m
+resolution before clipping exports to the submitted geometry. This avoids nearest-neighbour
+artifacts when comparing the GeoTIFFs against vector boundaries.
+
  

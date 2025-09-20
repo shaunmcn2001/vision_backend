@@ -41,6 +41,16 @@ class FakeMeanImage:
         self.value = value
         self.clamped_to = None
         self.clipped_geom = None
+        self.resample_method = None
+        self.reproject_args = None
+
+    def resample(self, method: str):
+        self.resample_method = method
+        return self
+
+    def reproject(self, crs: str, transform, scale: int):
+        self.reproject_args = (crs, transform, scale)
+        return self
 
     def clip(self, geom):
         self.clipped_geom = geom
@@ -120,6 +130,8 @@ def test_export_ndvi_range_preserves_negatives(monkeypatch):
     assert isinstance(image, FakeMeanImage)
     assert image.clamped_to == (-1, 1)
     assert image.value == pytest.approx(-0.4)
+    assert image.resample_method == "bilinear"
+    assert image.reproject_args == ("EPSG:4326", None, 10)
 
     # Updating context should not affect the already computed image
     context["values"] = [-0.1, 0.2]
@@ -133,9 +145,13 @@ def test_tile_ndvi_images_allow_negative_values(monkeypatch):
     assert isinstance(annual, FakeMeanImage)
     assert annual.clamped_to == (-1, 1)
     assert annual.value == pytest.approx(-0.6)
+    assert annual.resample_method == "bilinear"
+    assert annual.reproject_args == ("EPSG:4326", None, 10)
 
     context["values"] = [-0.7, 0.1]
     month = tiles.ndvi_month_image({"type": "Polygon", "coordinates": []}, 2021, 5)
     assert isinstance(month, FakeMeanImage)
     assert month.clamped_to == (-1, 1)
     assert month.value == pytest.approx(-0.3)
+    assert month.resample_method == "bilinear"
+    assert month.reproject_args == ("EPSG:4326", None, 10)
