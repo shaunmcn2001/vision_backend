@@ -41,7 +41,6 @@ def ndvi_annual_image(geometry_geojson: dict, year: int) -> ee.Image:
         coll.select("NDVI")
         .mean()
         .resample("bilinear")
-        .reproject("EPSG:4326", None, 10)
     )
     img = ndvi_band.clip(geom)
     # Clamp NDVI values to the theoretical range so negatives are preserved
@@ -60,7 +59,6 @@ def ndvi_month_image(geometry_geojson: dict, year: int, month: int) -> ee.Image:
         coll.select("NDVI")
         .mean()
         .resample("bilinear")
-        .reproject("EPSG:4326", None, 10)
     )
     img = ndvi_band.clip(geom)
     return img.clamp(-1, 1)

@@ -131,7 +131,8 @@ def test_export_ndvi_range_preserves_negatives(monkeypatch):
     assert image.clamped_to == (-1, 1)
     assert image.value == pytest.approx(-0.4)
     assert image.resample_method == "bilinear"
-    assert image.reproject_args == ("EPSG:4326", None, 10)
+    assert image.reproject_args is None
+    assert image.clipped_geom == {"type": "Point", "coordinates": [0, 0]}
 
     # Updating context should not affect the already computed image
     context["values"] = [-0.1, 0.2]
@@ -146,7 +147,8 @@ def test_tile_ndvi_images_allow_negative_values(monkeypatch):
     assert annual.clamped_to == (-1, 1)
     assert annual.value == pytest.approx(-0.6)
     assert annual.resample_method == "bilinear"
-    assert annual.reproject_args == ("EPSG:4326", None, 10)
+    assert annual.reproject_args is None
+    assert annual.clipped_geom == {"type": "Polygon", "coordinates": []}
 
     context["values"] = [-0.7, 0.1]
     month = tiles.ndvi_month_image({"type": "Polygon", "coordinates": []}, 2021, 5)
@@ -154,4 +156,6 @@ def test_tile_ndvi_images_allow_negative_values(monkeypatch):
     assert month.clamped_to == (-1, 1)
     assert month.value == pytest.approx(-0.3)
     assert month.resample_method == "bilinear"
-    assert month.reproject_args == ("EPSG:4326", None, 10)
+    assert month.reproject_args is None
+    assert month.clipped_geom == {"type": "Polygon", "coordinates": []}
+    assert annual.value == pytest.approx(-0.6)
