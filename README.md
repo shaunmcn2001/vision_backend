@@ -30,4 +30,6 @@ The `/api/export` endpoint now resamples the NDVI band with bilinear interpolati
 resolution before clipping exports to the submitted geometry. This avoids nearest-neighbour
 artifacts when comparing the GeoTIFFs against vector boundaries.
 
- 
+
+## Updates
+- 2025-09-20: Added repository-wide collaboration guidelines (`AGENTS.md`) and documented the expectation to log future changes here.
