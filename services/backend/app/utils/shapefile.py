@@ -34,7 +34,7 @@ def as_multipolygon(geoms: List[Polygon | MultiPolygon]) -> MultiPolygon:
     raise HTTPException(status_code=400, detail="Could not merge polygons.")
 
 
-def shapefile_zip_to_geojson(file_bytes: bytes) -> dict:
+def shapefile_zip_to_geojson(file_bytes: bytes, source_epsg: int | str | None = None) -> dict:
     """Convert a shapefile ZIP archive to a GeoJSON MultiPolygon."""
 
     with tempfile.TemporaryDirectory() as td:
@@ -65,26 +65,46 @@ def shapefile_zip_to_geojson(file_bytes: bytes) -> dict:
             raise HTTPException(status_code=400, detail=f"Could not read shapefile: {exc}") from exc
 
         prj_path = Path(shp_path).with_suffix(".prj")
+        source_crs: CRS | None = None
+        crs_wkt: str | None = None
         try:
             crs_wkt = prj_path.read_text()
-        except FileNotFoundError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail="Shapefile must include a .prj file specifying the coordinate reference system.",
-            ) from exc
+        except FileNotFoundError:
+            crs_wkt = None
         except OSError as exc:
             raise HTTPException(
                 status_code=400,
                 detail="Could not read shapefile .prj file to determine the coordinate reference system.",
             ) from exc
 
-        try:
-            source_crs = CRS.from_wkt(crs_wkt)
-        except CRSError as exc:
+        if crs_wkt is not None:
+            try:
+                source_crs = CRS.from_wkt(crs_wkt)
+            except CRSError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Shapefile .prj file does not define a valid coordinate reference system.",
+                ) from exc
+        elif source_epsg is not None:
+            try:
+                epsg_code = int(str(source_epsg).strip())
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Provided EPSG code must be a valid integer.",
+                ) from exc
+            try:
+                source_crs = CRS.from_epsg(epsg_code)
+            except CRSError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Provided EPSG code does not define a valid coordinate reference system.",
+                ) from exc
+        else:
             raise HTTPException(
                 status_code=400,
-                detail="Shapefile .prj file does not define a valid coordinate reference system.",
-            ) from exc
+                detail="Shapefile must include a .prj file or an EPSG code specifying the coordinate reference system.",
+            )
 
         target_crs = CRS.from_epsg(4326)
         transformer: Transformer | None = None

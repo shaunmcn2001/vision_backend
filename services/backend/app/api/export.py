@@ -110,6 +110,10 @@ async def export_geotiffs(
     start_date: str = Form(...),
     end_date: str = Form(...),
     file: UploadFile = File(..., description="Shapefile ZIP archive"),
+    source_epsg: Optional[str] = Form(
+        None,
+        description="EPSG code of the uploaded shapefile when no .prj is included.",
+    ),
 ):
     filename = (file.filename or "").lower()
     if not filename.endswith(".zip"):
@@ -124,8 +128,10 @@ async def export_geotiffs(
     if not content:
         raise HTTPException(status_code=400, detail="Uploaded shapefile ZIP is empty.")
 
+    epsg_code = source_epsg.strip() if source_epsg else None
+
     try:
-        geometry = shapefile_zip_to_geojson(content)
+        geometry = shapefile_zip_to_geojson(content, source_epsg=epsg_code)
     except HTTPException:
         raise
     except Exception as exc:
