@@ -1,6 +1,10 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from typing import Optional, List
-import os, io, zipfile, json
+import io
+import json
+import os
+import zipfile
+from typing import List, Optional
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastkml import kml
 from shapely.geometry import shape, mapping, Polygon, MultiPolygon
 from app.services.gcs import upload_json, download_json, exists
@@ -61,9 +65,10 @@ async def upload_field(
     content = await file.read()
     epsg_code = source_epsg.strip() if source_epsg else None
 
+    warnings: List[str] = []
     try:
         if fname.endswith(".zip"):
-            geom = shapefile_zip_to_geojson(content, source_epsg=epsg_code)
+            geom, warnings = shapefile_zip_to_geojson(content, source_epsg=epsg_code)
         elif fname.endswith(".kml"):
             geom = _kml_or_kmz_to_geojson(content, is_kmz=False)
         elif fname.endswith(".kmz"):
@@ -110,4 +115,7 @@ async def upload_field(
     except Exception:
         pass
 
-    return {"ok": True, **meta}
+    response = {"ok": True, **meta}
+    if warnings:
+        response["warnings"] = warnings
+    return response

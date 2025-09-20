@@ -136,8 +136,9 @@ async def export_geotiffs(
 
     epsg_code = source_epsg.strip() if source_epsg else None
 
+    geometry_warnings: list[str] = []
     try:
-        geometry = shapefile_zip_to_geojson(content, source_epsg=epsg_code)
+        geometry, geometry_warnings = shapefile_zip_to_geojson(content, source_epsg=epsg_code)
     except HTTPException:
         raise
     except Exception as exc:
@@ -204,4 +205,6 @@ async def export_geotiffs(
     output_buffer.seek(0)
     disposition = f'attachment; filename="ndvi_{start.isoformat()}_{end.isoformat()}.zip"'
     headers = {"Content-Disposition": disposition}
+    if geometry_warnings:
+        headers["X-Geometry-Warnings"] = " | ".join(geometry_warnings)
     return StreamingResponse(output_buffer, media_type="application/zip", headers=headers)

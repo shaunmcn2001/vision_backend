@@ -85,7 +85,7 @@ def test_export_transforms_region_for_epsg_3857(monkeypatch):
     monkeypatch.setattr(
         export,
         "shapefile_zip_to_geojson",
-        lambda content, source_epsg=None: geometry,
+        lambda content, source_epsg=None: (geometry, []),
     )
     monkeypatch.setattr(
         export,
@@ -122,3 +122,53 @@ def test_export_transforms_region_for_epsg_3857(monkeypatch):
         for expected_point, actual_point in zip(expected_ring, actual_ring):
             assert actual_point[0] == pytest.approx(expected_point[0], rel=1e-6)
             assert actual_point[1] == pytest.approx(expected_point[1], rel=1e-6)
+
+    assert "X-Geometry-Warnings" not in response.headers
+
+
+def test_export_includes_geometry_warnings_header(monkeypatch):
+    geometry = {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [-123.15, 49.25],
+                [-123.05, 49.25],
+                [-123.05, 49.3],
+                [-123.15, 49.3],
+                [-123.15, 49.25],
+            ]
+        ],
+    }
+    recording_image = RecordingImage()
+
+    monkeypatch.setattr(export, "ee", SimpleNamespace(Geometry=lambda geom: FakeGeometry(geom)))
+    monkeypatch.setattr(export, "init_ee", lambda: None)
+    monkeypatch.setattr(
+        export,
+        "shapefile_zip_to_geojson",
+        lambda content, source_epsg=None: (geometry, ["Assumed EPSG:4326."]),
+    )
+    monkeypatch.setattr(
+        export,
+        "_ndvi_image_for_range",
+        lambda geom, start_iso, end_iso: (object(), recording_image),
+    )
+    monkeypatch.setattr(export, "_collection_size", lambda collection: 1)
+    monkeypatch.setattr(
+        export,
+        "_download_bytes",
+        lambda url: (b"II*\x00dummy", "image/tiff"),
+    )
+
+    upload = DummyUploadFile(b"fake shapefile bytes")
+
+    response = asyncio.run(
+        export.export_geotiffs(
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            file=upload,
+            source_epsg="EPSG:4326",
+        )
+    )
+
+    assert response.headers.get("X-Geometry-Warnings") == "Assumed EPSG:4326."
