@@ -32,5 +32,6 @@ artifacts when comparing the GeoTIFFs against vector boundaries.
 
 
 ## Updates
+- 2025-09-20: Added EPSG:4326 fallback handling for shapefile uploads, surfaced CRS warnings to clients, and updated tests to cover projection defaults.
 - 2025-09-20: Converted NDVI export regions to Web Mercator before requesting downloads and added regression coverage to guard CRS handling.
 - 2025-09-20: Added repository-wide collaboration guidelines (`AGENTS.md`) and documented the expectation to log future changes here.

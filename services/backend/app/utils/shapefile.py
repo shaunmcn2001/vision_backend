@@ -4,7 +4,7 @@ import os
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 import shapefile  # pyshp
 from fastapi import HTTPException
@@ -15,6 +15,8 @@ from pyproj import CRS, Transformer
 from pyproj.exceptions import CRSError
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CRS_WARNING = "Shapefile ZIP is missing projection information; assumed EPSG:4326."
 
 
 def as_multipolygon(geoms: List[Polygon | MultiPolygon]) -> MultiPolygon:
@@ -36,8 +38,8 @@ def as_multipolygon(geoms: List[Polygon | MultiPolygon]) -> MultiPolygon:
 
 def shapefile_zip_to_geojson(
     file_bytes: bytes, source_epsg: int | str | None = None
-) -> dict:
-    """Convert a shapefile ZIP archive to a GeoJSON MultiPolygon."""
+) -> Tuple[dict, List[str]]:
+    """Convert a shapefile ZIP archive to a GeoJSON MultiPolygon and surface warnings."""
 
     with tempfile.TemporaryDirectory() as td:
         try:
@@ -77,6 +79,7 @@ def shapefile_zip_to_geojson(
                 prj_path = candidate
                 break
         source_crs: CRS | None = None
+        warnings: List[str] = []
         crs_wkt: str | None = None
         if prj_path is not None:
             try:
@@ -113,13 +116,9 @@ def shapefile_zip_to_geojson(
                     detail="Provided EPSG code does not define a valid coordinate reference system.",
                 ) from exc
         else:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Shapefile ZIP is missing projection information. Include the .prj file "
-                    "in the archive or provide the source_epsg parameter."
-                ),
-            )
+            source_crs = CRS.from_epsg(4326)
+            warnings.append(DEFAULT_CRS_WARNING)
+            logger.warning(DEFAULT_CRS_WARNING)
 
         target_crs = CRS.from_epsg(4326)
         transformer: Transformer | None = None
@@ -144,4 +143,4 @@ def shapefile_zip_to_geojson(
                 geoms.append(geom)
 
         multipolygon = as_multipolygon(geoms)
-        return mapping(multipolygon)
+        return mapping(multipolygon), warnings
