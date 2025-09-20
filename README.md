@@ -20,7 +20,8 @@ Example request payload:
 }
 ```
 
-This payload succeeds without specifying `collection` or `scale`, relying on the defaults.
+This payload succeeds without specifying `collection`, `scale`, or `crs`, relying on the defaults.
+Behind the scenes the service now samples using a Web Mercator (`EPSG:3857`) projection so the 10 m scale reflects true metre-based averaging.
 
 
 ## NDVI GeoTIFF exports

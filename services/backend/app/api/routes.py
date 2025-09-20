@@ -2,7 +2,14 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import ee, os
 from app.services.gcs import download_json, exists, sign_url
-from app.services.ndvi import get_or_compute_and_cache_ndvi, gcs_ndvi_path, list_cached_years
+from app.services.ndvi import (
+    DEFAULT_REDUCE_REGION_CRS,
+    DEFAULT_REDUCE_REGION_SCALE,
+    get_or_compute_and_cache_ndvi,
+    gcs_ndvi_path,
+    list_cached_years,
+    reduce_region_sampling,
+)
 from app.services.tiles import init_ee
 from .export import router as export_router
 
@@ -30,7 +37,8 @@ class NDVIRequest(BaseModel):
     start: str
     end: str
     collection: str = "COPERNICUS/S2_SR_HARMONIZED"
-    scale: int = 10
+    scale: float = DEFAULT_REDUCE_REGION_SCALE
+    crs: str | None = DEFAULT_REDUCE_REGION_CRS
 
 # NDVI monthly endpoint (simplified for testing)
 @router.post("/ndvi/monthly")
@@ -59,8 +67,7 @@ def ndvi_monthly(req: NDVIRequest):
             value = monthly.reduceRegion(
                 reducer=ee.Reducer.mean(),
                 geometry=geom,
-                scale=req.scale,
-                bestEffort=True,
+                **reduce_region_sampling(scale=req.scale, crs=req.crs),
             ).get("NDVI").getInfo()
             results.append({"month": int(m), "ndvi": value})
 
