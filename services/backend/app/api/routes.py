@@ -29,7 +29,7 @@ class NDVIRequest(BaseModel):
     geometry: dict
     start: str
     end: str
-    collection: str = "SENTINEL/2_SR_HARMONIZED"
+    collection: str = "COPERNICUS/S2_SR_HARMONIZED"
     scale: int = 10
 
 # NDVI monthly endpoint (simplified for testing)
