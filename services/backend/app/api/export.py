@@ -148,6 +148,19 @@ async def export_geotiffs(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to initialize Earth Engine: {exc}") from exc
 
+    download_crs = "EPSG:3857"
+    download_region = geometry
+    if geometry and download_crs == "EPSG:3857":
+        try:
+            download_region = (
+                ee.Geometry(geometry).transform(download_crs, maxError=1).getInfo()
+            )
+        except EEException as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to transform geometry to {download_crs}: {exc}",
+            ) from exc
+
     output_buffer = io.BytesIO()
     months_written = 0
 
@@ -168,9 +181,9 @@ async def export_geotiffs(
             try:
                 url = image.getDownloadURL(
                     {
-                        "crs": "EPSG:3857",
+                        "crs": download_crs,
                         "scale": 10,
-                        "region": geometry,
+                        "region": download_region,
                         "filePerBand": False,
                         "format": "GEO_TIFF",
                     }
