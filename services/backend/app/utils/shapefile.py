@@ -70,19 +70,29 @@ def shapefile_zip_to_geojson(
         except shapefile.ShapefileException as exc:
             raise HTTPException(status_code=400, detail=f"Could not read shapefile: {exc}") from exc
 
-        prj_path = Path(shp_path).with_suffix(".prj")
+        shp_file_path = Path(shp_path)
+        prj_path: Path | None = None
+        try:
+            siblings = sorted(shp_file_path.parent.glob(f"{shp_file_path.stem}.*"))
+        except FileNotFoundError:
+            siblings = []
+        for candidate in siblings:
+            if candidate.suffix.lower() == ".prj" and candidate.is_file():
+                prj_path = candidate
+                break
         source_crs: CRS | None = None
         defaulted_to_wgs84 = False
         crs_wkt: str | None = None
-        try:
-            crs_wkt = prj_path.read_text()
-        except FileNotFoundError:
-            crs_wkt = None
-        except OSError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail="Could not read shapefile .prj file to determine the coordinate reference system.",
-            ) from exc
+        if prj_path is not None:
+            try:
+                crs_wkt = prj_path.read_text()
+            except FileNotFoundError:
+                crs_wkt = None
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not read shapefile .prj file to determine the coordinate reference system.",
+                ) from exc
 
         if crs_wkt is not None:
             try:
