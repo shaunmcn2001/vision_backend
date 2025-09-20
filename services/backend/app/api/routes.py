@@ -63,7 +63,12 @@ def ndvi_monthly(req: NDVIRequest):
         months = ee.List.sequence(1, 12)
         results = []
         for m in months.getInfo():
-            monthly = with_ndvi.filter(ee.Filter.calendarRange(m, m, "month")).mean().select("NDVI")
+            monthly_coll = with_ndvi.filter(ee.Filter.calendarRange(m, m, "month"))
+            if monthly_coll.size().eq(0).getInfo():
+                results.append({"month": int(m), "ndvi": None})
+                continue
+
+            monthly = monthly_coll.mean().select("NDVI")
             value = monthly.reduceRegion(
                 reducer=ee.Reducer.mean(),
                 geometry=geom,

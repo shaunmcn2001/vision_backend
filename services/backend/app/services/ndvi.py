@@ -60,7 +60,12 @@ def compute_monthly_ndvi(
     out = []
     sampling_kwargs = reduce_region_sampling(scale=scale, crs=crs)
     for m in months.getInfo():
-        mean = coll.filter(ee.Filter.calendarRange(m, m, "month")).mean().select("NDVI")
+        monthly_coll = coll.filter(ee.Filter.calendarRange(m, m, "month"))
+        if monthly_coll.size().eq(0).getInfo():
+            out.append({"month": int(m), "ndvi": None})
+            continue
+
+        mean = monthly_coll.mean().select("NDVI")
         val = mean.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=geom,
