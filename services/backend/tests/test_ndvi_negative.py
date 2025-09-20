@@ -131,7 +131,7 @@ def test_export_ndvi_range_preserves_negatives(monkeypatch):
     assert image.clamped_to == (-1, 1)
     assert image.value == pytest.approx(-0.4)
     assert image.resample_method == "bilinear"
-    assert image.reproject_args is None
+    assert image.reproject_args == ("EPSG:3857", None, 10)
     assert image.clipped_geom == {"type": "Point", "coordinates": [0, 0]}
 
     # Updating context should not affect the already computed image

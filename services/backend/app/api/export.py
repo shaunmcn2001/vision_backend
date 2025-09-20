@@ -104,6 +104,7 @@ def _ndvi_image_for_range(geometry_geojson: dict, start_iso: str, end_iso: str) 
         collection.select("NDVI")
         .mean()
         .resample("bilinear")
+        .reproject("EPSG:3857", None, 10)
     )
     image = ndvi_band.clip(geom)
     image = image.clamp(-1, 1)
@@ -167,6 +168,7 @@ async def export_geotiffs(
             try:
                 url = image.getDownloadURL(
                     {
+                        "crs": "EPSG:3857",
                         "scale": 10,
                         "region": geometry,
                         "filePerBand": False,
