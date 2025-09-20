@@ -54,18 +54,16 @@ async def upload_field(
     name: Optional[str] = Form(None),
     source_epsg: Optional[str] = Form(
         None,
-        description="EPSG code of the uploaded shapefile when no .prj is included.",
+        description="EPSG code of the uploaded shapefile (required when no .prj is included).",
     ),
 ):
     fname = (file.filename or "").lower()
     content = await file.read()
     epsg_code = source_epsg.strip() if source_epsg else None
 
-    defaulted_crs = False
-
     try:
         if fname.endswith(".zip"):
-            geom, defaulted_crs = shapefile_zip_to_geojson(content, source_epsg=epsg_code)
+            geom = shapefile_zip_to_geojson(content, source_epsg=epsg_code)
         elif fname.endswith(".kml"):
             geom = _kml_or_kmz_to_geojson(content, is_kmz=False)
         elif fname.endswith(".kmz"):
@@ -112,10 +110,4 @@ async def upload_field(
     except Exception:
         pass
 
-    response = {"ok": True, **meta}
-    if defaulted_crs:
-        response["crs_warning"] = (
-            "No CRS information supplied; defaulted to EPSG:4326 (WGS84)."
-        )
-
-    return response
+    return {"ok": True, **meta}

@@ -1,5 +1,4 @@
 import io
-import logging
 import zipfile
 from datetime import date, datetime, timedelta
 from typing import Iterator, Optional, Tuple
@@ -113,7 +112,7 @@ async def export_geotiffs(
     file: UploadFile = File(..., description="Shapefile ZIP archive"),
     source_epsg: Optional[str] = Form(
         None,
-        description="EPSG code of the uploaded shapefile when no .prj is included.",
+        description="EPSG code of the uploaded shapefile (required when no .prj is included).",
     ),
 ):
     filename = (file.filename or "").lower()
@@ -132,17 +131,11 @@ async def export_geotiffs(
     epsg_code = source_epsg.strip() if source_epsg else None
 
     try:
-        geometry, defaulted_crs = shapefile_zip_to_geojson(content, source_epsg=epsg_code)
+        geometry = shapefile_zip_to_geojson(content, source_epsg=epsg_code)
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse shapefile ZIP: {exc}") from exc
-
-    if defaulted_crs:
-        # Export endpoint returns binary data, so we log instead of modifying the response.
-        logging.getLogger(__name__).warning(
-            "Shapefile missing CRS; defaulted to EPSG:4326 (WGS84) for export request."
-        )
 
     try:
         init_ee()

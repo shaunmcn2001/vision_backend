@@ -4,7 +4,7 @@ import os
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 import shapefile  # pyshp
 from fastapi import HTTPException
@@ -36,12 +36,8 @@ def as_multipolygon(geoms: List[Polygon | MultiPolygon]) -> MultiPolygon:
 
 def shapefile_zip_to_geojson(
     file_bytes: bytes, source_epsg: int | str | None = None
-) -> Tuple[dict, bool]:
-    """Convert a shapefile ZIP archive to a GeoJSON MultiPolygon.
-
-    Returns a tuple of the GeoJSON mapping and a flag indicating whether the CRS
-    was defaulted to EPSG:4326 due to missing projection information.
-    """
+) -> dict:
+    """Convert a shapefile ZIP archive to a GeoJSON MultiPolygon."""
 
     with tempfile.TemporaryDirectory() as td:
         try:
@@ -81,7 +77,6 @@ def shapefile_zip_to_geojson(
                 prj_path = candidate
                 break
         source_crs: CRS | None = None
-        defaulted_to_wgs84 = False
         crs_wkt: str | None = None
         if prj_path is not None:
             try:
@@ -118,10 +113,12 @@ def shapefile_zip_to_geojson(
                     detail="Provided EPSG code does not define a valid coordinate reference system.",
                 ) from exc
         else:
-            source_crs = CRS.from_epsg(4326)
-            defaulted_to_wgs84 = True
-            logger.warning(
-                "Shapefile missing .prj file and source_epsg; defaulting CRS to EPSG:4326 (WGS84)."
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Shapefile ZIP is missing projection information. Include the .prj file "
+                    "in the archive or provide the source_epsg parameter."
+                ),
             )
 
         target_crs = CRS.from_epsg(4326)
@@ -147,4 +144,4 @@ def shapefile_zip_to_geojson(
                 geoms.append(geom)
 
         multipolygon = as_multipolygon(geoms)
-        return mapping(multipolygon), defaulted_to_wgs84
+        return mapping(multipolygon)
