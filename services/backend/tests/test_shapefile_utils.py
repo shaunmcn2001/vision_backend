@@ -80,4 +80,40 @@ def test_shapefile_zip_to_geojson_missing_prj_raises(tmp_path):
         shapefile_zip_to_geojson(zip_path.read_bytes())
 
     assert excinfo.value.status_code == 400
-    assert ".prj" in excinfo.value.detail
+    assert "EPSG" in excinfo.value.detail
+
+
+def test_shapefile_zip_to_geojson_missing_prj_with_epsg(tmp_path):
+    wgs84_coords = [
+        (-122.0, 37.0),
+        (-122.0, 37.0005),
+        (-121.9995, 37.0005),
+        (-121.9995, 37.0),
+        (-122.0, 37.0),
+    ]
+
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+    projected_coords = [transformer.transform(lon, lat) for lon, lat in wgs84_coords]
+
+    base_path = tmp_path / "test_polygon_missing_prj_epsg"
+    _write_polygon_shapefile(base_path, projected_coords)
+
+    zip_path = tmp_path / "polygon_missing_prj_epsg.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for ext in ("shp", "shx", "dbf"):
+            zf.write(
+                str(base_path.with_suffix(f".{ext}")),
+                arcname=f"test_polygon_missing_prj_epsg.{ext}",
+            )
+
+    geojson = shapefile_zip_to_geojson(zip_path.read_bytes(), source_epsg=3857)
+
+    geom = shape(geojson)
+    assert geom.geom_type == "MultiPolygon"
+    polygon = list(geom.geoms)[0]
+    converted_coords = list(polygon.exterior.coords)
+
+    assert len(converted_coords) == len(wgs84_coords)
+    for (expected_lon, expected_lat), (lon, lat) in zip(wgs84_coords, converted_coords):
+        assert lon == pytest.approx(expected_lon, abs=1e-6)
+        assert lat == pytest.approx(expected_lat, abs=1e-6)

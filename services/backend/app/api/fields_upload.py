@@ -51,14 +51,19 @@ def _kml_or_kmz_to_geojson(file_bytes: bytes, is_kmz: bool) -> dict:
 @router.post("/upload")
 async def upload_field(
     file: UploadFile = File(..., description="Shapefile ZIP (.zip), KML (.kml) or KMZ (.kmz)"),
-    name: Optional[str] = Form(None)
+    name: Optional[str] = Form(None),
+    source_epsg: Optional[str] = Form(
+        None,
+        description="EPSG code of the uploaded shapefile when no .prj is included.",
+    ),
 ):
     fname = (file.filename or "").lower()
     content = await file.read()
+    epsg_code = source_epsg.strip() if source_epsg else None
 
     try:
         if fname.endswith(".zip"):
-            geom = shapefile_zip_to_geojson(content)
+            geom = shapefile_zip_to_geojson(content, source_epsg=epsg_code)
         elif fname.endswith(".kml"):
             geom = _kml_or_kmz_to_geojson(content, is_kmz=False)
         elif fname.endswith(".kmz"):
