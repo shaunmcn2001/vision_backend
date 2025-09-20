@@ -38,8 +38,8 @@ def ndvi_annual_image(geometry_geojson: dict, year: int) -> ee.Image:
     start, end = f"{year}-01-01", f"{year}-12-31"
     coll = _s2_ndvi_collection(geom, start, end)
     img = coll.select("NDVI").mean().clip(geom)
-    # Mask out non-valid values
-    return img.updateMask(img.gte(0).And(img.lte(1)))
+    # Clamp NDVI values to the theoretical range so negatives are preserved
+    return img.clamp(-1, 1)
 
 def ndvi_month_image(geometry_geojson: dict, year: int, month: int) -> ee.Image:
     geom = ee.Geometry(geometry_geojson)
@@ -51,7 +51,7 @@ def ndvi_month_image(geometry_geojson: dict, year: int, month: int) -> ee.Image:
         end = f"{year}-{month+1:02d}-01"
     coll = _s2_ndvi_collection(geom, start, end)
     img = coll.select("NDVI").mean().clip(geom)
-    return img.updateMask(img.gte(0).And(img.lte(1)))
+    return img.clamp(-1, 1)
 
 # ---------- Tile URL factory ----------
 
@@ -64,7 +64,7 @@ def get_tile_template_for_image(img: ee.Image, vis: dict | None = None) -> dict:
     Returns a dict containing {mapid, token, tile_url, vis} compatible with XYZ tile layers.
     """
     if vis is None:
-        vis = {"bands": ["NDVI"], "min": 0.0, "max": 0.8, "palette": DEFAULT_PALETTE}
+        vis = {"bands": ["NDVI"], "min": -1.0, "max": 1.0, "palette": DEFAULT_PALETTE}
     mp = img.getMapId(vis)  # legacy-style, still supported by earthengine-api
     # mp contains: {'mapid': ..., 'token': ..., 'tile_fetcher': ...}
     tile_url = mp["tile_fetcher"].url_format  # e.g. https://earthengine.googleapis.com/map/{mapid}/{z}/{x}/{y}?token={token}

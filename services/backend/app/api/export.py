@@ -101,7 +101,7 @@ def _ndvi_image_for_range(geometry_geojson: dict, start_iso: str, end_iso: str) 
         .map(lambda img: img.addBands(img.normalizedDifference(["B8", "B4"]).rename("NDVI")))
     )
     image = collection.select("NDVI").mean().clip(geom)
-    image = image.updateMask(image.gte(0).And(image.lte(1)))
+    image = image.clamp(-1, 1)
     return collection, image
 
 
