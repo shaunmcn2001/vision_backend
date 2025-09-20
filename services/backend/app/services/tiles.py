@@ -37,7 +37,13 @@ def ndvi_annual_image(geometry_geojson: dict, year: int) -> ee.Image:
     geom = ee.Geometry(geometry_geojson)
     start, end = f"{year}-01-01", f"{year}-12-31"
     coll = _s2_ndvi_collection(geom, start, end)
-    img = coll.select("NDVI").mean().clip(geom)
+    ndvi_band = (
+        coll.select("NDVI")
+        .mean()
+        .resample("bilinear")
+        .reproject("EPSG:4326", None, 10)
+    )
+    img = ndvi_band.clip(geom)
     # Clamp NDVI values to the theoretical range so negatives are preserved
     return img.clamp(-1, 1)
 
@@ -50,7 +56,13 @@ def ndvi_month_image(geometry_geojson: dict, year: int, month: int) -> ee.Image:
     else:
         end = f"{year}-{month+1:02d}-01"
     coll = _s2_ndvi_collection(geom, start, end)
-    img = coll.select("NDVI").mean().clip(geom)
+    ndvi_band = (
+        coll.select("NDVI")
+        .mean()
+        .resample("bilinear")
+        .reproject("EPSG:4326", None, 10)
+    )
+    img = ndvi_band.clip(geom)
     return img.clamp(-1, 1)
 
 # ---------- Tile URL factory ----------
