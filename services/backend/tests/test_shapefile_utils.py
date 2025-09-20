@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 import shapefile  # pyshp
-from fastapi import HTTPException
 from pyproj import CRS, Transformer
 from shapely.geometry import shape
 
@@ -46,7 +45,9 @@ def test_shapefile_zip_to_geojson_transforms_epsg3857_to_wgs84(tmp_path):
         for ext in ("shp", "shx", "dbf", "prj"):
             zf.write(str(base_path.with_suffix(f".{ext}")), arcname=f"test_polygon.{ext}")
 
-    geojson = shapefile_zip_to_geojson(zip_path.read_bytes())
+    geojson, defaulted = shapefile_zip_to_geojson(zip_path.read_bytes())
+
+    assert defaulted is False
 
     geom = shape(geojson)
     assert geom.geom_type == "MultiPolygon"
@@ -59,7 +60,7 @@ def test_shapefile_zip_to_geojson_transforms_epsg3857_to_wgs84(tmp_path):
         assert lat == pytest.approx(expected_lat, abs=1e-6)
 
 
-def test_shapefile_zip_to_geojson_missing_prj_raises(tmp_path):
+def test_shapefile_zip_to_geojson_missing_prj_defaults_to_wgs84(tmp_path):
     wgs84_coords = [
         (-122.0, 37.0),
         (-122.0, 37.0005),
@@ -76,11 +77,19 @@ def test_shapefile_zip_to_geojson_missing_prj_raises(tmp_path):
         for ext in ("shp", "shx", "dbf"):
             zf.write(str(base_path.with_suffix(f".{ext}")), arcname=f"test_polygon_missing_prj.{ext}")
 
-    with pytest.raises(HTTPException) as excinfo:
-        shapefile_zip_to_geojson(zip_path.read_bytes())
+    geojson, defaulted = shapefile_zip_to_geojson(zip_path.read_bytes())
 
-    assert excinfo.value.status_code == 400
-    assert "EPSG" in excinfo.value.detail
+    assert defaulted is True
+
+    geom = shape(geojson)
+    assert geom.geom_type == "MultiPolygon"
+    polygon = list(geom.geoms)[0]
+    converted_coords = list(polygon.exterior.coords)
+
+    assert len(converted_coords) == len(wgs84_coords)
+    for (expected_lon, expected_lat), (lon, lat) in zip(wgs84_coords, converted_coords):
+        assert lon == pytest.approx(expected_lon, abs=1e-6)
+        assert lat == pytest.approx(expected_lat, abs=1e-6)
 
 
 def test_shapefile_zip_to_geojson_missing_prj_with_epsg(tmp_path):
@@ -106,7 +115,9 @@ def test_shapefile_zip_to_geojson_missing_prj_with_epsg(tmp_path):
                 arcname=f"test_polygon_missing_prj_epsg.{ext}",
             )
 
-    geojson = shapefile_zip_to_geojson(zip_path.read_bytes(), source_epsg=3857)
+    geojson, defaulted = shapefile_zip_to_geojson(zip_path.read_bytes(), source_epsg=3857)
+
+    assert defaulted is False
 
     geom = shape(geojson)
     assert geom.geom_type == "MultiPolygon"

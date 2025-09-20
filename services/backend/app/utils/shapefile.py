@@ -4,7 +4,7 @@ import os
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 import shapefile  # pyshp
 from fastapi import HTTPException
@@ -34,8 +34,14 @@ def as_multipolygon(geoms: List[Polygon | MultiPolygon]) -> MultiPolygon:
     raise HTTPException(status_code=400, detail="Could not merge polygons.")
 
 
-def shapefile_zip_to_geojson(file_bytes: bytes, source_epsg: int | str | None = None) -> dict:
-    """Convert a shapefile ZIP archive to a GeoJSON MultiPolygon."""
+def shapefile_zip_to_geojson(
+    file_bytes: bytes, source_epsg: int | str | None = None
+) -> Tuple[dict, bool]:
+    """Convert a shapefile ZIP archive to a GeoJSON MultiPolygon.
+
+    Returns a tuple of the GeoJSON mapping and a flag indicating whether the CRS
+    was defaulted to EPSG:4326 due to missing projection information.
+    """
 
     with tempfile.TemporaryDirectory() as td:
         try:
@@ -66,6 +72,7 @@ def shapefile_zip_to_geojson(file_bytes: bytes, source_epsg: int | str | None = 
 
         prj_path = Path(shp_path).with_suffix(".prj")
         source_crs: CRS | None = None
+        defaulted_to_wgs84 = False
         crs_wkt: str | None = None
         try:
             crs_wkt = prj_path.read_text()
@@ -101,9 +108,10 @@ def shapefile_zip_to_geojson(file_bytes: bytes, source_epsg: int | str | None = 
                     detail="Provided EPSG code does not define a valid coordinate reference system.",
                 ) from exc
         else:
-            raise HTTPException(
-                status_code=400,
-                detail="Shapefile must include a .prj file or an EPSG code specifying the coordinate reference system.",
+            source_crs = CRS.from_epsg(4326)
+            defaulted_to_wgs84 = True
+            logger.warning(
+                "Shapefile missing .prj file and source_epsg; defaulting CRS to EPSG:4326 (WGS84)."
             )
 
         target_crs = CRS.from_epsg(4326)
@@ -129,4 +137,4 @@ def shapefile_zip_to_geojson(file_bytes: bytes, source_epsg: int | str | None = 
                 geoms.append(geom)
 
         multipolygon = as_multipolygon(geoms)
-        return mapping(multipolygon)
+        return mapping(multipolygon), defaulted_to_wgs84
