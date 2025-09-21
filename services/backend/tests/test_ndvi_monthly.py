@@ -10,6 +10,24 @@ from app.api import routes
 from app.services import ndvi
 
 
+class RecordingGeometry:
+    calls: list[dict] = []
+
+    def __init__(self, geojson: dict, *args, **kwargs):
+        self.geojson = geojson
+        self.proj = kwargs.get("proj")
+        self.geodesic = kwargs.get("geodesic")
+        RecordingGeometry.calls.append(
+            {
+                "geojson": geojson,
+                "proj": self.proj,
+                "geodesic": self.geodesic,
+                "args": args,
+                "kwargs": kwargs,
+            }
+        )
+
+
 class FakeValue:
     def __init__(self, val):
         self._val = val
@@ -111,9 +129,10 @@ def test_ndvi_monthly_defaults(monkeypatch):
         captured["collection"] = name
         return FakeImageCollection(name)
 
+    RecordingGeometry.calls = []
     fake_ee = SimpleNamespace(
         ImageCollection=fake_image_collection,
-        Geometry=lambda geom: geom,
+        Geometry=RecordingGeometry,
         Filter=SimpleNamespace(calendarRange=lambda start, end, unit: start),
         List=SimpleNamespace(sequence=lambda start, end: FakeSequence(start, end)),
         Reducer=SimpleNamespace(mean=lambda: "mean"),
@@ -139,6 +158,10 @@ def test_ndvi_monthly_defaults(monkeypatch):
         assert kwargs["scale"] == ndvi.DEFAULT_REDUCE_REGION_SCALE
         assert kwargs["crs"] == ndvi.DEFAULT_REDUCE_REGION_CRS
         assert kwargs["bestEffort"] is True
+    assert RecordingGeometry.calls, "Expected ee.Geometry to be invoked"
+    first_call = RecordingGeometry.calls[0]
+    assert first_call["proj"] == "EPSG:4326"
+    assert first_call["geodesic"] is False
 
 
 def test_ndvi_monthly_handles_empty_month(monkeypatch):
@@ -149,9 +172,10 @@ def test_ndvi_monthly_handles_empty_month(monkeypatch):
         coll.empty_months = {5}
         return coll
 
+    RecordingGeometry.calls = []
     fake_ee = SimpleNamespace(
         ImageCollection=fake_image_collection,
-        Geometry=lambda geom: geom,
+        Geometry=RecordingGeometry,
         Filter=SimpleNamespace(calendarRange=lambda start, end, unit: start),
         List=SimpleNamespace(sequence=lambda start, end: FakeSequence(start, end)),
         Reducer=SimpleNamespace(mean=lambda: "mean"),
@@ -172,6 +196,10 @@ def test_ndvi_monthly_handles_empty_month(monkeypatch):
     missing = next(item for item in data["data"] if item["month"] == 5)
     assert missing["ndvi"] is None
     assert len(FakeImage.reduce_region_calls) == 11
+    assert RecordingGeometry.calls, "Expected ee.Geometry to be invoked"
+    first_call = RecordingGeometry.calls[0]
+    assert first_call["proj"] == "EPSG:4326"
+    assert first_call["geodesic"] is False
 
 
 def test_compute_monthly_ndvi_uses_consistent_sampling(monkeypatch):
@@ -180,9 +208,10 @@ def test_compute_monthly_ndvi_uses_consistent_sampling(monkeypatch):
     def fake_image_collection(name):
         return FakeImageCollection(name)
 
+    RecordingGeometry.calls = []
     fake_ee = SimpleNamespace(
         ImageCollection=fake_image_collection,
-        Geometry=lambda geom: geom,
+        Geometry=RecordingGeometry,
         Filter=SimpleNamespace(calendarRange=lambda start, end, unit: start),
         List=SimpleNamespace(sequence=lambda start, end: FakeSequence(start, end)),
         Reducer=SimpleNamespace(mean=lambda: "mean"),
@@ -202,6 +231,10 @@ def test_compute_monthly_ndvi_uses_consistent_sampling(monkeypatch):
         assert kwargs["scale"] == ndvi.DEFAULT_REDUCE_REGION_SCALE
         assert kwargs["crs"] == ndvi.DEFAULT_REDUCE_REGION_CRS
         assert kwargs["bestEffort"] is True
+    assert RecordingGeometry.calls, "Expected ee.Geometry to be invoked"
+    first_call = RecordingGeometry.calls[0]
+    assert first_call["proj"] == "EPSG:4326"
+    assert first_call["geodesic"] is False
 
 
 def test_compute_monthly_ndvi_handles_empty_month(monkeypatch):
@@ -212,9 +245,10 @@ def test_compute_monthly_ndvi_handles_empty_month(monkeypatch):
         coll.empty_months = {7}
         return coll
 
+    RecordingGeometry.calls = []
     fake_ee = SimpleNamespace(
         ImageCollection=fake_image_collection,
-        Geometry=lambda geom: geom,
+        Geometry=RecordingGeometry,
         Filter=SimpleNamespace(calendarRange=lambda start, end, unit: start),
         List=SimpleNamespace(sequence=lambda start, end: FakeSequence(start, end)),
         Reducer=SimpleNamespace(mean=lambda: "mean"),
@@ -232,6 +266,10 @@ def test_compute_monthly_ndvi_handles_empty_month(monkeypatch):
     missing = next(item for item in result if item["month"] == 7)
     assert missing["ndvi"] is None
     assert len(FakeImage.reduce_region_calls) == 11
+    assert RecordingGeometry.calls, "Expected ee.Geometry to be invoked"
+    first_call = RecordingGeometry.calls[0]
+    assert first_call["proj"] == "EPSG:4326"
+    assert first_call["geodesic"] is False
 
 
 def test_cached_ndvi_threads_sampling(monkeypatch):

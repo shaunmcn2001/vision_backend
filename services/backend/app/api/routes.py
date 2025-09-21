@@ -46,7 +46,7 @@ def ndvi_monthly(req: NDVIRequest):
     try:
         init_ee()
 
-        geom = ee.Geometry(req.geometry)
+        geom = ee.Geometry(req.geometry, proj="EPSG:4326", geodesic=False)
         collection = (
             ee.ImageCollection(req.collection)
             .filterBounds(geom)

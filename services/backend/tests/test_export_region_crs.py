@@ -30,8 +30,21 @@ def _transform_polygon(coords: list[list[list[float]]]) -> list[list[list[float]
 
 
 class FakeGeometry:
-    def __init__(self, geojson: dict):
+    calls: list[dict] = []
+
+    def __init__(self, geojson: dict, *args, **kwargs):
         self._geojson = geojson
+        self.proj = kwargs.get("proj")
+        self.geodesic = kwargs.get("geodesic")
+        FakeGeometry.calls.append(
+            {
+                "geojson": geojson,
+                "proj": self.proj,
+                "geodesic": self.geodesic,
+                "args": args,
+                "kwargs": kwargs,
+            }
+        )
 
     def transform(self, crs: str, maxError: float):  # noqa: N802 - match Earth Engine API
         assert crs == "EPSG:3857"
@@ -80,7 +93,8 @@ def test_export_transforms_region_for_epsg_3857(monkeypatch):
 
     recording_image = RecordingImage()
 
-    monkeypatch.setattr(export, "ee", SimpleNamespace(Geometry=lambda geom: FakeGeometry(geom)))
+    FakeGeometry.calls = []
+    monkeypatch.setattr(export, "ee", SimpleNamespace(Geometry=FakeGeometry))
     monkeypatch.setattr(export, "init_ee", lambda: None)
     monkeypatch.setattr(
         export,
@@ -111,6 +125,10 @@ def test_export_transforms_region_for_epsg_3857(monkeypatch):
     )
 
     assert response.status_code == 200
+    assert FakeGeometry.calls, "Expected ee.Geometry to be invoked"
+    last_call = FakeGeometry.calls[-1]
+    assert last_call["proj"] == "EPSG:4326"
+    assert last_call["geodesic"] is False
     assert recording_image.last_params is not None
     params = recording_image.last_params
     assert params["crs"] == "EPSG:3857"
@@ -141,7 +159,8 @@ def test_export_includes_geometry_warnings_header(monkeypatch):
     }
     recording_image = RecordingImage()
 
-    monkeypatch.setattr(export, "ee", SimpleNamespace(Geometry=lambda geom: FakeGeometry(geom)))
+    FakeGeometry.calls = []
+    monkeypatch.setattr(export, "ee", SimpleNamespace(Geometry=FakeGeometry))
     monkeypatch.setattr(export, "init_ee", lambda: None)
     monkeypatch.setattr(
         export,
@@ -172,3 +191,7 @@ def test_export_includes_geometry_warnings_header(monkeypatch):
     )
 
     assert response.headers.get("X-Geometry-Warnings") == "Assumed EPSG:4326."
+    assert FakeGeometry.calls, "Expected ee.Geometry to be invoked"
+    last_call = FakeGeometry.calls[-1]
+    assert last_call["proj"] == "EPSG:4326"
+    assert last_call["geodesic"] is False

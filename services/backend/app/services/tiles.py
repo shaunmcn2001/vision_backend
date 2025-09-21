@@ -34,7 +34,7 @@ def _s2_ndvi_collection(geom: ee.Geometry, start: str, end: str, collection: str
     return coll
 
 def ndvi_annual_image(geometry_geojson: dict, year: int) -> ee.Image:
-    geom = ee.Geometry(geometry_geojson)
+    geom = ee.Geometry(geometry_geojson, proj="EPSG:4326", geodesic=False)
     start, end = f"{year}-01-01", f"{year}-12-31"
     coll = _s2_ndvi_collection(geom, start, end)
     ndvi_band = (
@@ -47,7 +47,7 @@ def ndvi_annual_image(geometry_geojson: dict, year: int) -> ee.Image:
     return img.clamp(-1, 1)
 
 def ndvi_month_image(geometry_geojson: dict, year: int, month: int) -> ee.Image:
-    geom = ee.Geometry(geometry_geojson)
+    geom = ee.Geometry(geometry_geojson, proj="EPSG:4326", geodesic=False)
     start = f"{year}-{month:02d}-01"
     # safe end-of-month: add 32 days and set to day 1 previous; simpler: next month start
     if month == 12:
