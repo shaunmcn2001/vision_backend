@@ -1,8 +1,10 @@
 import io
 import logging
 import os
+import shutil
 import tempfile
 import zipfile
+from pathlib import PurePosixPath
 from typing import List
 
 import shapefile  # pyshp
@@ -36,7 +38,41 @@ def shapefile_zip_to_geojson(file_bytes: bytes) -> dict:
     with tempfile.TemporaryDirectory() as td:
         try:
             with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as zf:
-                zf.extractall(td)
+                base_path = os.path.abspath(td)
+                for member in zf.infolist():
+                    member_name = member.filename
+                    if not member_name:
+                        continue
+
+                    normalized_name = member_name.replace("\\", "/")
+                    path_parts = PurePosixPath(normalized_name).parts
+                    if any(part == ".." for part in path_parts):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="ZIP archive contains unsafe member paths.",
+                        )
+
+                    member_target = os.path.abspath(
+                        os.path.join(base_path, *path_parts)
+                    )
+                    if not (
+                        member_target == base_path
+                        or member_target.startswith(base_path + os.sep)
+                    ):
+                        raise HTTPException(
+                            status_code=400,
+                            detail="ZIP archive contains unsafe member paths.",
+                        )
+
+                    if member.is_dir():
+                        os.makedirs(member_target, exist_ok=True)
+                        continue
+
+                    os.makedirs(os.path.dirname(member_target), exist_ok=True)
+                    with zf.open(member, "r") as source, open(
+                        member_target, "wb"
+                    ) as target:
+                        shutil.copyfileobj(source, target)
         except zipfile.BadZipFile as exc:
             raise HTTPException(status_code=400, detail="Uploaded file is not a valid ZIP archive.") from exc
 
