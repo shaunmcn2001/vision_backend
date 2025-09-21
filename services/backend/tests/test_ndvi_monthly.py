@@ -7,6 +7,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.append(str(BACKEND_DIR))
 
 from app.api import routes
+from app.services import ndvi as ndvi_service
 
 
 class FakeValue:
@@ -18,167 +19,214 @@ class FakeValue:
 
 
 class FakeRegionResult:
-    def __init__(self, month):
+    def __init__(self, month, capture):
         self._month = month
+        self._capture = capture
 
     def get(self, key):
+        self._capture.setdefault("reduce_keys", []).append(key)
         return FakeValue(self._month / 100)
 
 
-class FakeImage:
-    def __init__(self, month):
+class FakeIndexBand:
+    def __init__(self, month, capture):
         self._month = month
+        self._capture = capture
+        self.band_name: str | None = None
+
+    def rename(self, name: str):
+        self.band_name = name
+        self._capture.setdefault("renamed_bands", []).append(name)
+        return self
+
+
+class FakeImage:
+    def __init__(self, month, capture):
+        self._month = month
+        self._capture = capture
+
+    def normalizedDifference(self, bands):
+        self._capture.setdefault("normalized_difference", []).append(tuple(bands))
+        return FakeIndexBand(self._month, self._capture)
+
+    def addBands(self, image):
+        self._capture.setdefault("added_bands", []).append(getattr(image, "band_name", None))
+        return self
 
     def select(self, band):
+        self._capture.setdefault("selected_bands", []).append(band)
         return self
 
     def reduceRegion(self, *args, **kwargs):
-        return FakeRegionResult(self._month)
+        self._capture.setdefault("reduced_months", []).append(self._month)
+        return FakeRegionResult(self._month, self._capture)
 
 
 class FakeFilteredCollection:
-    def __init__(self, month):
+    def __init__(self, month, capture):
         self._month = month
+        self._capture = capture
 
     def mean(self):
-        return FakeImage(self._month)
+        self._capture.setdefault("mean_months", []).append(self._month)
+        return FakeImage(self._month, self._capture)
 
 
 class FakeMappedCollection:
-    def __init__(self, parent):
-        self._parent = parent
+    def __init__(self, func, capture):
+        self._func = func
+        self._capture = capture
 
     def filter(self, month):
-        return FakeFilteredCollection(month)
+        self._capture.setdefault("filtered_months", []).append(month)
+        self._func(FakeImage(month, self._capture))
+        return FakeFilteredCollection(month, self._capture)
 
 
 class FakeImageCollection:
-    def __init__(self, name):
+    def __init__(self, name, capture):
         self.name = name
-        self.geom = None
-        self.start = None
-        self.end = None
+        self._capture = capture
+        self._capture.setdefault("collections", []).append(name)
 
     def filterBounds(self, geom):
-        self.geom = geom
+        self._capture["geometry"] = geom
         return self
 
     def filterDate(self, start, end):
-        self.start = start
-        self.end = end
+        self._capture["date_range"] = (start, end)
         return self
 
     def map(self, func):
-        return FakeMappedCollection(self)
+        self._capture["map_func"] = func
+        return FakeMappedCollection(func, self._capture)
 
 
-class FakeSequence(list):
-    def __init__(self, start, end):
-        super().__init__(range(start, end + 1))
-
-    def getInfo(self):
-        return list(self)
-
-
-def test_ndvi_monthly_defaults(monkeypatch):
-    captured = {}
-
-    def fake_image_collection(name):
-        captured["collection"] = name
-        return FakeImageCollection(name)
-
-    fake_ee = SimpleNamespace(
-        ImageCollection=fake_image_collection,
+def make_fake_ee(capture):
+    return SimpleNamespace(
+        ImageCollection=lambda name: FakeImageCollection(name, capture),
         Geometry=lambda geom: geom,
         Filter=SimpleNamespace(calendarRange=lambda start, end, unit: start),
-        List=SimpleNamespace(sequence=lambda start, end: FakeSequence(start, end)),
         Reducer=SimpleNamespace(mean=lambda: "mean"),
+        Image=SimpleNamespace(constant=lambda value: value),
     )
 
-    monkeypatch.setattr(routes, "ee", fake_ee)
-    monkeypatch.setattr(routes, "init_ee", lambda: None)
 
-    request = routes.NDVIRequest(
+def _patch_ndvi_service(monkeypatch, capture):
+    monkeypatch.setattr(ndvi_service, "ee", make_fake_ee(capture))
+    monkeypatch.setattr(ndvi_service, "init_ee", lambda: None)
+
+
+def test_monthly_index_defaults(monkeypatch):
+    capture: dict = {}
+    _patch_ndvi_service(monkeypatch, capture)
+
+    request = routes.MonthlyIndexRequest(
         geometry={"type": "Point", "coordinates": [0, 0]},
         start="2023-01-01",
         end="2023-12-31",
     )
 
-    data = routes.ndvi_monthly(request)
+    response = routes.ndvi_monthly(request)
 
-    assert data["ok"] is True
-    assert len(data["data"]) == 12
-    assert data["data"][0] == {"month": 1, "ndvi": 0.01}
-    assert captured["collection"] == "COPERNICUS/S2_SR_HARMONIZED"
+    assert response["ok"] is True
+    assert response["index"] == {
+        "code": "ndvi",
+        "band": "NDVI",
+        "valid_range": [-1.0, 1.0],
+        "parameters": {},
+    }
+    assert len(response["data"]) == 12
+    assert response["data"][0] == {"month": 1, "ndvi": 0.01}
+
+    assert capture["collections"] == ["COPERNICUS/S2_SR_HARMONIZED"]
+    assert set(capture["normalized_difference"]) == {("B8", "B4")}
+    assert set(capture["selected_bands"]) == {"NDVI"}
+    assert set(capture["reduce_keys"]) == {"NDVI"}
 
 
-def test_ndvi_monthly_partial_year(monkeypatch):
-    captured_months = []
+def test_monthly_index_gndvi(monkeypatch):
+    capture: dict = {}
+    _patch_ndvi_service(monkeypatch, capture)
 
-    class PartialRegionResult:
-        def __init__(self, month):
-            self._month = month
-
-        def get(self, key):
-            if self._month == 4:
-                return None
-            return FakeValue(self._month / 100)
-
-    class PartialImage:
-        def __init__(self, month):
-            self._month = month
-
-        def select(self, band):
-            return self
-
-        def reduceRegion(self, *args, **kwargs):
-            return PartialRegionResult(self._month)
-
-    class PartialFilteredCollection:
-        def __init__(self, month):
-            self._month = month
-
-        def mean(self):
-            return PartialImage(self._month)
-
-    class PartialMappedCollection:
-        def filter(self, month):
-            captured_months.append(month)
-            return PartialFilteredCollection(month)
-
-    class PartialImageCollection:
-        def __init__(self, name):
-            self.name = name
-
-        def filterBounds(self, geom):
-            return self
-
-        def filterDate(self, start, end):
-            self.start = start
-            self.end = end
-            return self
-
-        def map(self, func):
-            return PartialMappedCollection()
-
-    fake_ee = SimpleNamespace(
-        ImageCollection=PartialImageCollection,
-        Geometry=lambda geom: geom,
-        Filter=SimpleNamespace(calendarRange=lambda start, end, unit: start),
-        Reducer=SimpleNamespace(mean=lambda: "mean"),
-    )
-
-    monkeypatch.setattr(routes, "ee", fake_ee)
-    monkeypatch.setattr(routes, "init_ee", lambda: None)
-
-    request = routes.NDVIRequest(
+    request = routes.MonthlyIndexRequest(
         geometry={"type": "Point", "coordinates": [0, 0]},
-        start="2023-03-15",
-        end="2023-05-20",
+        start="2023-01-01",
+        end="2023-12-31",
+        index=routes.IndexSelection(code="gndvi"),
     )
 
-    data = routes.ndvi_monthly(request)
+    response = routes.ndvi_monthly(request)
 
-    assert data["ok"] is True
-    assert [entry["month"] for entry in data["data"]] == [3, 5]
-    assert captured_months == [3, 4, 5]
+    assert response["index"]["code"] == "gndvi"
+    assert response["index"]["band"] == "GNDVI"
+    assert response["data"][0] == {"month": 1, "gndvi": 0.01}
+    assert set(capture["normalized_difference"]) == {("B8", "B3")}
+
+
+def test_monthly_index_ndre_parameters(monkeypatch):
+    capture: dict = {}
+    _patch_ndvi_service(monkeypatch, capture)
+
+    request = routes.MonthlyIndexRequest(
+        geometry={"type": "Point", "coordinates": [0, 0]},
+        start="2023-01-01",
+        end="2023-12-31",
+        index=routes.IndexSelection(code="ndre", parameters={"nir_band": "B8A"}),
+    )
+
+    response = routes.ndvi_monthly(request)
+
+    assert response["index"]["code"] == "ndre"
+    assert response["index"]["parameters"] == {"nir_band": "B8A", "red_edge_band": "B5"}
+    assert set(capture["normalized_difference"]) == {("B8A", "B5")}
+
+
+def test_cache_paths_and_payload(monkeypatch):
+    captured: dict = {}
+
+    monkeypatch.setattr(ndvi_service, "exists", lambda path: False)
+
+    def fake_upload_json(payload, path):
+        captured["json"] = (payload, path)
+
+    def fake_upload_csv(rows, path, key):
+        captured["csv"] = (rows, path, key)
+
+    def fake_compute(*args, **kwargs):
+        captured["compute_args"] = (args, kwargs)
+        return {
+            "index": {
+                "code": "gndvi",
+                "band": "GNDVI",
+                "valid_range": [-1.0, 1.0],
+                "parameters": {},
+            },
+            "data": [{"month": 1, "gndvi": 0.42}],
+        }
+
+    monkeypatch.setattr(ndvi_service, "upload_json", fake_upload_json)
+    monkeypatch.setattr(ndvi_service, "upload_index_csv", fake_upload_csv)
+    monkeypatch.setattr(ndvi_service, "compute_monthly_index_for_year", fake_compute)
+
+    payload = ndvi_service.get_or_compute_and_cache_index(
+        "field-1",
+        {"type": "Point", "coordinates": [0, 0]},
+        2020,
+        index_code="gndvi",
+    )
+
+    assert captured["json"][1] == "index-results/gndvi/field-1/2020.json"
+    assert captured["csv"][1] == "index-results/gndvi/field-1/2020.csv"
+    assert captured["csv"][2] == "gndvi"
+    assert payload == {
+        "field_id": "field-1",
+        "year": 2020,
+        "index": {
+            "code": "gndvi",
+            "band": "GNDVI",
+            "valid_range": [-1.0, 1.0],
+            "parameters": {},
+        },
+        "data": [{"month": 1, "gndvi": 0.42}],
+    }
