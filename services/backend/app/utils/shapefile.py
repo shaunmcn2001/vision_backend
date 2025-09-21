@@ -15,6 +15,8 @@ from shapely.ops import transform, unary_union
 from pyproj import CRS, Transformer
 from pyproj.exceptions import CRSError
 
+from app.utils.crs_detect import detect_coordinate_system_suggestion
+
 logger = logging.getLogger(__name__)
 
 WGS84_CRS = CRS.from_epsg(4326)
@@ -369,6 +371,9 @@ def shapefile_zip_to_geojson(
                 message = (
                     "Missing CRS (.prj) and no source_epsg provided. Include the .prj in the ZIP or pass source_epsg=<EPSG code>."
                 )
+                suggestion = detect_coordinate_system_suggestion(shapes)
+                if suggestion is not None:
+                    message = f"{message} {suggestion.human_readable_hint}"
                 logger.warning(message)
                 raise HTTPException(status_code=400, detail=message)
 
