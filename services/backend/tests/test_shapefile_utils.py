@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import shapefile  # pyshp
+from fastapi import HTTPException
 from pyproj import CRS, Transformer
 from shapely.geometry import shape
 
@@ -123,6 +124,7 @@ def test_shapefile_zip_to_geojson_missing_prj_geographic_heuristic(tmp_path):
 
     expected_warning = (
         "Shapefile ZIP is missing projection information; heuristically assumed EPSG:4326 based on geographic coordinate extents."
+        " Provide the .prj file in the ZIP or pass source_epsg=<EPSG code> to avoid this assumption."
     )
     assert warnings == [expected_warning]
 
@@ -165,6 +167,7 @@ def test_shapefile_zip_to_geojson_missing_prj_projected_heuristic(tmp_path):
     epsg_name = CRS.from_epsg(28355).name
     expected_warning = (
         f"Shapefile ZIP is missing projection information; heuristically assumed EPSG:28355 ({epsg_name}) based on Australian bounds."
+        " Provide the .prj file in the ZIP or pass source_epsg=<EPSG code> to avoid this assumption."
     )
     assert warnings == [expected_warning]
 
@@ -215,3 +218,30 @@ def test_shapefile_zip_to_geojson_missing_prj_with_epsg(tmp_path):
     for (expected_lon, expected_lat), (lon, lat) in zip(wgs84_coords, converted_coords):
         assert lon == pytest.approx(expected_lon, abs=1e-6)
         assert lat == pytest.approx(expected_lat, abs=1e-6)
+
+
+def test_shapefile_zip_to_geojson_missing_prj_without_inference(tmp_path):
+    ambiguous_coords = [
+        (500.0, 500.0),
+        (500.0, 510.0),
+        (510.0, 510.0),
+        (510.0, 500.0),
+        (500.0, 500.0),
+    ]
+
+    base_path = tmp_path / "test_polygon_missing_metadata"
+    _write_polygon_shapefile(base_path, ambiguous_coords)
+
+    zip_path = tmp_path / "polygon_missing_metadata.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for ext in ("shp", "shx", "dbf"):
+            zf.write(str(base_path.with_suffix(f".{ext}")), arcname=f"test_polygon_missing_metadata.{ext}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        shapefile_zip_to_geojson(zip_path.read_bytes())
+
+    assert exc_info.value.status_code == 400
+    assert (
+        exc_info.value.detail
+        == "Missing CRS (.prj) and no source_epsg provided. Include the .prj in the ZIP or pass source_epsg=<EPSG code>."
+    )

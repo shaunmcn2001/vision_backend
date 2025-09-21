@@ -32,6 +32,9 @@ artifacts when comparing the GeoTIFFs against vector boundaries.
 
 
 ## Updates
+- 2025-09-22: Required shapefile uploads without projection metadata to supply a .prj or source_epsg, refreshed heuristic warnings to
+  direct clients toward sharing CRS details, documented the new HTTP 400 expectation in tests, ran `pytest` (pass), and noted that
+  `ruff check .` / `ruff format --check .` still flag pre-existing import and formatting issues.
 - 2025-09-21: Forced Earth Engine geometries to use planar WGS84 (geodesic disabled) across exports, NDVI services, and tiles so shapefile footprints stay aligned, refreshed tests to assert the new kwargs, and ran `pytest`.
 - 2025-09-20: Introduced CRS heuristics for projection-less shapefiles, documented the new warnings, and expanded tests for Australian EPSG detection.
 - 2025-09-20: Added EPSG:4326 fallback handling for shapefile uploads, surfaced CRS warnings to clients, and updated tests to cover projection defaults.

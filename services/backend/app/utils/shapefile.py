@@ -17,8 +17,6 @@ from pyproj.exceptions import CRSError
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CRS_WARNING = "Shapefile ZIP is missing projection information; assumed EPSG:4326."
-
 WGS84_CRS = CRS.from_epsg(4326)
 AU_BOUNDS_WGS84 = (93.0, -60.0, 174.0, -7.0)
 AU_CENTROID_WGS84 = (
@@ -226,6 +224,7 @@ def _infer_missing_crs(
     if _looks_geographic(bounds):
         message = (
             "Shapefile ZIP is missing projection information; heuristically assumed EPSG:4326 based on geographic coordinate extents."
+            " Provide the .prj file in the ZIP or pass source_epsg=<EPSG code> to avoid this assumption."
         )
         return WGS84_CRS, message
 
@@ -255,6 +254,7 @@ def _infer_missing_crs(
     if best_epsg is not None and best_crs is not None and best_raw_score > 0:
         message = (
             f"Shapefile ZIP is missing projection information; heuristically assumed EPSG:{best_epsg} ({best_crs.name}) based on Australian bounds."
+            " Provide the .prj file in the ZIP or pass source_epsg=<EPSG code> to avoid this assumption."
         )
         return best_crs, message
 
@@ -366,9 +366,11 @@ def shapefile_zip_to_geojson(
                     warnings.append(heuristic_warning)
                     logger.warning(heuristic_warning)
             else:
-                source_crs = WGS84_CRS
-                warnings.append(DEFAULT_CRS_WARNING)
-                logger.warning(DEFAULT_CRS_WARNING)
+                message = (
+                    "Missing CRS (.prj) and no source_epsg provided. Include the .prj in the ZIP or pass source_epsg=<EPSG code>."
+                )
+                logger.warning(message)
+                raise HTTPException(status_code=400, detail=message)
 
         target_crs = WGS84_CRS
         transformer: Transformer | None = None
