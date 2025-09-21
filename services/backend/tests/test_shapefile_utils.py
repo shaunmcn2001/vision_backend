@@ -3,6 +3,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 import shapefile  # pyshp
 from pyproj import CRS, Transformer
 from shapely.geometry import shape
@@ -219,7 +220,7 @@ def test_shapefile_zip_to_geojson_missing_prj_with_epsg(tmp_path):
         assert lat == pytest.approx(expected_lat, abs=1e-6)
 
 
-def test_shapefile_zip_to_geojson_missing_prj_without_inference(tmp_path, caplog):
+def test_shapefile_zip_to_geojson_missing_prj_without_inference(tmp_path):
     ambiguous_coords = [
         (500.0, 500.0),
         (500.0, 510.0),
@@ -236,27 +237,12 @@ def test_shapefile_zip_to_geojson_missing_prj_without_inference(tmp_path, caplog
         for ext in ("shp", "shx", "dbf"):
             zf.write(str(base_path.with_suffix(f".{ext}")), arcname=f"test_polygon_missing_metadata.{ext}")
 
-    with caplog.at_level("WARNING"):
-        geojson, warnings = shapefile_zip_to_geojson(zip_path.read_bytes())
+    with pytest.raises(HTTPException) as excinfo:
+        shapefile_zip_to_geojson(zip_path.read_bytes())
 
-    assert len(warnings) == 1
-    warning = warnings[0]
-    expected_prefix = (
-        "Missing CRS (.prj) and no source_epsg provided. Defaulting to EPSG:4326 (WGS84)."
-        " Include the .prj in the ZIP or pass source_epsg=<EPSG code> to avoid this assumption."
+    error = excinfo.value
+    assert error.status_code == 400
+    assert (
+        error.detail
+        == "Missing CRS (.prj) and no source_epsg provided. Include the .prj in the ZIP or pass source_epsg=<EPSG code>."
     )
-    assert warning.startswith(expected_prefix)
-    assert "Detector hint" in warning
-    assert "projected/metre-like" in warning
-    assert "Observed bounds: [500.00, 500.00]–[510.00, 510.00]" in warning
-    assert any(record.message == warning for record in caplog.records)
-
-    geom = shape(geojson)
-    assert geom.geom_type == "MultiPolygon"
-    polygon = list(geom.geoms)[0]
-    converted_coords = list(polygon.exterior.coords)
-
-    assert len(converted_coords) == len(ambiguous_coords)
-    for (expected_lon, expected_lat), (lon, lat) in zip(ambiguous_coords, converted_coords):
-        assert lon == pytest.approx(expected_lon, abs=1e-6)
-        assert lat == pytest.approx(expected_lat, abs=1e-6)
