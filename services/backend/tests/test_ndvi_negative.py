@@ -13,6 +13,24 @@ from app.api import export
 from app.services import tiles
 
 
+class RecordingGeometry:
+    calls: list[dict] = []
+
+    def __init__(self, geojson: dict, *args, **kwargs):
+        self.geojson = geojson
+        self.proj = kwargs.get("proj")
+        self.geodesic = kwargs.get("geodesic")
+        RecordingGeometry.calls.append(
+            {
+                "geojson": geojson,
+                "proj": self.proj,
+                "geodesic": self.geodesic,
+                "args": args,
+                "kwargs": kwargs,
+            }
+        )
+
+
 class FakeNDVIImage:
     def __init__(self, value: float):
         self.value = value
@@ -111,9 +129,10 @@ def _setup_fake_ee(monkeypatch, module, values):
         return FakeImageCollection(name, context_copy)
 
     fake_filter = SimpleNamespace(lt=lambda *args, **kwargs: ("lt", args, kwargs))
+    RecordingGeometry.calls = []
     fake_ee = SimpleNamespace(
         ImageCollection=fake_image_collection,
-        Geometry=lambda geom: geom,
+        Geometry=RecordingGeometry,
         Filter=fake_filter,
     )
 
@@ -132,7 +151,12 @@ def test_export_ndvi_range_preserves_negatives(monkeypatch):
     assert image.value == pytest.approx(-0.4)
     assert image.resample_method == "bilinear"
     assert image.reproject_args == ("EPSG:3857", None, 10)
-    assert image.clipped_geom == {"type": "Point", "coordinates": [0, 0]}
+    assert isinstance(image.clipped_geom, RecordingGeometry)
+    assert image.clipped_geom.geojson == {"type": "Point", "coordinates": [0, 0]}
+    assert RecordingGeometry.calls, "Expected ee.Geometry to be invoked"
+    first_call = RecordingGeometry.calls[0]
+    assert first_call["proj"] == "EPSG:4326"
+    assert first_call["geodesic"] is False
 
     # Updating context should not affect the already computed image
     context["values"] = [-0.1, 0.2]
@@ -148,7 +172,8 @@ def test_tile_ndvi_images_allow_negative_values(monkeypatch):
     assert annual.value == pytest.approx(-0.6)
     assert annual.resample_method == "bilinear"
     assert annual.reproject_args is None
-    assert annual.clipped_geom == {"type": "Polygon", "coordinates": []}
+    assert isinstance(annual.clipped_geom, RecordingGeometry)
+    assert annual.clipped_geom.geojson == {"type": "Polygon", "coordinates": []}
 
     context["values"] = [-0.7, 0.1]
     month = tiles.ndvi_month_image({"type": "Polygon", "coordinates": []}, 2021, 5)
@@ -157,5 +182,10 @@ def test_tile_ndvi_images_allow_negative_values(monkeypatch):
     assert month.value == pytest.approx(-0.3)
     assert month.resample_method == "bilinear"
     assert month.reproject_args is None
-    assert month.clipped_geom == {"type": "Polygon", "coordinates": []}
+    assert isinstance(month.clipped_geom, RecordingGeometry)
+    assert month.clipped_geom.geojson == {"type": "Polygon", "coordinates": []}
     assert annual.value == pytest.approx(-0.6)
+    assert RecordingGeometry.calls, "Expected ee.Geometry to be invoked"
+    for call in RecordingGeometry.calls:
+        assert call["proj"] == "EPSG:4326"
+        assert call["geodesic"] is False

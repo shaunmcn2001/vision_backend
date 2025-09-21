@@ -51,7 +51,7 @@ def compute_monthly_ndvi(
     crs: str | None = DEFAULT_REDUCE_REGION_CRS,
 ):
     init_ee()
-    geom = ee.Geometry(geometry)
+    geom = ee.Geometry(geometry, proj="EPSG:4326", geodesic=False)
     coll = (ee.ImageCollection(collection)
             .filterBounds(geom)
             .filterDate(f"{year}-01-01", f"{year}-12-31")

@@ -92,7 +92,7 @@ def _extract_tif(payload: bytes, content_type: Optional[str]) -> bytes:
 
 
 def _ndvi_image_for_range(geometry_geojson: dict, start_iso: str, end_iso: str) -> Tuple[ee.ImageCollection, ee.Image]:
-    geom = ee.Geometry(geometry_geojson)
+    geom = ee.Geometry(geometry_geojson, proj="EPSG:4326", geodesic=False)
     collection = (
         ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
         .filterBounds(geom)
@@ -154,7 +154,9 @@ async def export_geotiffs(
     if geometry and download_crs == "EPSG:3857":
         try:
             download_region = (
-                ee.Geometry(geometry).transform(download_crs, maxError=1).getInfo()
+                ee.Geometry(geometry, proj="EPSG:4326", geodesic=False)
+                .transform(download_crs, maxError=1)
+                .getInfo()
             )
         except EEException as exc:
             raise HTTPException(
