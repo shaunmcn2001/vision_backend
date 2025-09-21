@@ -366,13 +366,13 @@ def shapefile_zip_to_geojson(
                     warnings.append(heuristic_warning)
                     logger.warning(heuristic_warning)
             else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Missing CRS (.prj) and no source_epsg provided. Include the .prj in the ZIP or pass "
-                        "source_epsg=<EPSG code>."
-                    ),
+                source_crs = WGS84_CRS
+                fallback_warning = (
+                    "Shapefile ZIP is missing projection information; defaulting to EPSG:4326 (WGS84) because no CRS metadata was provided."
+                    " Provide the .prj file in the ZIP or pass source_epsg=<EPSG code> to avoid this assumption."
                 )
+                warnings.append(fallback_warning)
+                logger.warning(fallback_warning)
 
         target_crs = WGS84_CRS
         transformer: Transformer | None = None

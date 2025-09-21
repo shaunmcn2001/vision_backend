@@ -32,6 +32,7 @@ artifacts when comparing the GeoTIFFs against vector boundaries.
 
 
 ## Updates
+- 2025-09-26: Restored the shapefile CRS fallback to EPSG:4326 when metadata is missing, logging a client warning about the assumption, updated shapefile utility tests, ran `pytest services/backend/tests/test_shapefile_utils.py -q` (pass); `ruff check .` / `ruff format --check .` still flag longstanding import/formatting issues, and `mypy services/backend` continues to fail because dependencies lack typing stubs.
 - 2025-09-25: Replaced the shapefile CRS fallback with an explicit HTTP 400 requiring projection metadata and updated the shapefile utility tests.
   Ran `pytest services/backend/tests/test_shapefile_utils.py -q` (pass), while `ruff check .` / `ruff format --check .` still surface longstanding import/formatting violations, and `mypy services/backend` continues to fail because core dependencies and legacy modules lack typing support.
 - 2025-09-24: Defaulted shapefile uploads without CRS metadata to EPSG:4326 with client-facing warnings, updated shapefile util tests for the new fallback, ran `pytest services/backend/tests/test_shapefile_utils.py -q` (pass), noted that `ruff check .` and `ruff format --check .` still flag longstanding import/formatting issues in legacy modules, and `mypy services/backend` continues to fail because project dependencies like shapely/pyshp/google-cloud lack bundled typing stubs.

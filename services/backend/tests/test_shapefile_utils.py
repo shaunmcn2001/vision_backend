@@ -3,7 +3,6 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
 import shapefile  # pyshp
 from pyproj import CRS, Transformer
 from shapely.geometry import shape
@@ -237,12 +236,13 @@ def test_shapefile_zip_to_geojson_missing_prj_without_inference(tmp_path):
         for ext in ("shp", "shx", "dbf"):
             zf.write(str(base_path.with_suffix(f".{ext}")), arcname=f"test_polygon_missing_metadata.{ext}")
 
-    with pytest.raises(HTTPException) as excinfo:
-        shapefile_zip_to_geojson(zip_path.read_bytes())
+    geojson, warnings = shapefile_zip_to_geojson(zip_path.read_bytes())
 
-    error = excinfo.value
-    assert error.status_code == 400
-    assert (
-        error.detail
-        == "Missing CRS (.prj) and no source_epsg provided. Include the .prj in the ZIP or pass source_epsg=<EPSG code>."
+    expected_warning = (
+        "Shapefile ZIP is missing projection information; defaulting to EPSG:4326 (WGS84) because no CRS metadata was provided."
+        " Provide the .prj file in the ZIP or pass source_epsg=<EPSG code> to avoid this assumption."
     )
+    assert warnings == [expected_warning]
+
+    geom = shape(geojson)
+    assert geom.geom_type == "MultiPolygon"
