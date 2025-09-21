@@ -220,7 +220,7 @@ def test_shapefile_zip_to_geojson_missing_prj_with_epsg(tmp_path):
         assert lat == pytest.approx(expected_lat, abs=1e-6)
 
 
-def test_shapefile_zip_to_geojson_missing_prj_without_inference(tmp_path):
+def test_shapefile_zip_to_geojson_missing_prj_without_inference(tmp_path, caplog):
     ambiguous_coords = [
         (500.0, 500.0),
         (500.0, 510.0),
@@ -237,11 +237,16 @@ def test_shapefile_zip_to_geojson_missing_prj_without_inference(tmp_path):
         for ext in ("shp", "shx", "dbf"):
             zf.write(str(base_path.with_suffix(f".{ext}")), arcname=f"test_polygon_missing_metadata.{ext}")
 
-    with pytest.raises(HTTPException) as exc_info:
-        shapefile_zip_to_geojson(zip_path.read_bytes())
+    with caplog.at_level("WARNING"):
+        with pytest.raises(HTTPException) as exc_info:
+            shapefile_zip_to_geojson(zip_path.read_bytes())
 
     assert exc_info.value.status_code == 400
-    assert (
-        exc_info.value.detail
-        == "Missing CRS (.prj) and no source_epsg provided. Include the .prj in the ZIP or pass source_epsg=<EPSG code>."
+    detail = exc_info.value.detail
+    assert detail.startswith(
+        "Missing CRS (.prj) and no source_epsg provided. Include the .prj in the ZIP or pass source_epsg=<EPSG code>."
     )
+    assert "Detector hint" in detail
+    assert "projected/metre-like" in detail
+    assert "Observed bounds: [500.00, 500.00]–[510.00, 510.00]" in detail
+    assert any(record.message == detail for record in caplog.records)
