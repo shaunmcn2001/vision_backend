@@ -1,3 +1,4 @@
+from datetime import date
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import ee, os
@@ -45,6 +46,9 @@ def ndvi_monthly(req: NDVIRequest):
             .filterDate(req.start, req.end)
         )
 
+        start_date = date.fromisoformat(req.start[:10])
+        end_date = date.fromisoformat(req.end[:10])
+
         def add_ndvi(img):
             ndvi = img.normalizedDifference(["B8", "B4"]).rename("NDVI")
             return img.addBands(ndvi)
@@ -52,19 +56,34 @@ def ndvi_monthly(req: NDVIRequest):
         with_ndvi = collection.map(add_ndvi)
 
         # compute per-calendar-month means across the requested period
-        months = ee.List.sequence(1, 12)
+        months = []
+        current_year = start_date.year
+        current_month = start_date.month
+        while (current_year, current_month) <= (end_date.year, end_date.month):
+            months.append(current_month)
+            current_month += 1
+            if current_month > 12:
+                current_month = 1
+                current_year += 1
         results = []
-        for m in months.getInfo():
+        for m in months:
             monthly = with_ndvi.filter(ee.Filter.calendarRange(m, m, "month")).mean().select("NDVI")
-            value = monthly.reduceRegion(
+            ndvi_value = monthly.reduceRegion(
                 reducer=ee.Reducer.mean(),
                 geometry=geom,
                 scale=req.scale,
                 bestEffort=True,
-            ).get("NDVI").getInfo()
+            ).get("NDVI")
+            value = None
+            if ndvi_value is not None:
+                value = ndvi_value.getInfo()
+            if value is None:
+                continue
             results.append({"month": int(m), "ndvi": value})
 
         return {"ok": True, "data": results}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"NDVI failed: {str(e)}")
 
