@@ -368,14 +368,16 @@ def shapefile_zip_to_geojson(
                     warnings.append(heuristic_warning)
                     logger.warning(heuristic_warning)
             else:
+                source_crs = CRS.from_epsg(4326)
                 message = (
-                    "Missing CRS (.prj) and no source_epsg provided. Include the .prj in the ZIP or pass source_epsg=<EPSG code>."
+                    "Missing CRS (.prj) and no source_epsg provided. Defaulting to EPSG:4326 (WGS84)."
+                    " Include the .prj in the ZIP or pass source_epsg=<EPSG code> to avoid this assumption."
                 )
                 suggestion = detect_coordinate_system_suggestion(shapes)
                 if suggestion is not None:
                     message = f"{message} {suggestion.human_readable_hint}"
+                warnings.append(message)
                 logger.warning(message)
-                raise HTTPException(status_code=400, detail=message)
 
         target_crs = WGS84_CRS
         transformer: Transformer | None = None

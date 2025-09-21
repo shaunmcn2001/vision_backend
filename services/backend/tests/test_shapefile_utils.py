@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 import shapefile  # pyshp
-from fastapi import HTTPException
 from pyproj import CRS, Transformer
 from shapely.geometry import shape
 
@@ -238,15 +237,26 @@ def test_shapefile_zip_to_geojson_missing_prj_without_inference(tmp_path, caplog
             zf.write(str(base_path.with_suffix(f".{ext}")), arcname=f"test_polygon_missing_metadata.{ext}")
 
     with caplog.at_level("WARNING"):
-        with pytest.raises(HTTPException) as exc_info:
-            shapefile_zip_to_geojson(zip_path.read_bytes())
+        geojson, warnings = shapefile_zip_to_geojson(zip_path.read_bytes())
 
-    assert exc_info.value.status_code == 400
-    detail = exc_info.value.detail
-    assert detail.startswith(
-        "Missing CRS (.prj) and no source_epsg provided. Include the .prj in the ZIP or pass source_epsg=<EPSG code>."
+    assert len(warnings) == 1
+    warning = warnings[0]
+    expected_prefix = (
+        "Missing CRS (.prj) and no source_epsg provided. Defaulting to EPSG:4326 (WGS84)."
+        " Include the .prj in the ZIP or pass source_epsg=<EPSG code> to avoid this assumption."
     )
-    assert "Detector hint" in detail
-    assert "projected/metre-like" in detail
-    assert "Observed bounds: [500.00, 500.00]–[510.00, 510.00]" in detail
-    assert any(record.message == detail for record in caplog.records)
+    assert warning.startswith(expected_prefix)
+    assert "Detector hint" in warning
+    assert "projected/metre-like" in warning
+    assert "Observed bounds: [500.00, 500.00]–[510.00, 510.00]" in warning
+    assert any(record.message == warning for record in caplog.records)
+
+    geom = shape(geojson)
+    assert geom.geom_type == "MultiPolygon"
+    polygon = list(geom.geoms)[0]
+    converted_coords = list(polygon.exterior.coords)
+
+    assert len(converted_coords) == len(ambiguous_coords)
+    for (expected_lon, expected_lat), (lon, lat) in zip(ambiguous_coords, converted_coords):
+        assert lon == pytest.approx(expected_lon, abs=1e-6)
+        assert lat == pytest.approx(expected_lat, abs=1e-6)
