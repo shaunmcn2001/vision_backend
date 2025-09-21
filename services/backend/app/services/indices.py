@@ -26,10 +26,19 @@ class IndexDefinition:
     band_name: str
     valid_range: Tuple[float, float] | None
     compute: IndexComputer
+    default_palette: Tuple[str, ...] | None = None
     parameter_builder: ParameterBuilder = field(default=_default_parameter_builder)
 
     def prepare_parameters(self, params: Mapping[str, Any] | None = None) -> Dict[str, Any]:
         return self.parameter_builder(params)
+
+    def default_visualization(self) -> Dict[str, Any]:
+        vis: Dict[str, Any] = {"bands": [self.band_name]}
+        if self.valid_range is not None:
+            vis["min"], vis["max"] = self.valid_range
+        if self.default_palette is not None:
+            vis["palette"] = list(self.default_palette)
+        return vis
 
 
 def _normalized_difference(band_pair: Tuple[str, str], name: str) -> IndexComputer:
@@ -74,24 +83,43 @@ def _compute_ndre(image: ee.Image, params: Mapping[str, Any]) -> ee.Image:
 SUPPORTED_INDICES: Tuple[str, ...] = ("ndvi", "evi", "gndvi", "ndre")
 
 
+DEFAULT_VEGETATION_PALETTE: Tuple[str, ...] = (
+    "440154",
+    "482173",
+    "433E85",
+    "38598C",
+    "2D708E",
+    "25858E",
+    "1E9B8A",
+    "2BB07F",
+    "51C56A",
+    "85D54A",
+    "C2DF23",
+    "FDE725",
+)
+
+
 INDEX_DEFINITIONS: Dict[str, IndexDefinition] = {
     "ndvi": IndexDefinition(
         code="ndvi",
         band_name="NDVI",
         valid_range=(-1.0, 1.0),
         compute=_normalized_difference(("B8", "B4"), "NDVI"),
+        default_palette=DEFAULT_VEGETATION_PALETTE,
     ),
     "evi": IndexDefinition(
         code="evi",
         band_name="EVI",
         valid_range=(-1.0, 1.0),
         compute=_compute_evi,
+        default_palette=DEFAULT_VEGETATION_PALETTE,
     ),
     "gndvi": IndexDefinition(
         code="gndvi",
         band_name="GNDVI",
         valid_range=(-1.0, 1.0),
         compute=_normalized_difference(("B8", "B3"), "GNDVI"),
+        default_palette=DEFAULT_VEGETATION_PALETTE,
     ),
     "ndre": IndexDefinition(
         code="ndre",
@@ -99,6 +127,7 @@ INDEX_DEFINITIONS: Dict[str, IndexDefinition] = {
         valid_range=(-1.0, 1.0),
         compute=_compute_ndre,
         parameter_builder=_prepare_ndre_parameters,
+        default_palette=DEFAULT_VEGETATION_PALETTE,
     ),
 }
 
