@@ -128,6 +128,7 @@ def create_job(
     scale_m: int,
     cloud_prob_max: int,
 ) -> ExportJob:
+    gee.initialize()
     geometry = gee.geometry_from_geojson(aoi_geojson)
     safe_name = sanitize_name(aoi_name or "aoi")
     job_id = uuid.uuid4().hex
