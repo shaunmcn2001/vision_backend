@@ -1,7 +1,7 @@
 import io
 import zipfile
 from datetime import date, datetime, timedelta
-from typing import Dict, Iterator, Mapping, Optional, Tuple
+from typing import Dict, Iterator, List, Mapping, Optional, Tuple
 import urllib.error
 import urllib.request
 
@@ -11,6 +11,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
+from app import exports, indices as sentinel_indices
 from app.services.indices import UnsupportedIndexError, resolve_index
 from app.services.tiles import init_ee
 from app.utils.shapefile import shapefile_zip_to_geojson
@@ -21,6 +22,7 @@ _CLOUD_COVER_THRESHOLD = 60
 
 
 router = APIRouter()
+sentinel2_router = APIRouter(prefix="/export/s2", tags=["sentinel-2"])
 
 
 def _parse_iso_date(label: str, value: str) -> date:
@@ -240,3 +242,90 @@ async def export_geotiffs(
         "X-Vegetation-Index": definition.code,
     }
     return StreamingResponse(output_buffer, media_type="application/zip", headers=headers)
+
+
+def _derive_month_list(start: date, end: date) -> List[str]:
+    months: List[str] = []
+    for year, month, _, _ in _iter_month_ranges(start, end):
+        label = f"{year:04d}-{month:02d}"
+        if label not in months:
+            months.append(label)
+    return months
+
+
+def _normalise_indices(values: List[str]) -> List[str]:
+    if not values:
+        raise HTTPException(status_code=400, detail="At least one index must be specified.")
+
+    cleaned: List[str] = []
+    for value in values:
+        upper = value.upper()
+        if upper not in sentinel_indices.SUPPORTED_INDICES:
+            raise HTTPException(status_code=400, detail=f"Unsupported index: {value}")
+        if upper not in cleaned:
+            cleaned.append(upper)
+    return cleaned
+
+
+@sentinel2_router.post("/indices/upload")
+async def queue_sentinel2_exports(
+    start_date: str = Form(...),
+    end_date: str = Form(...),
+    indices: List[str] = Form(...),
+    file: UploadFile = File(..., description="Shapefile ZIP archive"),
+    aoi_name: str = Form(""),
+    export_target: str = Form("zip"),
+    scale_m: int = Form(10),
+    cloud_prob_max: int = Form(40),
+):
+    filename = (file.filename or "").lower()
+    if not filename.endswith(".zip"):
+        raise HTTPException(status_code=415, detail="Upload must be a shapefile ZIP archive (.zip).")
+
+    start = _parse_iso_date("start_date", start_date)
+    end = _parse_iso_date("end_date", end_date)
+    if start > end:
+        raise HTTPException(status_code=400, detail="start_date must be on or before end_date.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded shapefile ZIP is empty.")
+
+    try:
+        geometry = shapefile_zip_to_geojson(content)
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=400, detail=f"Failed to parse shapefile ZIP: {exc}") from exc
+
+    months = _derive_month_list(start, end)
+    if not months:
+        raise HTTPException(status_code=400, detail="No months found within the requested date range.")
+
+    index_list = _normalise_indices(indices)
+
+    target = export_target.strip().lower() if isinstance(export_target, str) else "zip"
+    if target not in {"zip", "gcs", "drive"}:
+        raise HTTPException(status_code=400, detail="export_target must be one of: zip, gcs, drive.")
+
+    if scale_m <= 0:
+        raise HTTPException(status_code=400, detail="scale_m must be positive.")
+    if cloud_prob_max < 0 or cloud_prob_max > 100:
+        raise HTTPException(status_code=400, detail="cloud_prob_max must be between 0 and 100.")
+
+    try:
+        job = exports.create_job(
+            aoi_geojson=geometry,
+            months=months,
+            index_names=index_list,
+            export_target=target,
+            aoi_name=aoi_name,
+            scale_m=scale_m,
+            cloud_prob_max=cloud_prob_max,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=400, detail=f"Failed to queue export: {exc}") from exc
+
+    return {"job_id": job.job_id, "state": job.state}
