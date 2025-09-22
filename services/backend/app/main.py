@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -5,6 +7,8 @@ from app.api.routes import router as api_router
 from app.api.fields import router as fields_router
 from app.api.fields_upload import router as fields_upload_router
 from app.api.tiles import router as tiles_router
+from app.api.s2_indices import router as s2_indices_router
+from app import gee
 import os
 
 app = FastAPI(
@@ -22,6 +26,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+logger = logging.getLogger(__name__)
+
+
+@app.on_event("startup")
+def _startup_init_gee() -> None:
+    """Initialise Earth Engine once the application starts."""
+    try:
+        gee.initialize()
+        logger.info("Earth Engine initialised for Sentinel-2 exports")
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.warning("Earth Engine initialisation skipped: %s", exc)
 
 @app.get("/healthz")
 def healthz():
@@ -276,4 +292,5 @@ app.include_router(api_router, prefix="/api")
 app.include_router(fields_router, prefix="/api/fields")
 app.include_router(fields_upload_router, prefix="/api/fields")
 app.include_router(tiles_router, prefix="/api")
+app.include_router(s2_indices_router)
 
