@@ -3,6 +3,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from app.api.export import sentinel2_router as export_shapefile_router
 from app.api.routes import router as api_router
 from app.api.fields import router as fields_router
 from app.api.fields_upload import router as fields_upload_router
@@ -603,4 +604,5 @@ app.include_router(fields_router, prefix="/api/fields")
 app.include_router(fields_upload_router, prefix="/api/fields")
 app.include_router(tiles_router, prefix="/api")
 app.include_router(s2_indices_router)
+app.include_router(export_shapefile_router)
 
