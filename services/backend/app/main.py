@@ -115,6 +115,11 @@ def export_ui():
         font: inherit;
         background: #ffffff;
       }
+      select,
+      select option {
+        color: #1f2933;
+        background-color: #ffffff;
+      }
       input[type="file"] {
         padding: 0.5rem;
       }
