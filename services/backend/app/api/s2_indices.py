@@ -121,13 +121,15 @@ class Sentinel2ExportRequest(BaseModel):
     def _validate_indices(cls, value: List[str]) -> List[str]:
         if not value:
             raise ValueError("At least one index must be specified")
-        normalised = []
+        canonical_lookup = {name.lower(): name for name in indices.SUPPORTED_INDICES}
+        normalised: List[str] = []
         for index in value:
-            upper = index.upper()
-            if upper not in indices.SUPPORTED_INDICES:
+            key = str(index).strip()
+            canonical = canonical_lookup.get(key.lower())
+            if canonical is None:
                 raise ValueError(f"Unsupported index: {index}")
-            if upper not in normalised:
-                normalised.append(upper)
+            if canonical not in normalised:
+                normalised.append(canonical)
         return normalised
 
     @validator("scale_m")
