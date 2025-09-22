@@ -333,11 +333,11 @@ def export_ui():
       };
 
       const uploadAndFetchGeometry = async (file, aoiName, headers) => {
-        const uploadUrl = buildUrl('api/fields/upload');
+        const uploadUrl = buildUrl('export/s2/indices/aoi');
         const formData = new FormData();
         formData.append('file', file);
         if (aoiName) {
-          formData.append('name', aoiName);
+          formData.append('aoi_name', aoiName);
         }
         const uploadResponse = await fetch(uploadUrl, {
           method: 'POST',
@@ -347,24 +347,11 @@ def export_ui():
         if (!uploadResponse.ok) {
           throw new Error(await readError(uploadResponse));
         }
-        const uploadData = await uploadResponse.json();
-        const fieldId = uploadData.id || uploadData.field_id;
-        if (!fieldId) {
-          throw new Error('Upload succeeded but no field identifier was returned.');
+        const payload = await uploadResponse.json();
+        if (!payload || !payload.geometry) {
+          throw new Error('AOI geometry was not returned by the server.');
         }
-
-        const detailResponse = await fetch(buildUrl(`api/fields/${fieldId}`), {
-          method: 'GET',
-          headers,
-        });
-        if (!detailResponse.ok) {
-          throw new Error(await readError(detailResponse));
-        }
-        const detail = await detailResponse.json();
-        if (!detail.geometry) {
-          throw new Error('Field geometry was not returned by the server.');
-        }
-        return detail.geometry;
+        return payload;
       };
 
       const updateProgress = (job, exportTarget) => {
@@ -533,7 +520,12 @@ def export_ui():
         submitButton.disabled = true;
 
         try {
-          const geometry = await uploadAndFetchGeometry(fileInput.files[0], aoiName, headers);
+          const aoiPayload = await uploadAndFetchGeometry(fileInput.files[0], aoiName, headers);
+          const { geometry, aoi_name: sanitizedAoiName } = aoiPayload;
+          const jobAoiName = sanitizedAoiName || aoiName;
+          if (sanitizedAoiName && sanitizedAoiName !== aoiName) {
+            console.info(`AOI name sanitised to "${sanitizedAoiName}" for export filenames.`);
+          }
 
           setStatus('Queueing Sentinel-2 export job…', 'pending');
 
@@ -545,7 +537,7 @@ def export_ui():
               months,
               indices: selectedIndices,
               export_target: exportTarget,
-              aoi_name: aoiName,
+              aoi_name: jobAoiName,
             }),
           });
 
