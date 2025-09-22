@@ -21,7 +21,14 @@ from app.services import tiles
 def test_export_ndvi_range_preserves_negatives(monkeypatch):
     context = setup_fake_ee(monkeypatch, export, [-0.6, -0.2])
 
-    _, image = export._ndvi_image_for_range({"type": "Point", "coordinates": [0, 0]}, "2024-01-01", "2024-02-01")
+    definition, params = export.resolve_index("ndvi")
+    _, image = export._index_image_for_range(
+        {"type": "Point", "coordinates": [0, 0]},
+        "2024-01-01",
+        "2024-02-01",
+        definition=definition,
+        parameters=params,
+    )
 
     assert isinstance(image, FakeMeanImage)
     assert image.clamped_to == (-1, 1)

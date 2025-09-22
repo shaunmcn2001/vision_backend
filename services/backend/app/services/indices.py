@@ -28,6 +28,7 @@ class IndexDefinition:
     compute: IndexComputer
     default_palette: Tuple[str, ...] | None = None
     parameter_builder: ParameterBuilder = field(default=_default_parameter_builder)
+    default_scale: int = 10
 
     def prepare_parameters(self, params: Mapping[str, Any] | None = None) -> Dict[str, Any]:
         return self.parameter_builder(params)
