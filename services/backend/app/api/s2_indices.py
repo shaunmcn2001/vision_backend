@@ -1,17 +1,83 @@
 """API routes for Sentinel-2 index exports."""
 from __future__ import annotations
 
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import List, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, validator
 from shapely.geometry import shape
 
 from app import exports, indices
+from app.utils.geometry import area_ha
+from app.utils.shapefile import shapefile_zip_to_geojson
 
 router = APIRouter(prefix="/export/s2", tags=["sentinel-2"])
+
+
+def _min_field_hectares() -> float:
+    raw_value = os.getenv("MIN_FIELD_HA", "1.0")
+    try:
+        return float(raw_value)
+    except ValueError:  # pragma: no cover - defensive fallback
+        return 1.0
+
+
+@router.post("/indices/aoi")
+async def prepare_aoi_geometry(
+    file: UploadFile = File(
+        ..., description="Zipped ESRI Shapefile containing polygon features"
+    ),
+    aoi_name: str | None = Form(
+        None, description="Optional AOI name to sanitise for export filenames"
+    ),
+    enforce_area: bool = Query(
+        True, description="Reject uploads smaller than MIN_FIELD_HA hectares"
+    ),
+):
+    original_filename = file.filename or ""
+    filename = original_filename.lower()
+    if not filename.endswith(".zip"):
+        raise HTTPException(
+            status_code=415,
+            detail="Unsupported file type. Upload a zipped shapefile (.zip).",
+        )
+
+    content = await file.read()
+
+    try:
+        geometry = shapefile_zip_to_geojson(content)
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=400, detail=f"Failed to parse shapefile: {exc}") from exc
+
+    try:
+        area = area_ha(geometry)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Area calculation failed: {exc}") from exc
+
+    min_area = _min_field_hectares()
+    if enforce_area and area < min_area:
+        raise HTTPException(
+            status_code=400,
+            detail=f"AOI area {area:.2f} ha is smaller than minimum {min_area} ha",
+        )
+
+    provided_name = aoi_name if isinstance(aoi_name, str) else None
+    safe_name = exports.sanitize_name(
+        (provided_name or Path(original_filename).stem or "aoi")
+    )
+
+    response = {
+        "geometry": geometry,
+        "aoi_name": safe_name,
+        "area_ha": round(area, 4),
+    }
+    return response
 
 
 class Sentinel2ExportRequest(BaseModel):
@@ -38,28 +104,28 @@ class Sentinel2ExportRequest(BaseModel):
         return value
 
     @validator("months")
-    def _validate_months(cls, values: List[str]) -> List[str]:
-        if not values:
+    def _validate_months(cls, value: List[str]) -> List[str]:
+        if not value:
             raise ValueError("At least one month must be provided")
         seen = []
-        for value in values:
+        for month in value:
             try:
-                datetime.strptime(value, "%Y-%m")
+                datetime.strptime(month, "%Y-%m")
             except ValueError as exc:
-                raise ValueError(f"Invalid month format: {value}") from exc
-            if value not in seen:
-                seen.append(value)
+                raise ValueError(f"Invalid month format: {month}") from exc
+            if month not in seen:
+                seen.append(month)
         return seen
 
     @validator("indices")
-    def _validate_indices(cls, values: List[str]) -> List[str]:
-        if not values:
+    def _validate_indices(cls, value: List[str]) -> List[str]:
+        if not value:
             raise ValueError("At least one index must be specified")
         normalised = []
-        for value in values:
-            upper = value.upper()
+        for index in value:
+            upper = index.upper()
             if upper not in indices.SUPPORTED_INDICES:
-                raise ValueError(f"Unsupported index: {value}")
+                raise ValueError(f"Unsupported index: {index}")
             if upper not in normalised:
                 normalised.append(upper)
         return normalised
