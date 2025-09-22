@@ -41,11 +41,13 @@ class FakeImage:
 
 
 class FakeMeanImage:
-    def __init__(self, value: float | None):
+    def __init__(self, value: float | None, context: dict[str, Any] | None = None):
         self.value = value
         self.clamped_to: tuple[float, float] | None = None
         self.clipped_geom: Any = None
         self.requested_vis: dict[str, Any] | None = None
+        self.download_args: dict[str, Any] | None = None
+        self._context = context
 
     def clip(self, geom: Any):
         self.clipped_geom = geom
@@ -53,6 +55,9 @@ class FakeMeanImage:
 
     def clamp(self, low: float, high: float):
         self.clamped_to = (low, high)
+        if self._context is not None:
+            log = self._context.setdefault("log", {})
+            log.setdefault("clamp_calls", []).append((low, high))
         if self.value is None:
             return self
         if self.value < low:
@@ -60,6 +65,13 @@ class FakeMeanImage:
         elif self.value > high:
             self.value = high
         return self
+
+    def getDownloadURL(self, params: dict[str, Any]):
+        self.download_args = params
+        if self._context is not None:
+            log = self._context.setdefault("log", {})
+            log.setdefault("download_args", []).append(params)
+        return "https://example.com/download"
 
     def getMapId(self, vis: dict[str, Any]):
         self.requested_vis = vis
@@ -112,7 +124,11 @@ class FakeImageCollection:
             for img in self.images
         ]
         mean_val = sum(values) / len(values) if values else None
-        return FakeMeanImage(mean_val)
+        return FakeMeanImage(mean_val, self.context)
+
+    def size(self):
+        count = len(self.images)
+        return SimpleNamespace(getInfo=lambda: count)
 
 
 def setup_fake_ee(monkeypatch, module, values: Iterable[float]):
