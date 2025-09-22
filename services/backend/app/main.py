@@ -62,7 +62,7 @@ def export_ui():
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>NDVI Export</title>
+    <title>Sentinel-2 Index Export</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -73,9 +73,9 @@ def export_ui():
         background: #f7f7f7;
       }
       .container {
-        max-width: 640px;
+        max-width: 720px;
         margin: 4rem auto;
-        padding: 2.5rem;
+        padding: 2.75rem;
         background: #ffffff;
         border-radius: 12px;
         box-shadow: 0 12px 40px rgba(15, 23, 42, 0.08);
@@ -96,7 +96,7 @@ def export_ui():
       }
       form {
         display: grid;
-        gap: 1.25rem;
+        gap: 1.35rem;
       }
       label {
         display: grid;
@@ -107,21 +107,26 @@ def export_ui():
       input[type="date"],
       input[type="text"],
       input[type="file"],
-      button {
-        font: inherit;
-      }
-      input[type="date"],
-      input[type="text"],
-      input[type="file"] {
+      select {
         padding: 0.65rem 0.75rem;
         border: 1px solid #cbd5e1;
         border-radius: 8px;
+        font: inherit;
+        background: #ffffff;
       }
       input[type="file"] {
         padding: 0.5rem;
       }
+      select[multiple] {
+        min-height: 10rem;
+      }
+      .hint {
+        font-weight: 400;
+        font-size: 0.85rem;
+        color: #64748b;
+      }
       button {
-        padding: 0.85rem 1.5rem;
+        padding: 0.85rem 1.6rem;
         border: none;
         border-radius: 999px;
         background: #2563eb;
@@ -129,12 +134,17 @@ def export_ui():
         font-weight: 600;
         cursor: pointer;
         transition: background 0.2s ease;
+        font: inherit;
       }
       button:hover {
         background: #1d4ed8;
       }
+      button:disabled {
+        background: #94a3b8;
+        cursor: not-allowed;
+      }
       #status {
-        min-height: 1.5rem;
+        min-height: 1.75rem;
         font-size: 0.95rem;
         text-align: center;
       }
@@ -151,15 +161,18 @@ def export_ui():
   </head>
   <body>
     <main class="container">
-      <h1>Download Monthly NDVI</h1>
+      <h1>Sentinel-2 Index Export</h1>
       <p class="instructions">
-        Upload a zipped shapefile bundle containing .shp, .dbf, and .shx files, set your
-        date range, and submit to receive a ZIP file of monthly NDVI GeoTIFFs.
+        Upload a zipped shapefile bundle containing .shp, .dbf, and .shx files, choose your
+        date range, pick the vegetation indices to include, and select the export destination.
+        The workflow will queue one export per month for every index, so a broader date range
+        or more indices means more GeoTIFFs will be built for you.
       </p>
       <form id="export-form" novalidate>
         <label for="file">
           Shapefile archive (.zip)
           <input id="file" name="file" type="file" accept=".zip" required />
+          <span class="hint">Include the .shp, .dbf, and .shx members in a single ZIP file.</span>
         </label>
         <label for="start_date">
           Start date
@@ -168,6 +181,47 @@ def export_ui():
         <label for="end_date">
           End date
           <input id="end_date" name="end_date" type="date" required />
+          <span class="hint">Every month that overlaps the range will be exported.</span>
+        </label>
+        <label for="aoi_name">
+          AOI name
+          <input id="aoi_name" name="aoi_name" type="text" placeholder="Used in file names" required />
+        </label>
+        <label for="indices">
+          Vegetation indices to export
+          <select id="indices" name="indices" multiple size="10" required>
+            <option value="NDVI" selected>NDVI</option>
+            <option value="EVI">EVI</option>
+            <option value="GNDVI">GNDVI</option>
+            <option value="NDRE">NDRE</option>
+            <option value="SAVI">SAVI</option>
+            <option value="MSAVI">MSAVI</option>
+            <option value="VARI">VARI</option>
+            <option value="MCARI">MCARI</option>
+            <option value="NDWI_McFeeters">NDWI (McFeeters)</option>
+            <option value="NDWI_Gao">NDWI (Gao)</option>
+            <option value="NDMI">NDMI</option>
+            <option value="MSI">MSI</option>
+            <option value="GVMI">GVMI</option>
+            <option value="NBR">NBR</option>
+            <option value="PSRI">PSRI</option>
+            <option value="ARI">ARI</option>
+            <option value="CRI">CRI</option>
+            <option value="BSI">BSI</option>
+            <option value="SBI">SBI</option>
+            <option value="NDSI_Soil">NDSI (Soil)</option>
+            <option value="NDTI">NDTI</option>
+            <option value="PRI">PRI</option>
+          </select>
+          <span class="hint">Hold Ctrl (Windows/Linux) or ⌘ (macOS) to choose multiple indices.</span>
+        </label>
+        <label for="export_target">
+          Export destination
+          <select id="export_target" name="export_target">
+            <option value="zip" selected>Download ZIP</option>
+            <option value="gcs">Google Cloud Storage</option>
+            <option value="drive">Google Drive</option>
+          </select>
         </label>
         <label for="api_key">
           API key (optional)
@@ -179,83 +233,339 @@ def export_ui():
     </main>
     <script>
       const form = document.getElementById('export-form');
-      const status = document.getElementById('status');
+      const statusEl = document.getElementById('status');
+      const submitButton = form.querySelector('button[type="submit"]');
 
       const { origin, pathname } = window.location;
-      const trimmedPath = pathname.endsWith('/') && pathname !== '/' ? pathname.slice(0, -1) : pathname;
-      const basePath = trimmedPath.replace(/\/[^/]*$/, '/') || '/';
-      const apiUrl = new URL(`${basePath}api/export/export`, origin);
-      form.setAttribute('action', apiUrl.toString());
+      const basePath = pathname.replace(/\/[^/]*$/, '/') || '/';
+      const buildUrl = (path) => {
+        const cleaned = path.replace(/^\//, '');
+        return new URL(`${basePath}${cleaned}`, origin);
+      };
+
+      const POLL_INTERVAL_MS = 5000;
+
+      const setStatus = (message, type = 'pending') => {
+        statusEl.textContent = message;
+        statusEl.className = type;
+      };
+
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+      const readError = async (response) => {
+        try {
+          const data = await response.json();
+          if (data) {
+            if (Array.isArray(data.detail)) {
+              return data.detail.join(', ');
+            }
+            if (data.detail) {
+              return data.detail;
+            }
+            if (typeof data.message === 'string') {
+              return data.message;
+            }
+            if (typeof data.error === 'string') {
+              return data.error;
+            }
+          }
+        } catch (error) {
+          // ignore JSON parsing failures and fall back to status text
+        }
+        return response.statusText || `HTTP ${response.status}`;
+      };
+
+      const deriveMonths = (startValue, endValue) => {
+        if (!startValue || !endValue) {
+          throw new Error('Please choose both start and end dates.');
+        }
+        const parseIsoDate = (value) => {
+          const parts = value.split('-').map((part) => Number.parseInt(part, 10));
+          if (parts.length < 3 || parts.some((part) => Number.isNaN(part))) {
+            throw new Error('Dates must be provided in YYYY-MM-DD format.');
+          }
+          const [year, month, day] = parts;
+          return new Date(Date.UTC(year, month - 1, day));
+        };
+        const startDate = parseIsoDate(startValue);
+        const endDate = parseIsoDate(endValue);
+        if (startDate > endDate) {
+          throw new Error('The start date must be on or before the end date.');
+        }
+        const months = [];
+        const current = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), 1));
+        const last = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), 1));
+        while (current <= last) {
+          const year = current.getUTCFullYear();
+          const month = String(current.getUTCMonth() + 1).padStart(2, '0');
+          months.push(`${year}-${month}`);
+          current.setUTCMonth(current.getUTCMonth() + 1);
+        }
+        return months;
+      };
+
+      const uploadAndFetchGeometry = async (file, aoiName, headers) => {
+        const uploadUrl = buildUrl('api/fields/upload');
+        const formData = new FormData();
+        formData.append('file', file);
+        if (aoiName) {
+          formData.append('name', aoiName);
+        }
+        const uploadResponse = await fetch(uploadUrl, {
+          method: 'POST',
+          headers,
+          body: formData,
+        });
+        if (!uploadResponse.ok) {
+          throw new Error(await readError(uploadResponse));
+        }
+        const uploadData = await uploadResponse.json();
+        const fieldId = uploadData.id || uploadData.field_id;
+        if (!fieldId) {
+          throw new Error('Upload succeeded but no field identifier was returned.');
+        }
+
+        const detailResponse = await fetch(buildUrl(`api/fields/${fieldId}`), {
+          method: 'GET',
+          headers,
+        });
+        if (!detailResponse.ok) {
+          throw new Error(await readError(detailResponse));
+        }
+        const detail = await detailResponse.json();
+        if (!detail.geometry) {
+          throw new Error('Field geometry was not returned by the server.');
+        }
+        return detail.geometry;
+      };
+
+      const updateProgress = (job, exportTarget) => {
+        const items = Array.isArray(job.items) ? job.items : [];
+        const total = items.length;
+        const completed = items.filter((item) => item.status === 'completed').length;
+        const failed = items.filter((item) => item.status === 'failed').length;
+        const active = items.filter((item) => !['completed', 'failed'].includes(item.status)).length;
+
+        let message = 'Checking export status…';
+        let type = 'pending';
+
+        switch (job.state) {
+          case 'pending':
+            message = `Export job queued… ${completed} of ${total} ready${failed ? ` (${failed} failed)` : ''}.`;
+            break;
+          case 'running':
+            message = `Building exports: ${completed} of ${total} ready${failed ? ` (${failed} failed)` : ''}${active ? `, ${active} in progress` : ''}.`;
+            break;
+          case 'partial':
+            if (exportTarget === 'zip') {
+              message = `Exports ready with warnings: ${completed} of ${total} available (${failed} failed). Successful files will download as a ZIP.`;
+            } else {
+              message = `Exports ready with warnings: ${completed} of ${total} available (${failed} failed). Destination links will follow.`;
+            }
+            break;
+          case 'completed':
+            message = `Exports ready: ${completed} of ${total} available.`;
+            break;
+          case 'failed':
+            message = job.error ? `Export failed: ${job.error}` : 'Export failed.';
+            type = 'error';
+            break;
+          default:
+            message = `Job status: ${job.state || 'unknown'}.`;
+        }
+
+        setStatus(message, type);
+      };
+
+      const pollJob = async (jobId, exportTarget, headers) => {
+        const statusUrl = buildUrl(`export/s2/${jobId}/status`);
+        while (true) {
+          const response = await fetch(statusUrl, { headers });
+          if (!response.ok) {
+            throw new Error(await readError(response));
+          }
+          const job = await response.json();
+          updateProgress(job, exportTarget);
+
+          if (job.state === 'failed') {
+            throw new Error(job.error || 'Export job failed.');
+          }
+          if (job.state === 'completed' || job.state === 'partial') {
+            return job;
+          }
+
+          await sleep(POLL_INTERVAL_MS);
+        }
+      };
+
+      const downloadZip = async (jobId, headers) => {
+        const response = await fetch(buildUrl(`export/s2/${jobId}/download`), {
+          method: 'GET',
+          headers,
+        });
+        if (!response.ok) {
+          throw new Error(await readError(response));
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get('content-disposition') || '';
+        const match = disposition.match(/filename\*?=(?:UTF-8''|"?)([^";]+)/i);
+        const filename = match ? decodeURIComponent(match[1]) : 'sentinel2_indices.zip';
+
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+      };
+
+      const fetchExportSummary = async (jobId, headers) => {
+        const response = await fetch(buildUrl(`export/s2/${jobId}/download`), {
+          method: 'GET',
+          headers,
+        });
+        if (!response.ok) {
+          throw new Error(await readError(response));
+        }
+        return response.json();
+      };
+
+      let isProcessing = false;
 
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
-        status.textContent = 'Uploading shapefile and starting export…';
-        status.className = 'pending';
+        if (isProcessing) {
+          return;
+        }
 
         const fileInput = document.getElementById('file');
+        const startInput = document.getElementById('start_date');
+        const endInput = document.getElementById('end_date');
+        const aoiNameInput = document.getElementById('aoi_name');
+        const indicesSelect = document.getElementById('indices');
+        const exportTargetSelect = document.getElementById('export_target');
+        const apiKeyInput = document.getElementById('api_key');
+
         if (!fileInput.files.length) {
-          status.textContent = 'Please select a zipped shapefile bundle before submitting.';
-          status.className = 'error';
+          setStatus('Please select a zipped shapefile bundle before submitting.', 'error');
           fileInput.focus();
           return;
         }
 
         if (!form.reportValidity()) {
-          status.textContent = 'Please complete the highlighted fields before submitting.';
-          status.className = 'error';
+          setStatus('Please complete the highlighted fields before submitting.', 'error');
           return;
         }
 
-        const formData = new FormData();
-        formData.append('file', fileInput.files[0]);
-        formData.append('start_date', document.getElementById('start_date').value);
-        formData.append('end_date', document.getElementById('end_date').value);
+        const selectedIndices = Array.from(indicesSelect.selectedOptions).map((option) => option.value);
+        if (!selectedIndices.length) {
+          setStatus('Select at least one vegetation index to export.', 'error');
+          indicesSelect.focus();
+          return;
+        }
 
-        const apiKey = document.getElementById('api_key').value.trim();
+        let months;
+        try {
+          months = deriveMonths(startInput.value, endInput.value);
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : String(error), 'error');
+          return;
+        }
+
+        const apiKey = apiKeyInput.value.trim();
         const headers = apiKey ? { 'x-api-key': apiKey } : {};
+        const exportTarget = exportTargetSelect.value;
+        const aoiName = aoiNameInput.value.trim();
+        const monthCount = months.length;
+        const indexCount = selectedIndices.length;
+
+        setStatus('Uploading shapefile to prepare AOI geometry…', 'pending');
+        isProcessing = true;
+        submitButton.disabled = true;
 
         try {
-          const response = await fetch(apiUrl, {
+          const geometry = await uploadAndFetchGeometry(fileInput.files[0], aoiName, headers);
+
+          setStatus('Queueing Sentinel-2 export job…', 'pending');
+
+          const queueResponse = await fetch(buildUrl('export/s2/indices'), {
             method: 'POST',
-            headers,
-            body: formData,
+            headers: { ...headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              aoi_geojson: geometry,
+              months,
+              indices: selectedIndices,
+              export_target: exportTarget,
+              aoi_name: aoiName,
+            }),
           });
 
-          if (!response.ok) {
-            let message = `Export failed with status ${response.status}`;
-            try {
-              const data = await response.json();
-              if (data && data.detail) {
-                message = Array.isArray(data.detail) ? data.detail.join(', ') : data.detail;
-              }
-            } catch (parseError) {
-              // ignore JSON parsing issues and fall back to default message
-            }
-            status.textContent = message;
-            status.className = 'error';
-            return;
+          if (!queueResponse.ok) {
+            throw new Error(await readError(queueResponse));
           }
 
-          const blob = await response.blob();
-          const disposition = response.headers.get('content-disposition') || '';
-          const match = disposition.match(/filename\*?=(?:UTF-8''|"?)([^";]+)/i);
-          const filename = match ? decodeURIComponent(match[1]) : 'ndvi_export.zip';
+          const data = await queueResponse.json();
+          const jobId = data.job_id;
+          if (!jobId) {
+            throw new Error('Export job did not return an identifier.');
+          }
 
-          const url = window.URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = url;
-          link.download = filename;
-          document.body.appendChild(link);
-          link.click();
-          link.remove();
-          window.URL.revokeObjectURL(url);
+          setStatus('Export job queued. Building composites…', 'pending');
+
+          const finalStatus = await pollJob(jobId, exportTarget, headers);
+
+          if (exportTarget === 'zip') {
+            setStatus('Exports ready. Preparing ZIP download…', 'pending');
+            await downloadZip(jobId, headers);
+          } else {
+            const summary = await fetchExportSummary(jobId, headers);
+            if (summary && Array.isArray(summary.items)) {
+              console.groupCollapsed('Sentinel-2 export destinations');
+              summary.items.forEach((item) => {
+                const destination = item.signed_url || item.destination_uri || 'pending';
+                console.log(`${item.month} ${item.index}: ${destination}`);
+              });
+              console.groupEnd();
+            } else {
+              console.info('Export summary', summary);
+            }
+          }
+
+          const items = Array.isArray(finalStatus.items) ? finalStatus.items : [];
+          const successful = items.filter((item) => item.status === 'completed').length;
+          const failed = items.filter((item) => item.status === 'failed').length;
+          const total = items.length;
+          const monthLabel = monthCount === 1 ? 'month' : 'months';
+          const indexLabel = indexCount === 1 ? 'index' : 'indices';
+          const destinationNote = exportTarget === 'zip' ? '' : ' Destinations have been logged to the browser console.';
+
+          if (failed > 0) {
+            const warningPrefix = exportTarget === 'zip' ? 'Download finished with warnings' : 'Exports finished with warnings';
+            setStatus(
+              `${warningPrefix}: ${successful} of ${total} exports succeeded (${failed} failed) across ${monthCount} ${monthLabel} × ${indexCount} ${indexLabel}.${destinationNote}`,
+              'success'
+            );
+          } else {
+            const completionPrefix = exportTarget === 'zip' ? 'Download complete' : 'Exports complete';
+            const summary = exportTarget === 'zip'
+              ? `${successful} Sentinel-2 exports built for ${monthCount} ${monthLabel} × ${indexCount} ${indexLabel}`
+              : `${successful} Sentinel-2 exports available for ${monthCount} ${monthLabel} × ${indexCount} ${indexLabel}`;
+            setStatus(
+              `${completionPrefix}! ${summary}.${destinationNote}`,
+              'success'
+            );
+          }
 
           form.reset();
-          status.textContent = 'Export successful! Your download should begin shortly.';
-          status.className = 'success';
         } catch (error) {
-          status.textContent = `Unexpected error: ${error}`;
-          status.className = 'error';
+          console.error('Export workflow failed', error);
+          const message = error instanceof Error ? error.message : String(error);
+          setStatus(`Export failed: ${message}`, 'error');
+        } finally {
+          submitButton.disabled = false;
+          isProcessing = false;
         }
       });
     </script>
