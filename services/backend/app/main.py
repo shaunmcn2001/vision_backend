@@ -406,7 +406,7 @@ def export_ui():
       };
 
       const pollJob = async (jobId, exportTarget, headers) => {
-        const statusUrl = buildUrl(`export/s2/${jobId}/status`);
+        const statusUrl = buildUrl(`export/s2/indices/${jobId}/status`);
         while (true) {
           const response = await fetch(statusUrl, { headers });
           if (!response.ok) {
@@ -427,7 +427,7 @@ def export_ui():
       };
 
       const downloadZip = async (jobId, headers) => {
-        const response = await fetch(buildUrl(`export/s2/${jobId}/download`), {
+        const response = await fetch(buildUrl(`export/s2/indices/${jobId}/download`), {
           method: 'GET',
           headers,
         });
@@ -450,7 +450,7 @@ def export_ui():
       };
 
       const fetchExportSummary = async (jobId, headers) => {
-        const response = await fetch(buildUrl(`export/s2/${jobId}/download`), {
+        const response = await fetch(buildUrl(`export/s2/indices/${jobId}/download`), {
           method: 'GET',
           headers,
         });
