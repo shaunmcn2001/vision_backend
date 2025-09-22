@@ -1,7 +1,7 @@
 import io
 import zipfile
 from datetime import date, datetime, timedelta
-from typing import Iterator, Optional, Tuple
+from typing import Dict, Iterator, Mapping, Optional, Tuple
 import urllib.error
 import urllib.request
 
@@ -11,8 +11,13 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
+from app.services.indices import UnsupportedIndexError, resolve_index
 from app.services.tiles import init_ee
 from app.utils.shapefile import shapefile_zip_to_geojson
+
+
+DEFAULT_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
+_CLOUD_COVER_THRESHOLD = 60
 
 
 router = APIRouter()
@@ -91,17 +96,47 @@ def _extract_tif(payload: bytes, content_type: Optional[str]) -> bytes:
         raise HTTPException(status_code=502, detail="Earth Engine response was not a valid ZIP archive.") from exc
 
 
-def _ndvi_image_for_range(geometry_geojson: dict, start_iso: str, end_iso: str) -> Tuple[ee.ImageCollection, ee.Image]:
+def _index_collection_for_range(
+    geometry_geojson: dict,
+    start_iso: str,
+    end_iso: str,
+    *,
+    definition,
+    parameters: Mapping[str, object],
+    collection_name: str = DEFAULT_COLLECTION,
+):
     geom = ee.Geometry(geometry_geojson)
     collection = (
-        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+        ee.ImageCollection(collection_name)
         .filterBounds(geom)
         .filterDate(start_iso, end_iso)
-        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 60))
-        .map(lambda img: img.addBands(img.normalizedDifference(["B8", "B4"]).rename("NDVI")))
+        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", _CLOUD_COVER_THRESHOLD))
+        .map(lambda img: img.addBands(definition.compute(img, parameters)))
     )
-    image = collection.select("NDVI").mean().clip(geom)
-    image = image.clamp(-1, 1)
+    return geom, collection
+
+
+def _index_image_for_range(
+    geometry_geojson: dict,
+    start_iso: str,
+    end_iso: str,
+    *,
+    definition,
+    parameters: Mapping[str, object],
+    collection_name: str = DEFAULT_COLLECTION,
+) -> Tuple[ee.ImageCollection, ee.Image]:
+    geom, collection = _index_collection_for_range(
+        geometry_geojson,
+        start_iso,
+        end_iso,
+        definition=definition,
+        parameters=parameters,
+        collection_name=collection_name,
+    )
+    image = collection.select(definition.band_name).mean().clip(geom)
+    if definition.valid_range is not None:
+        low, high = definition.valid_range
+        image = image.clamp(low, high)
     return collection, image
 
 
@@ -110,6 +145,7 @@ async def export_geotiffs(
     start_date: str = Form(...),
     end_date: str = Form(...),
     file: UploadFile = File(..., description="Shapefile ZIP archive"),
+    index: str = Form("ndvi"),
 ):
     filename = (file.filename or "").lower()
     if not filename.endswith(".zip"):
@@ -132,6 +168,11 @@ async def export_geotiffs(
         raise HTTPException(status_code=400, detail=f"Failed to parse shapefile ZIP: {exc}") from exc
 
     try:
+        definition, resolved_parameters = resolve_index(index)
+    except UnsupportedIndexError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
         init_ee()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to initialize Earth Engine: {exc}") from exc
@@ -145,30 +186,45 @@ async def export_geotiffs(
             end_iso = period_end.isoformat()
 
             try:
-                collection, image = _ndvi_image_for_range(geometry, start_iso, end_iso)
+                collection, image = _index_image_for_range(
+                    geometry,
+                    start_iso,
+                    end_iso,
+                    definition=definition,
+                    parameters=resolved_parameters,
+                )
             except EEException as exc:
-                raise HTTPException(status_code=502, detail=f"Failed to build NDVI image for {year}-{month:02d}: {exc}") from exc
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to build {definition.band_name} image for {year}-{month:02d}: {exc}",
+                ) from exc
 
             size = await run_in_threadpool(_collection_size, collection)
             if size == 0:
-                raise HTTPException(status_code=404, detail=f"No imagery available for {year}-{month:02d}.")
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No {definition.code.upper()} imagery available for {year}-{month:02d}.",
+                )
 
             try:
                 url = image.getDownloadURL(
                     {
-                        "scale": 10,
+                        "scale": definition.default_scale,
                         "region": geometry,
                         "filePerBand": False,
                         "format": "GEO_TIFF",
                     }
                 )
             except EEException as exc:
-                raise HTTPException(status_code=502, detail=f"Failed to create download URL for {year}-{month:02d}: {exc}") from exc
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to create download URL for {definition.code.upper()} {year}-{month:02d}: {exc}",
+                ) from exc
 
             payload, content_type = await run_in_threadpool(_download_bytes, url)
             tif_bytes = _extract_tif(payload, content_type)
 
-            output_name = f"ndvi_{year}_{month:02d}.tif"
+            output_name = f"{definition.code}_{year}_{month:02d}.tif"
             combined_zip.writestr(output_name, tif_bytes)
             months_written += 1
 
@@ -176,6 +232,11 @@ async def export_geotiffs(
         raise HTTPException(status_code=404, detail="No months found within the requested date range.")
 
     output_buffer.seek(0)
-    disposition = f'attachment; filename="ndvi_{start.isoformat()}_{end.isoformat()}.zip"'
-    headers = {"Content-Disposition": disposition}
+    disposition = (
+        f'attachment; filename="{definition.code}_{start.isoformat()}_{end.isoformat()}.zip"'
+    )
+    headers: Dict[str, str] = {
+        "Content-Disposition": disposition,
+        "X-Vegetation-Index": definition.code,
+    }
     return StreamingResponse(output_buffer, media_type="application/zip", headers=headers)
