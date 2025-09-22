@@ -18,7 +18,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from fake_ee import setup_fake_ee
 
-from app.api import export
+from app.api import export, s2_indices
 
 
 @pytest.fixture
@@ -80,3 +80,73 @@ async def test_export_geotiffs_supports_gndvi(monkeypatch):
     assert len(download_args) == 1
     expected_scale = export.resolve_index("gndvi")[0].default_scale
     assert download_args[0]["scale"] == expected_scale
+
+
+def test_normalise_indices_handles_mixed_case():
+    result = export._normalise_indices(
+        ["Ndwi_mcfeeters", "NDWI_GAO", "ndsi_soil", "NDWI_GAO"]
+    )
+
+    assert result == ["NDWI_McFeeters", "NDWI_Gao", "NDSI_Soil"]
+
+
+_SIMPLE_POLYGON = {
+    "type": "Polygon",
+    "coordinates": [
+        [
+            [0.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [1.0, 0.0],
+            [0.0, 0.0],
+        ]
+    ],
+}
+
+
+def _build_export_request(indices: list[str]) -> s2_indices.Sentinel2ExportRequest:
+    return s2_indices.Sentinel2ExportRequest(
+        aoi_geojson=_SIMPLE_POLYGON,
+        months=["2024-01"],
+        indices=indices,
+        export_target="zip",
+        aoi_name="Field",
+        scale_m=10,
+        cloud_prob_max=40,
+    )
+
+
+def test_sentinel2_export_request_accepts_mixed_case_indices():
+    request = _build_export_request(
+        ["ndwi_mcfeeters", "NdWi_GaO", "NDSI_soil", "NDWI_mcfeeters"]
+    )
+
+    assert request.indices == ["NDWI_McFeeters", "NDWI_Gao", "NDSI_Soil"]
+
+
+def test_start_export_queues_canonical_indices(monkeypatch):
+    captured: dict[str, list[str]] = {}
+
+    def fake_create_job(**kwargs):
+        captured["index_names"] = kwargs["index_names"]
+
+        class _Job:
+            job_id = "job-123"
+            state = "pending"
+
+        return _Job()
+
+    monkeypatch.setattr(s2_indices.exports, "create_job", fake_create_job)
+
+    request = _build_export_request(
+        ["ndwi_mcfeeters", "NDWI_GAO", "ndsi_soil", "NDWI_mcfeeters"]
+    )
+
+    result = s2_indices.start_export(request)
+
+    assert captured["index_names"] == [
+        "NDWI_McFeeters",
+        "NDWI_Gao",
+        "NDSI_Soil",
+    ]
+    assert result == {"job_id": "job-123", "state": "pending"}

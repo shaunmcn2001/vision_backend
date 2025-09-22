@@ -257,13 +257,18 @@ def _normalise_indices(values: List[str]) -> List[str]:
     if not values:
         raise HTTPException(status_code=400, detail="At least one index must be specified.")
 
+    canonical_lookup = {
+        name.lower(): name for name in sentinel_indices.SUPPORTED_INDICES
+    }
+
     cleaned: List[str] = []
     for value in values:
-        upper = value.upper()
-        if upper not in sentinel_indices.SUPPORTED_INDICES:
+        key = str(value).strip()
+        canonical = canonical_lookup.get(key.lower())
+        if canonical is None:
             raise HTTPException(status_code=400, detail=f"Unsupported index: {value}")
-        if upper not in cleaned:
-            cleaned.append(upper)
+        if canonical not in cleaned:
+            cleaned.append(canonical)
     return cleaned
 
 
