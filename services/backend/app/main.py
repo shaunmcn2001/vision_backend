@@ -265,9 +265,11 @@ def export_ui():
       const clearAllIndicesButton = document.getElementById('clear-all-indices');
 
       const { origin, pathname } = window.location;
-      const basePath = pathname.replace(/\/[^/]*$/, '/') || '/';
+      const lastSlashIndex = pathname.lastIndexOf('/');
+      const basePath =
+        lastSlashIndex >= 0 ? pathname.slice(0, lastSlashIndex + 1) || '/' : '/';
       const buildUrl = (path) => {
-        const cleaned = path.replace(/^\//, '');
+        const cleaned = path.replace(/^\/+/, '');
         return new URL(`${basePath}${cleaned}`, origin);
       };
 
