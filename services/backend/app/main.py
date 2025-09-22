@@ -149,6 +149,21 @@ def export_ui():
         background: #94a3b8;
         cursor: not-allowed;
       }
+      .button-secondary {
+        padding: 0.5rem 1.25rem;
+        background: transparent;
+        border: 1px solid #2563eb;
+        color: #2563eb;
+      }
+      .button-secondary:hover {
+        background: rgba(37, 99, 235, 0.1);
+      }
+      .multi-select-actions {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-top: -0.25rem;
+      }
       #status {
         min-height: 1.75rem;
         font-size: 0.95rem;
@@ -195,6 +210,10 @@ def export_ui():
         </label>
         <label for="indices">
           Vegetation indices to export
+          <div class="multi-select-actions">
+            <button type="button" id="select-all-indices" class="button-secondary">Select all</button>
+            <button type="button" id="clear-all-indices" class="button-secondary">Clear all</button>
+          </div>
           <select id="indices" name="indices" multiple size="10" required>
             <option value="NDVI" selected>NDVI</option>
             <option value="EVI">EVI</option>
@@ -219,7 +238,7 @@ def export_ui():
             <option value="NDTI">NDTI</option>
             <option value="PRI">PRI</option>
           </select>
-          <span class="hint">Hold Ctrl (Windows/Linux) or ⌘ (macOS) to choose multiple indices.</span>
+          <span class="hint">Use the Select all / Clear all shortcuts or hold Ctrl (Windows/Linux) or ⌘ (macOS) to choose multiple indices.</span>
         </label>
         <label for="export_target">
           Export destination
@@ -241,6 +260,9 @@ def export_ui():
       const form = document.getElementById('export-form');
       const statusEl = document.getElementById('status');
       const submitButton = form.querySelector('button[type="submit"]');
+      const indicesSelect = document.getElementById('indices');
+      const selectAllIndicesButton = document.getElementById('select-all-indices');
+      const clearAllIndicesButton = document.getElementById('clear-all-indices');
 
       const { origin, pathname } = window.location;
       const basePath = pathname.replace(/\/[^/]*$/, '/') || '/';
@@ -440,6 +462,26 @@ def export_ui():
 
       let isProcessing = false;
 
+      const setIndicesSelection = (selected) => {
+        if (!indicesSelect) {
+          return;
+        }
+        Array.from(indicesSelect.options).forEach((option) => {
+          option.selected = selected;
+        });
+        const changeEvent = new Event('change', { bubbles: true });
+        indicesSelect.dispatchEvent(changeEvent);
+        indicesSelect.focus();
+      };
+
+      if (selectAllIndicesButton) {
+        selectAllIndicesButton.addEventListener('click', () => setIndicesSelection(true));
+      }
+
+      if (clearAllIndicesButton) {
+        clearAllIndicesButton.addEventListener('click', () => setIndicesSelection(false));
+      }
+
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         if (isProcessing) {
@@ -450,7 +492,6 @@ def export_ui():
         const startInput = document.getElementById('start_date');
         const endInput = document.getElementById('end_date');
         const aoiNameInput = document.getElementById('aoi_name');
-        const indicesSelect = document.getElementById('indices');
         const exportTargetSelect = document.getElementById('export_target');
         const apiKeyInput = document.getElementById('api_key');
 
