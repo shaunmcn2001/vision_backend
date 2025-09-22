@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import io
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -150,3 +152,86 @@ def test_start_export_queues_canonical_indices(monkeypatch):
         "NDSI_Soil",
     ]
     assert result == {"job_id": "job-123", "state": "pending"}
+
+
+def test_start_export_returns_server_error_when_gee_initialisation_fails(monkeypatch):
+    from app import exports
+    from app.main import app
+
+    def _raise_runtime_error():
+        raise RuntimeError("Service account JSON missing")
+
+    monkeypatch.setattr(exports.gee, "initialize", _raise_runtime_error)
+
+    payload = {
+        "aoi_geojson": _SIMPLE_POLYGON,
+        "months": ["2024-01"],
+        "indices": ["NDVI"],
+        "export_target": "zip",
+        "aoi_name": "Field",
+        "scale_m": 10,
+        "cloud_prob_max": 40,
+    }
+
+    async def _post_json(path: str, body: dict[str, object]) -> tuple[int, dict[str, str], bytes]:
+        await app.router.startup()
+        try:
+            raw_body = json.dumps(body).encode("utf-8")
+            messages: list[dict[str, object]] = []
+            body_sent = False
+
+            async def receive() -> dict[str, object]:
+                nonlocal body_sent
+                if not body_sent:
+                    body_sent = True
+                    return {"type": "http.request", "body": raw_body, "more_body": False}
+                await asyncio.sleep(0)
+                return {"type": "http.disconnect"}
+
+            async def send(message: dict[str, object]) -> None:
+                messages.append(message)
+
+            scope = {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "POST",
+                "path": path,
+                "root_path": "",
+                "scheme": "http",
+                "client": ("testclient", 50000),
+                "server": ("testserver", 80),
+                "headers": [
+                    (b"host", b"testserver"),
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(raw_body)).encode("ascii")),
+                ],
+                "query_string": b"",
+                "asgi": {"version": "3.0", "spec_version": "2.3"},
+            }
+
+            await app(scope, receive, send)
+        finally:
+            await app.router.shutdown()
+
+        status = 500
+        headers: dict[str, str] = {}
+        body_bytes = b""
+        for message in messages:
+            if message.get("type") == "http.response.start":
+                status = int(message.get("status", 0))
+                headers = {
+                    key.decode("latin-1"): value.decode("latin-1")
+                    for key, value in message.get("headers", [])
+                }
+            elif message.get("type") == "http.response.body":
+                body_bytes += message.get("body", b"")
+        return status, headers, body_bytes
+
+    status, headers, body = asyncio.run(_post_json("/export/s2/indices", payload))
+
+    assert status == 500
+    assert headers.get("content-type", "").startswith("application/json")
+    detail = json.loads(body.decode("utf-8"))["detail"]
+    assert "Earth Engine initialisation failed" in detail
+    assert "GEE_SERVICE_ACCOUNT_JSON" in detail
+    assert "Service account JSON missing" in detail

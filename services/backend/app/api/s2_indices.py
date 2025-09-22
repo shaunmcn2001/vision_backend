@@ -164,6 +164,15 @@ def start_export(request: Sentinel2ExportRequest):
             scale_m=request.scale_m,
             cloud_prob_max=request.cloud_prob_max,
         )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Earth Engine initialisation failed. "
+                "Ensure GEE_SERVICE_ACCOUNT_JSON is configured: "
+                f"{exc}"
+            ),
+        ) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to queue export: {exc}") from exc
 
