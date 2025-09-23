@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -36,6 +37,7 @@ class ExportItem:
     destination_uri: Optional[str] = None
     signed_url: Optional[str] = None
     local_path: Optional[Path] = None
+    cleaned: bool = False
     image: Optional[ee.Image] = None
     task: Optional[ee.batch.Task] = None
 
@@ -57,7 +59,10 @@ class ExportJob:
     error: Optional[str] = None
     items: List[ExportItem] = field(default_factory=list)
     zip_path: Optional[Path] = None
-    temp_dir: Path = field(default_factory=lambda: Path(tempfile.mkdtemp(prefix="s2idx_")))
+    temp_dir: Optional[Path] = field(
+        default_factory=lambda: Path(tempfile.mkdtemp(prefix="s2idx_"))
+    )
+    cleaned: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def touch(self) -> None:
@@ -74,6 +79,7 @@ class ExportJob:
             "scale_m": self.scale_m,
             "cloud_prob_max": self.cloud_prob_max,
             "error": self.error,
+            "cleaned": self.cleaned,
             "items": [
                 {
                     "month": item.month,
@@ -83,6 +89,7 @@ class ExportJob:
                     "destination_uri": item.destination_uri,
                     "signed_url": item.signed_url,
                     "error": item.error,
+                    "cleaned": item.cleaned,
                 }
                 for item in self.items
             ],
@@ -276,6 +283,13 @@ def _start_gcs_task(item: ExportItem, job: ExportJob, bucket: str) -> ee.batch.T
 
 
 def _process_zip_exports(job: ExportJob) -> None:
+    if job.temp_dir is None:
+        job.temp_dir = Path(tempfile.mkdtemp(prefix="s2idx_"))
+
+    temp_dir = job.temp_dir
+    if temp_dir is None:  # pragma: no cover - defensive
+        raise RuntimeError("Temporary directory unavailable")
+
     for item in job.items:
         if item.image is None:
             item.status = "failed"
@@ -284,7 +298,9 @@ def _process_zip_exports(job: ExportJob) -> None:
         try:
             item.status = "downloading"
             job.touch()
-            path = _download_index_to_path(item.image, job.geometry, job.scale_m, item.file_name, job.temp_dir)
+            path = _download_index_to_path(
+                item.image, job.geometry, job.scale_m, item.file_name, temp_dir
+            )
             item.local_path = path
             item.destination_uri = str(path)
             item.status = "completed"
@@ -297,7 +313,7 @@ def _process_zip_exports(job: ExportJob) -> None:
 
     successful = [item for item in job.items if item.status == "completed" and item.local_path]
     if successful:
-        zip_path = job.temp_dir / f"{job.safe_aoi_name}_sentinel2_indices.zip"
+        zip_path = temp_dir / f"{job.safe_aoi_name}_sentinel2_indices.zip"
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for item in successful:
                 archive.write(item.local_path, arcname=item.file_name)
@@ -427,3 +443,52 @@ def get_zip_path(job_id: str) -> Path:
         raise FileNotFoundError("ZIP archive not ready")
     return job.zip_path
 
+
+def cleanup_job_files(job: ExportJob) -> None:
+    """Remove temporary files for completed ZIP export jobs."""
+
+    if job.export_target != "zip":
+        return
+
+    with job.lock:
+        if job.cleaned:
+            return
+
+        temp_dir = job.temp_dir
+        zip_path = job.zip_path
+        paths_to_remove = [item.local_path for item in job.items if item.local_path]
+
+        job.temp_dir = None
+        job.zip_path = None
+        job.cleaned = True
+
+        for item in job.items:
+            had_local = item.local_path is not None
+            item.local_path = None
+            item.destination_uri = None
+            item.signed_url = None
+            if had_local or item.status == "completed":
+                item.cleaned = True
+
+        job.touch()
+
+    for path in paths_to_remove:
+        if path is None:
+            continue
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+    if zip_path and zip_path.exists():
+        try:
+            zip_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+    if temp_dir and temp_dir.exists():
+        shutil.rmtree(temp_dir, ignore_errors=True)
