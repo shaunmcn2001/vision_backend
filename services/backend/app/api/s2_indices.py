@@ -18,6 +18,8 @@ from app.utils.shapefile import shapefile_zip_to_geojson
 
 router = APIRouter(prefix="/export/s2", tags=["sentinel-2"])
 
+EVICTED_JOB_MESSAGE = "Export job is no longer available. Please request a new export."
+
 
 def _min_field_hectares() -> float:
     raw_value = os.getenv("MIN_FIELD_HA", "1.0")
@@ -184,6 +186,8 @@ def start_export(request: Sentinel2ExportRequest):
 def get_status(job_id: str):
     status = exports.job_status(job_id)
     if status is None:
+        if exports.was_job_evicted(job_id):
+            raise HTTPException(status_code=410, detail=EVICTED_JOB_MESSAGE)
         raise HTTPException(status_code=404, detail="Job not found")
     return status
 
@@ -192,6 +196,8 @@ def get_status(job_id: str):
 def download(job_id: str):
     job = exports.get_job(job_id)
     if job is None:
+        if exports.was_job_evicted(job_id):
+            raise HTTPException(status_code=410, detail=EVICTED_JOB_MESSAGE)
         raise HTTPException(status_code=404, detail="Job not found")
 
     if job.export_target == "zip":
