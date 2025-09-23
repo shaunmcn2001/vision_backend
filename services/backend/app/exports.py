@@ -105,6 +105,73 @@ class ExportJob:
 JOB_REGISTRY: Dict[str, ExportJob] = {}
 JOB_LOCK = threading.Lock()
 
+TERMINAL_STATES = frozenset({"completed", "failed", "partial"})
+JOB_RETENTION_TTL = timedelta(hours=24)
+EVICTED_REGISTRY_TTL = timedelta(hours=6)
+
+EVICTED_JOBS: Dict[str, datetime] = {}
+
+
+def _prune_evicted_locked(now: datetime) -> None:
+    expired_ids = [
+        job_id
+        for job_id, evicted_at in EVICTED_JOBS.items()
+        if now - evicted_at > EVICTED_REGISTRY_TTL
+    ]
+    for job_id in expired_ids:
+        EVICTED_JOBS.pop(job_id, None)
+
+
+def _record_evicted_locked(job_id: str, now: datetime) -> None:
+    _prune_evicted_locked(now)
+    EVICTED_JOBS[job_id] = now
+
+
+def _job_is_terminal(job: ExportJob) -> bool:
+    return job.cleaned or job.state in TERMINAL_STATES
+
+
+def _job_expired(job: ExportJob, now: datetime) -> bool:
+    if not _job_is_terminal(job):
+        return False
+    return now - job.updated_at > JOB_RETENTION_TTL
+
+
+def _evict_expired_jobs(now: Optional[datetime] = None) -> List[ExportJob]:
+    reference_time = now or datetime.utcnow()
+    expired: List[ExportJob] = []
+    with JOB_LOCK:
+        _prune_evicted_locked(reference_time)
+        for job_id, job in list(JOB_REGISTRY.items()):
+            if _job_expired(job, reference_time):
+                expired.append(JOB_REGISTRY.pop(job_id))
+                _record_evicted_locked(job_id, reference_time)
+
+    for job in expired:
+        if job.export_target == "zip" and not job.cleaned:
+            cleanup_job_files(job)
+
+    return expired
+
+
+def remove_job(job: ExportJob) -> None:
+    now = datetime.utcnow()
+    with JOB_LOCK:
+        existing = JOB_REGISTRY.get(job.job_id)
+        if existing is job:
+            JOB_REGISTRY.pop(job.job_id, None)
+            _record_evicted_locked(job.job_id, now)
+        else:
+            _record_evicted_locked(job.job_id, now)
+
+
+def was_job_evicted(job_id: str) -> bool:
+    now = datetime.utcnow()
+    with JOB_LOCK:
+        _prune_evicted_locked(now)
+        return job_id in EVICTED_JOBS
+
+
 _STORAGE_CLIENT: Optional[storage.Client] = None
 
 
@@ -160,7 +227,10 @@ def create_job(
         items=items,
     )
 
+    _evict_expired_jobs()
+
     with JOB_LOCK:
+        _prune_evicted_locked(datetime.utcnow())
         JOB_REGISTRY[job_id] = job
 
     EXECUTOR.submit(_run_job, job)
@@ -168,8 +238,28 @@ def create_job(
 
 
 def get_job(job_id: str) -> Optional[ExportJob]:
+    _evict_expired_jobs()
+
+    removed_job: Optional[ExportJob] = None
+    now = datetime.utcnow()
+
     with JOB_LOCK:
-        return JOB_REGISTRY.get(job_id)
+        job = JOB_REGISTRY.get(job_id)
+        if job is None:
+            _prune_evicted_locked(now)
+            return None
+
+        if _job_expired(job, now):
+            removed_job = JOB_REGISTRY.pop(job_id, None)
+            _record_evicted_locked(job_id, now)
+            job = None
+        else:
+            _prune_evicted_locked(now)
+
+    if removed_job and removed_job.export_target == "zip" and not removed_job.cleaned:
+        cleanup_job_files(removed_job)
+
+    return job
 
 
 def job_status(job_id: str) -> Optional[Dict]:
@@ -448,29 +538,35 @@ def cleanup_job_files(job: ExportJob) -> None:
     """Remove temporary files for completed ZIP export jobs."""
 
     if job.export_target != "zip":
+        remove_job(job)
         return
 
-    with job.lock:
-        if job.cleaned:
-            return
+    paths_to_remove: List[Path] = []
+    zip_path: Optional[Path] = None
+    temp_dir: Optional[Path] = None
 
+    with job.lock:
         temp_dir = job.temp_dir
         zip_path = job.zip_path
-        paths_to_remove = [item.local_path for item in job.items if item.local_path]
 
-        job.temp_dir = None
-        job.zip_path = None
-        job.cleaned = True
+        if not job.cleaned:
+            paths_to_remove = []
+            for item in job.items:
+                local_path = item.local_path
+                if local_path is not None:
+                    paths_to_remove.append(local_path)
+                item.local_path = None
+                item.destination_uri = None
+                item.signed_url = None
+                if local_path is not None or item.status == "completed":
+                    item.cleaned = True
 
-        for item in job.items:
-            had_local = item.local_path is not None
-            item.local_path = None
-            item.destination_uri = None
-            item.signed_url = None
-            if had_local or item.status == "completed":
-                item.cleaned = True
+            job.temp_dir = None
+            job.zip_path = None
+            job.cleaned = True
+            job.touch()
 
-        job.touch()
+        remove_job(job)
 
     for path in paths_to_remove:
         if path is None:
