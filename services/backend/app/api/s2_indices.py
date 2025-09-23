@@ -10,6 +10,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, validator
 from shapely.geometry import shape
+from starlette.background import BackgroundTask
 
 from app import exports, indices
 from app.utils.geometry import area_ha
@@ -209,7 +210,13 @@ def download(job_id: str):
         headers = {
             "Content-Disposition": f'attachment; filename="{zip_path.name}"'
         }
-        return StreamingResponse(iterator(), media_type="application/zip", headers=headers)
+        background = BackgroundTask(exports.cleanup_job_files, job)
+        return StreamingResponse(
+            iterator(),
+            media_type="application/zip",
+            headers=headers,
+            background=background,
+        )
 
     # For Drive or GCS return the status payload (contains destination URIs / signed URLs)
     status = exports.job_status(job_id)
