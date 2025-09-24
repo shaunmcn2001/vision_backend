@@ -69,8 +69,10 @@ Responses:
 
 ### Environment variables
 
-* `GEE_SERVICE_ACCOUNT_JSON` – **required**. Either the raw JSON credentials or a
-  path to a JSON file for the Google Earth Engine service account.
+* `GEE_SERVICE_ACCOUNT_JSON` – **required**. Either the raw JSON credentials,
+  a base64-encoded JSON string, or a path to a JSON file for the Google Earth
+  Engine service account. When unset the application falls back to
+  `GOOGLE_APPLICATION_CREDENTIALS`.
 * `GEE_GCS_BUCKET` – optional bucket name for Cloud Storage exports. Falls back
   to `GCS_BUCKET` when present.
 * `GEE_DRIVE_FOLDER` – optional Google Drive folder name for Drive exports. The
