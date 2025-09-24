@@ -1,6 +1,8 @@
 """Shared Google Earth Engine helpers for Sentinel-2 processing."""
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 from datetime import datetime
@@ -24,32 +26,87 @@ S2_BANDS: Iterable[str] = (
     "B12",
 )
 SERVICE_ACCOUNT_ENV = "GEE_SERVICE_ACCOUNT_JSON"
+FALLBACK_SERVICE_ACCOUNT_ENV = "GOOGLE_APPLICATION_CREDENTIALS"
 MAX_PIXELS = int(1e13)
 
 _initialized = False
 
 
+def _looks_like_path(value: str) -> bool:
+    return any(sep in value for sep in ("/", "\\")) or value.lower().endswith(".json")
+
+
+def _load_service_account_info(raw_credentials: str) -> Dict:
+    trimmed = raw_credentials.strip()
+    if not trimmed:
+        raise RuntimeError("Service account credential value is empty")
+
+    if trimmed.startswith("{"):
+        try:
+            info = json.loads(trimmed)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Service account credential JSON string is invalid") from exc
+        if not isinstance(info, dict):
+            raise RuntimeError("Service account credential JSON must be an object")
+        return info
+
+    cred_path = Path(trimmed)
+    if cred_path.exists():
+        try:
+            with cred_path.open("r", encoding="utf-8") as fh:
+                info = json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Credential path {cred_path} did not contain valid JSON") from exc
+        if not isinstance(info, dict):
+            raise RuntimeError(f"Credential path {cred_path} must contain a JSON object")
+        return info
+
+    try:
+        decoded_bytes = base64.b64decode(trimmed, validate=True)
+    except (binascii.Error, ValueError):
+        decoded_bytes = None
+
+    if decoded_bytes:
+        try:
+            decoded = decoded_bytes.decode("utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("Decoded service account credentials were not valid UTF-8") from exc
+        if not decoded:
+            raise RuntimeError("Decoded service account credential JSON is empty")
+        if not decoded.startswith("{"):
+            raise RuntimeError("Decoded service account credentials must be a JSON object")
+        try:
+            info = json.loads(decoded)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Decoded service account credential JSON is invalid") from exc
+        if not isinstance(info, dict):
+            raise RuntimeError("Decoded service account credential JSON must describe an object")
+        return info
+
+    if _looks_like_path(trimmed):
+        raise RuntimeError(f"Credential path {cred_path} does not exist")
+
+    raise RuntimeError(
+        "Service account credentials must be provided as JSON, base64-encoded JSON, or a path to a JSON file"
+    )
+
+
 def initialize(force: bool = False) -> None:
-    """Initialise Earth Engine using credentials from ``GEE_SERVICE_ACCOUNT_JSON``."""
+    """Initialise Earth Engine using configured service account credentials."""
     global _initialized
     if _initialized and not force:
         return
 
-    raw_credentials = os.getenv(SERVICE_ACCOUNT_ENV)
+    primary = (os.getenv(SERVICE_ACCOUNT_ENV) or "").strip()
+    fallback = (os.getenv(FALLBACK_SERVICE_ACCOUNT_ENV) or "").strip()
+    raw_credentials = primary or fallback
     if not raw_credentials:
         raise RuntimeError(
-            "GEE_SERVICE_ACCOUNT_JSON must contain a service account credential JSON string or file path."
+            "Set GEE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS to a service account credential JSON string, "
+            "base64-encoded JSON, or file path."
         )
 
-    raw_credentials = raw_credentials.strip()
-    if raw_credentials.startswith("{"):
-        info = json.loads(raw_credentials)
-    else:
-        cred_path = Path(raw_credentials)
-        if not cred_path.exists():
-            raise RuntimeError(f"Credential path {cred_path} does not exist")
-        with cred_path.open("r", encoding="utf-8") as fh:
-            info = json.load(fh)
+    info = _load_service_account_info(raw_credentials)
 
     email = info.get("client_email")
     if not email:
