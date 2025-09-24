@@ -1,6 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional, List
-import os, io, zipfile, json
+import os, io, zipfile
 from fastkml import kml
 from shapely.geometry import shape, mapping, Polygon, MultiPolygon
 from app.services.gcs import upload_json, download_json, exists
@@ -12,6 +12,7 @@ from app.utils.geometry import area_ha
 router = APIRouter()
 
 MIN_FIELD_HA = float(os.getenv("MIN_FIELD_HA", "1.0"))  # default 1 ha
+
 def _kml_or_kmz_to_geojson(file_bytes: bytes, is_kmz: bool) -> dict:
     """
     Extract polygons from KML/KMZ → MultiPolygon (EPSG:4326).
@@ -25,24 +26,38 @@ def _kml_or_kmz_to_geojson(file_bytes: bytes, is_kmz: bool) -> dict:
             if not kml_name:
                 raise HTTPException(status_code=400, detail="KMZ has no KML inside.")
             data = z.read(kml_name)
-    k.from_string(data)
+    parsed = k.from_string(data)
+    if parsed is not None:
+        k = parsed
+
+    def iter_features(obj):
+        feats = getattr(obj, "features", None)
+        if feats is None:
+            return []
+        if callable(feats):
+            return feats()
+        return feats
 
     def extract_polys(feat) -> List[Polygon | MultiPolygon]:
         out = []
         if hasattr(feat, "geometry") and feat.geometry is not None:
             try:
-                g = shape(json.loads(feat.geometry.json))
-                if isinstance(g, (Polygon, MultiPolygon)):
+                geom_src = (
+                    feat.geometry.__geo_interface__
+                    if hasattr(feat.geometry, "__geo_interface__")
+                    else mapping(feat.geometry)
+                )
+                g = shape(geom_src)
+                if isinstance(g, (Polygon, MultiPolygon)) and g.is_valid and not g.is_empty:
                     out.append(g)
             except Exception:
                 pass
-        if hasattr(feat, "features"):
-            for f in feat.features():
-                out.extend(extract_polys(f))
+        for f in iter_features(feat):
+            out.extend(extract_polys(f))
         return out
 
     geoms = []
-    for d in k.features():          # Document(s)
+    for d in iter_features(k):          # Document(s)
         geoms.extend(extract_polys(d))
 
     mp = as_multipolygon(geoms)
