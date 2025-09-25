@@ -19,7 +19,7 @@ import ee
 import requests
 from google.cloud import storage
 
-from app import gee, indices
+from app import gee, index_visualization, indices
 
 MAX_CONCURRENT_EXPORTS = 4
 TASK_POLL_SECONDS = 15
@@ -40,6 +40,7 @@ class ExportItem:
     cleaned: bool = False
     image: Optional[ee.Image] = None
     task: Optional[ee.batch.Task] = None
+    is_visualized: bool = False
 
 
 @dataclass
@@ -293,24 +294,32 @@ def _extract_tiff(payload: bytes, content_type: Optional[str]) -> bytes:
     raise RuntimeError("Download did not contain a GeoTIFF")
 
 
-def _download_index_to_path(
-    image: ee.Image, geometry: ee.Geometry, scale_m: int, file_name: str, output_dir: Path
-) -> Path:
+def _download_index_to_path(item: ExportItem, job: ExportJob, output_dir: Path) -> Path:
+    if item.image is None:
+        raise ValueError("Missing image for export item")
+
     params = {
-        "scale": scale_m,
-        "region": geometry,
+        "scale": job.scale_m,
+        "region": job.geometry,
         "crs": "EPSG:4326",
         "filePerBand": False,
         "format": "GEO_TIFF",
         "fileFormat": "GeoTIFF",
         "maxPixels": gee.MAX_PIXELS,
-        "noDataValue": -9999,
-        "name": Path(file_name).stem,
+        "name": Path(item.file_name).stem,
     }
-    url = image.getDownloadURL(params)
+
+    format_options: Dict[str, object] = {"cloudOptimized": False}
+    if not item.is_visualized:
+        params["noDataValue"] = -9999
+        format_options["noDataValue"] = -9999
+
+    params["formatOptions"] = format_options
+
+    url = item.image.getDownloadURL(params)
     payload, content_type = _download_bytes(url)
     tif_bytes = _extract_tiff(payload, content_type)
-    output_path = output_dir / file_name
+    output_path = output_dir / item.file_name
     output_path.write_bytes(tif_bytes)
     return output_path
 
@@ -335,6 +344,11 @@ def _start_drive_task(item: ExportItem, job: ExportJob) -> ee.batch.Task:
     description = f"{item.index}_{item.month}_{job.safe_aoi_name}"[:100]
     folder = os.getenv("GEE_DRIVE_FOLDER", "Sentinel2_Indices")
     name_prefix = Path(item.file_name).stem
+    if item.image is None:
+        raise ValueError("Missing image for drive export")
+    format_options: Dict[str, object] = {"cloudOptimized": False}
+    if not item.is_visualized:
+        format_options["noDataValue"] = -9999
     task = ee.batch.Export.image.toDrive(
         image=item.image,
         description=description,
@@ -346,7 +360,7 @@ def _start_drive_task(item: ExportItem, job: ExportJob) -> ee.batch.Task:
         fileFormat="GeoTIFF",
         maxPixels=gee.MAX_PIXELS,
         filePerBand=False,
-        formatOptions={"cloudOptimized": False, "noDataValue": -9999},
+        formatOptions=format_options,
     )
     task.start()
     return task
@@ -355,6 +369,11 @@ def _start_drive_task(item: ExportItem, job: ExportJob) -> ee.batch.Task:
 def _start_gcs_task(item: ExportItem, job: ExportJob, bucket: str) -> ee.batch.Task:
     name_prefix = f"{job.safe_aoi_name}/{Path(item.file_name).stem}"
     description = f"{item.index}_{item.month}_{job.safe_aoi_name}"[:100]
+    if item.image is None:
+        raise ValueError("Missing image for cloud export")
+    format_options: Dict[str, object] = {"cloudOptimized": False}
+    if not item.is_visualized:
+        format_options["noDataValue"] = -9999
     task = ee.batch.Export.image.toCloudStorage(
         image=item.image,
         description=description,
@@ -366,7 +385,7 @@ def _start_gcs_task(item: ExportItem, job: ExportJob, bucket: str) -> ee.batch.T
         fileFormat="GeoTIFF",
         maxPixels=gee.MAX_PIXELS,
         filePerBand=False,
-        formatOptions={"cloudOptimized": False, "noDataValue": -9999},
+        formatOptions=format_options,
     )
     task.start()
     return task
@@ -388,9 +407,7 @@ def _process_zip_exports(job: ExportJob) -> None:
         try:
             item.status = "downloading"
             job.touch()
-            path = _download_index_to_path(
-                item.image, job.geometry, job.scale_m, item.file_name, temp_dir
-            )
+            path = _download_index_to_path(item, job, temp_dir)
             item.local_path = path
             item.destination_uri = str(path)
             item.status = "completed"
@@ -505,7 +522,17 @@ def _run_job(job: ExportJob) -> None:
 
             for item in job.iter_items_for_month(month):
                 try:
-                    item.image = indices.compute_index(composite, item.index, job.geometry, job.scale_m)
+                    index_image = indices.compute_index(
+                        composite, item.index, job.geometry, job.scale_m
+                    )
+                    try:
+                        prepared_image, is_visualized = index_visualization.prepare_image_for_export(
+                            index_image, item.index, job.geometry, job.scale_m
+                        )
+                    except Exception:
+                        prepared_image, is_visualized = index_image, False
+                    item.image = prepared_image
+                    item.is_visualized = is_visualized
                     item.status = "ready"
                 except Exception as exc:
                     item.status = "failed"

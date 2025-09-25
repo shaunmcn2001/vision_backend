@@ -45,6 +45,17 @@ async def test_export_geotiffs_supports_gndvi(monkeypatch):
     monkeypatch.setattr(export, "run_in_threadpool", fake_run_in_threadpool)
 
     captured_download: dict[str, str] = {}
+    captured_vis: dict[str, tuple] = {}
+
+    def fake_prepare_image(image, index_name, geometry, scale):
+        captured_vis["args"] = (index_name, scale)
+        return image, False
+
+    monkeypatch.setattr(
+        export.index_visualization,
+        "prepare_image_for_export",
+        fake_prepare_image,
+    )
 
     def fake_download_bytes(url: str):
         captured_download["url"] = url
@@ -74,6 +85,7 @@ async def test_export_geotiffs_supports_gndvi(monkeypatch):
         assert archive.read("gndvi_2024_01.tif") == b"II*\x00FAKE"
 
     assert captured_download["url"] == "https://example.com/download"
+    assert captured_vis["args"] == ("GNDVI", export.resolve_index("gndvi")[0].default_scale)
 
     clamp_calls = context["log"].get("clamp_calls", [])
     assert clamp_calls == [(-1.0, 1.0)]
@@ -82,6 +94,65 @@ async def test_export_geotiffs_supports_gndvi(monkeypatch):
     assert len(download_args) == 1
     expected_scale = export.resolve_index("gndvi")[0].default_scale
     assert download_args[0]["scale"] == expected_scale
+
+
+@pytest.mark.anyio
+async def test_export_geotiffs_uses_visualized_params(monkeypatch):
+    context = setup_fake_ee(monkeypatch, export, [0.5])
+
+    monkeypatch.setattr(export, "init_ee", lambda: None)
+    monkeypatch.setattr(
+        export,
+        "shapefile_zip_to_geojson",
+        lambda _content: {"type": "Point", "coordinates": [0, 0]},
+    )
+
+    async def fake_run_in_threadpool(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(export, "run_in_threadpool", fake_run_in_threadpool)
+
+    def fake_download_bytes(url: str):
+        return b"II*\x00FAKE", "image/tiff"
+
+    monkeypatch.setattr(export, "_download_bytes", fake_download_bytes)
+
+    class _VisualizedImage:
+        def __init__(self, base):
+            self._base = base
+
+        def getDownloadURL(self, params: dict[str, object]) -> str:
+            self._base.getDownloadURL(params)
+            return "https://example.com/download"
+
+    def fake_prepare_image(image, index_name, geometry, scale):
+        return _VisualizedImage(image), True
+
+    monkeypatch.setattr(
+        export.index_visualization,
+        "prepare_image_for_export",
+        fake_prepare_image,
+    )
+
+    upload = UploadFile(filename="field.zip", file=io.BytesIO(b"dummy"))
+
+    response = await export.export_geotiffs(
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        file=upload,
+        index="ndvi",
+    )
+
+    body = b"".join([chunk async for chunk in response.body_iterator])
+
+    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+        assert archive.namelist() == ["ndvi_2024_01.tif"]
+
+    download_args = context["log"].get("download_args", [])
+    assert len(download_args) == 1
+    params = download_args[0]
+    assert "noDataValue" not in params
+    assert params["formatOptions"] == {"cloudOptimized": False}
 
 
 def test_normalise_indices_handles_mixed_case():

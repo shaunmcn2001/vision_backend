@@ -11,7 +11,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
-from app import exports, indices as sentinel_indices
+from app import exports, index_visualization, indices as sentinel_indices
 from app.services.indices import UnsupportedIndexError, resolve_index
 from app.services.tiles import init_ee
 from app.utils.shapefile import shapefile_zip_to_geojson
@@ -169,6 +169,8 @@ async def export_geotiffs(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to parse shapefile ZIP: {exc}") from exc
 
+    geometry_ee = ee.Geometry(geometry)
+
     try:
         definition, resolved_parameters = resolve_index(index)
     except UnsupportedIndexError as exc:
@@ -208,15 +210,27 @@ async def export_geotiffs(
                     detail=f"No {definition.code.upper()} imagery available for {year}-{month:02d}.",
                 )
 
+            prepared_image, is_visualized = index_visualization.prepare_image_for_export(
+                image,
+                definition.band_name,
+                geometry_ee,
+                definition.default_scale,
+            )
+
+            params: Dict[str, object] = {
+                "scale": definition.default_scale,
+                "region": geometry_ee,
+                "filePerBand": False,
+                "format": "GEO_TIFF",
+            }
+            format_options: Dict[str, object] = {"cloudOptimized": False}
+            if not is_visualized:
+                params["noDataValue"] = -9999
+                format_options["noDataValue"] = -9999
+            params["formatOptions"] = format_options
+
             try:
-                url = image.getDownloadURL(
-                    {
-                        "scale": definition.default_scale,
-                        "region": geometry,
-                        "filePerBand": False,
-                        "format": "GEO_TIFF",
-                    }
-                )
+                url = prepared_image.getDownloadURL(params)
             except EEException as exc:
                 raise HTTPException(
                     status_code=502,
