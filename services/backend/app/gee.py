@@ -7,7 +7,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import ee
 
@@ -196,4 +196,28 @@ def monthly_sentinel2_collection(
     composite = masked.median().select(S2_BANDS)
     composite = composite.set({"system:time_start": ee.Date(start_iso).millis(), "month": month})
     return masked, composite
+
+
+def list_collection_images(collection: ee.ImageCollection) -> List[ee.Image]:
+    """Return a client-side list of images from ``collection``."""
+
+    try:
+        count = int(collection.size().getInfo())
+    except Exception:
+        return []
+    if count <= 0:
+        return []
+
+    images: List[ee.Image] = []
+    try:
+        image_list = collection.toList(count)
+    except Exception:
+        return []
+
+    for idx in range(count):
+        try:
+            images.append(ee.Image(image_list.get(idx)))
+        except Exception:
+            continue
+    return images
 

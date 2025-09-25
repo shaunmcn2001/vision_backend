@@ -66,7 +66,7 @@ def _build_zip_job(tmp_path, job_id: str = "job-zip"):
     return job, local_path, zip_path, temp_dir
 
 
-def test_create_job_generates_dual_exports(monkeypatch):
+def test_create_job_generates_all_exports(monkeypatch):
     monkeypatch.setattr(exports.gee, "initialize", lambda: None)
     monkeypatch.setattr(exports.gee, "geometry_from_geojson", lambda geojson: geojson)
 
@@ -80,12 +80,118 @@ def test_create_job_generates_dual_exports(monkeypatch):
         cloud_prob_max=40,
     )
 
-    assert len(job.items) == 2
+    assert len(job.items) == 4
     variants = {(item.variant, item.file_name) for item in job.items}
     assert variants == {
         ("analysis", "analysis/NDVI_202401_Field_raw.tif"),
         ("google_earth", "google_earth/NDVI_202401_Field_rgb.tif"),
+        ("imagery_true", "imagery/S2_202401_Field_true.tif"),
+        ("imagery_false", "imagery/S2_202401_Field_false.tif"),
     }
+
+
+def test_prepare_imagery_items_sets_visualized(monkeypatch):
+    job = exports.ExportJob(
+        job_id="job-imagery",
+        export_target="zip",
+        aoi_name="Field",
+        safe_aoi_name="field",
+        months=["2024-01"],
+        indices=["NDVI"],
+        scale_m=10,
+        cloud_prob_max=40,
+        geometry={"type": "Point", "coordinates": [0, 0]},
+    )
+    true_item = exports.ExportItem(
+        month="2024-01",
+        index="S2",
+        variant="imagery_true",
+        file_name="imagery/S2_202401_field_true.tif",
+    )
+    false_item = exports.ExportItem(
+        month="2024-01",
+        index="S2",
+        variant="imagery_false",
+        file_name="imagery/S2_202401_field_false.tif",
+    )
+    job.items = [true_item, false_item]
+
+    captured: list[tuple[tuple[str, ...], object]] = []
+
+    def fake_stretch(image, bands, geometry, scale_m, min_value=0.0, max_value=3000.0):
+        captured.append((tuple(bands), geometry))
+        return f"rgb-{bands}"  # pragma: no cover - structure only
+
+    monkeypatch.setattr(exports, "_stretch_to_byte", fake_stretch)
+
+    exports._prepare_imagery_items(job, "2024-01", composite="composite")
+
+    assert true_item.image == "rgb-('B4', 'B3', 'B2')"
+    assert true_item.is_visualized is True
+    assert true_item.status == "ready"
+
+    assert false_item.image == "rgb-('B8', 'B4', 'B3')"
+    assert false_item.is_visualized is True
+    assert false_item.status == "ready"
+
+    assert captured == [
+        (("B4", "B3", "B2"), job.geometry),
+        (("B8", "B4", "B3"), job.geometry),
+    ]
+
+
+def test_prepare_scene_exports_creates_items(monkeypatch):
+    job = exports.ExportJob(
+        job_id="job-scenes",
+        export_target="zip",
+        aoi_name="Field",
+        safe_aoi_name="field",
+        months=["2024-01"],
+        indices=["NDVI"],
+        scale_m=10,
+        cloud_prob_max=40,
+        geometry={"type": "Point", "coordinates": [0, 0]},
+    )
+
+    timestamp = int(datetime(2024, 1, 15, 12, 0, 0).timestamp() * 1000)
+
+    class _StubValue:
+        def __init__(self, value):
+            self._value = value
+
+        def getInfo(self):
+            return self._value
+
+    class _StubImage:
+        def __init__(self, time_start, system_index):
+            self._values = {
+                "system:time_start": _StubValue(time_start),
+                "system:index": _StubValue(system_index),
+            }
+
+        def get(self, key):
+            return self._values.get(key)
+
+    stub_image = _StubImage(timestamp, "S2A_L2A_1234")
+
+    monkeypatch.setattr(exports.gee, "list_collection_images", lambda _collection: [stub_image])
+    monkeypatch.setattr(exports.ee, "Image", lambda image: image)
+    monkeypatch.setattr(
+        exports,
+        "_stretch_to_byte",
+        lambda image, bands, geometry, scale_m, min_value=0.0, max_value=3000.0: f"scene-{image._values['system:index'].getInfo()}",
+    )
+
+    exports._prepare_scene_exports(job, "2024-01", collection="collection")
+    exports._prepare_scene_exports(job, "2024-01", collection="collection")
+
+    scene_items = [item for item in job.items if item.variant == "scene_true"]
+    assert len(scene_items) == 1
+    scene = scene_items[0]
+    assert scene.status == "ready"
+    assert scene.is_visualized is True
+    assert scene.image == "scene-S2A_L2A_1234"
+    assert scene.file_name == "scenes/S2_20240115_field_S2A_L2A_1234_true.tif"
 
 def test_cleanup_job_files_evicts_job_from_registry(tmp_path):
     job, local_path, zip_path, temp_dir = _build_zip_job(tmp_path, "cleanup-job")
