@@ -41,7 +41,8 @@ def _build_zip_job(tmp_path, job_id: str = "job-zip"):
     temp_dir = tmp_path / job_id
     temp_dir.mkdir()
 
-    local_path = temp_dir / "ndvi.tif"
+    local_path = temp_dir / "analysis" / "ndvi_raw.tif"
+    local_path.parent.mkdir(parents=True, exist_ok=True)
     local_path.write_bytes(b"data")
 
     zip_path = temp_dir / "indices.zip"
@@ -51,7 +52,8 @@ def _build_zip_job(tmp_path, job_id: str = "job-zip"):
         exports.ExportItem(
             month="2024-01",
             index="NDVI",
-            file_name="ndvi.tif",
+            variant="analysis",
+            file_name="analysis/ndvi_raw.tif",
             status="completed",
             local_path=local_path,
             destination_uri=str(local_path),
@@ -63,6 +65,27 @@ def _build_zip_job(tmp_path, job_id: str = "job-zip"):
 
     return job, local_path, zip_path, temp_dir
 
+
+def test_create_job_generates_dual_exports(monkeypatch):
+    monkeypatch.setattr(exports.gee, "initialize", lambda: None)
+    monkeypatch.setattr(exports.gee, "geometry_from_geojson", lambda geojson: geojson)
+
+    job = exports.create_job(
+        aoi_geojson={"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]},
+        months=["2024-01"],
+        index_names=["NDVI"],
+        export_target="zip",
+        aoi_name="Field",
+        scale_m=10,
+        cloud_prob_max=40,
+    )
+
+    assert len(job.items) == 2
+    variants = {(item.variant, item.file_name) for item in job.items}
+    assert variants == {
+        ("analysis", "analysis/NDVI_202401_Field_raw.tif"),
+        ("google_earth", "google_earth/NDVI_202401_Field_rgb.tif"),
+    }
 
 def test_cleanup_job_files_evicts_job_from_registry(tmp_path):
     job, local_path, zip_path, temp_dir = _build_zip_job(tmp_path, "cleanup-job")
@@ -152,7 +175,8 @@ def test_download_index_to_path_uses_visualized_format(tmp_path, monkeypatch):
     item = exports.ExportItem(
         month="2024-01",
         index="NDVI",
-        file_name="ndvi.tif",
+        variant="google_earth",
+        file_name="google_earth/ndvi_rgb.tif",
         image=_FakeImage(),
         is_visualized=True,
     )
@@ -191,7 +215,8 @@ def test_download_index_to_path_preserves_nodata_for_scalar(tmp_path, monkeypatc
     item = exports.ExportItem(
         month="2024-01",
         index="NDVI",
-        file_name="ndvi.tif",
+        variant="analysis",
+        file_name="analysis/ndvi_raw.tif",
         image=_FakeImage(),
     )
 
@@ -218,8 +243,19 @@ def test_run_job_marks_items_visualized(monkeypatch):
         cloud_prob_max=40,
         geometry={"type": "Point", "coordinates": [0, 0]},
     )
-    item = exports.ExportItem(month="2024-01", index="NDVI", file_name="ndvi.tif")
-    job.items = [item]
+    analysis_item = exports.ExportItem(
+        month="2024-01",
+        index="NDVI",
+        variant="analysis",
+        file_name="analysis/ndvi_raw.tif",
+    )
+    visual_item = exports.ExportItem(
+        month="2024-01",
+        index="NDVI",
+        variant="google_earth",
+        file_name="google_earth/ndvi_rgb.tif",
+    )
+    job.items = [analysis_item, visual_item]
 
     monkeypatch.setattr(exports.gee, "initialize", lambda: None)
 
@@ -246,6 +282,9 @@ def test_run_job_marks_items_visualized(monkeypatch):
 
     exports._run_job(job)
 
-    assert item.image == "visual-image"
-    assert item.is_visualized is True
-    assert item.status == "ready"
+    assert analysis_item.image == "index-image"
+    assert analysis_item.is_visualized is False
+    assert analysis_item.status == "ready"
+    assert visual_item.image == "visual-image"
+    assert visual_item.is_visualized is True
+    assert visual_item.status == "ready"
