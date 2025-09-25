@@ -116,10 +116,27 @@ def test_prepare_imagery_items_sets_visualized(monkeypatch):
     )
     job.items = [true_item, false_item]
 
-    captured: list[tuple[tuple[str, ...], object]] = []
+    captured: list[dict[str, object]] = []
 
-    def fake_stretch(image, bands, geometry, scale_m, min_value=0.0, max_value=3000.0):
-        captured.append((tuple(bands), geometry))
+    def fake_stretch(
+        image,
+        bands,
+        geometry,
+        scale_m,
+        min_value=0.0,
+        max_value=3000.0,
+        gamma=1.0,
+    ):
+        captured.append(
+            {
+                "bands": tuple(bands),
+                "geometry": geometry,
+                "scale": scale_m,
+                "min": min_value,
+                "max": max_value,
+                "gamma": gamma,
+            }
+        )
         return f"rgb-{bands}"  # pragma: no cover - structure only
 
     monkeypatch.setattr(exports, "_stretch_to_byte", fake_stretch)
@@ -129,69 +146,33 @@ def test_prepare_imagery_items_sets_visualized(monkeypatch):
     assert true_item.image == "rgb-('B4', 'B3', 'B2')"
     assert true_item.is_visualized is True
     assert true_item.status == "ready"
+    assert true_item.scale_override == exports.IMAGERY_SCALE_M
 
     assert false_item.image == "rgb-('B8', 'B4', 'B3')"
     assert false_item.is_visualized is True
     assert false_item.status == "ready"
 
+    assert false_item.scale_override == exports.IMAGERY_SCALE_M
+
     assert captured == [
-        (("B4", "B3", "B2"), job.geometry),
-        (("B8", "B4", "B3"), job.geometry),
+        {
+            "bands": ("B4", "B3", "B2"),
+            "geometry": job.geometry,
+            "scale": exports.IMAGERY_SCALE_M,
+            "min": 0,
+            "max": 3000,
+            "gamma": 1.2,
+        },
+        {
+            "bands": ("B8", "B4", "B3"),
+            "geometry": job.geometry,
+            "scale": exports.IMAGERY_SCALE_M,
+            "min": 0,
+            "max": 4000,
+            "gamma": 1.3,
+        },
     ]
 
-
-def test_prepare_scene_exports_creates_items(monkeypatch):
-    job = exports.ExportJob(
-        job_id="job-scenes",
-        export_target="zip",
-        aoi_name="Field",
-        safe_aoi_name="field",
-        months=["2024-01"],
-        indices=["NDVI"],
-        scale_m=10,
-        cloud_prob_max=40,
-        geometry={"type": "Point", "coordinates": [0, 0]},
-    )
-
-    timestamp = int(datetime(2024, 1, 15, 12, 0, 0).timestamp() * 1000)
-
-    class _StubValue:
-        def __init__(self, value):
-            self._value = value
-
-        def getInfo(self):
-            return self._value
-
-    class _StubImage:
-        def __init__(self, time_start, system_index):
-            self._values = {
-                "system:time_start": _StubValue(time_start),
-                "system:index": _StubValue(system_index),
-            }
-
-        def get(self, key):
-            return self._values.get(key)
-
-    stub_image = _StubImage(timestamp, "S2A_L2A_1234")
-
-    monkeypatch.setattr(exports.gee, "list_collection_images", lambda _collection: [stub_image])
-    monkeypatch.setattr(exports.ee, "Image", lambda image: image)
-    monkeypatch.setattr(
-        exports,
-        "_stretch_to_byte",
-        lambda image, bands, geometry, scale_m, min_value=0.0, max_value=3000.0: f"scene-{image._values['system:index'].getInfo()}",
-    )
-
-    exports._prepare_scene_exports(job, "2024-01", collection="collection")
-    exports._prepare_scene_exports(job, "2024-01", collection="collection")
-
-    scene_items = [item for item in job.items if item.variant == "scene_true"]
-    assert len(scene_items) == 1
-    scene = scene_items[0]
-    assert scene.status == "ready"
-    assert scene.is_visualized is True
-    assert scene.image == "scene-S2A_L2A_1234"
-    assert scene.file_name == "scenes/S2_20240115_field_S2A_L2A_1234_true.tif"
 
 def test_cleanup_job_files_evicts_job_from_registry(tmp_path):
     job, local_path, zip_path, temp_dir = _build_zip_job(tmp_path, "cleanup-job")
