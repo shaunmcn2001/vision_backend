@@ -13,7 +13,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Literal, Optional, Tuple
 
 import ee
 import requests
@@ -32,6 +32,7 @@ class ExportItem:
     month: str
     index: str
     file_name: str
+    variant: Literal["analysis", "google_earth"] = "analysis"
     status: str = "pending"
     error: Optional[str] = None
     destination_uri: Optional[str] = None
@@ -85,6 +86,7 @@ class ExportJob:
                 {
                     "month": item.month,
                     "index": item.index,
+                    "variant": item.variant,
                     "file_name": item.file_name,
                     "status": item.status,
                     "destination_uri": item.destination_uri,
@@ -212,8 +214,24 @@ def create_job(
     for month in months:
         month_code = month.replace("-", "")
         for index in index_names:
-            filename = f"{index}_{month_code}_{safe_name}.tif"
-            items.append(ExportItem(month=month, index=index, file_name=filename))
+            analysis_name = f"analysis/{index}_{month_code}_{safe_name}_raw.tif"
+            google_name = f"google_earth/{index}_{month_code}_{safe_name}_rgb.tif"
+            items.append(
+                ExportItem(
+                    month=month,
+                    index=index,
+                    variant="analysis",
+                    file_name=analysis_name,
+                )
+            )
+            items.append(
+                ExportItem(
+                    month=month,
+                    index=index,
+                    variant="google_earth",
+                    file_name=google_name,
+                )
+            )
 
     job = ExportJob(
         job_id=job_id,
@@ -320,6 +338,7 @@ def _download_index_to_path(item: ExportItem, job: ExportJob, output_dir: Path) 
     payload, content_type = _download_bytes(url)
     tif_bytes = _extract_tiff(payload, content_type)
     output_path = output_dir / item.file_name
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(tif_bytes)
     return output_path
 
@@ -340,10 +359,19 @@ def _generate_signed_gcs_url(bucket: str, path: str, expires_minutes: int = 60) 
         return None
 
 
+def _export_name_prefix(job: ExportJob, item: ExportItem) -> str:
+    file_path = Path(item.file_name)
+    relative = file_path.with_suffix("").as_posix()
+    components = [job.safe_aoi_name]
+    if relative:
+        components.append(relative)
+    return "/".join(filter(None, components))
+
+
 def _start_drive_task(item: ExportItem, job: ExportJob) -> ee.batch.Task:
     description = f"{item.index}_{item.month}_{job.safe_aoi_name}"[:100]
     folder = os.getenv("GEE_DRIVE_FOLDER", "Sentinel2_Indices")
-    name_prefix = Path(item.file_name).stem
+    name_prefix = _export_name_prefix(job, item)
     if item.image is None:
         raise ValueError("Missing image for drive export")
     format_options: Dict[str, object] = {"cloudOptimized": False}
@@ -367,7 +395,7 @@ def _start_drive_task(item: ExportItem, job: ExportJob) -> ee.batch.Task:
 
 
 def _start_gcs_task(item: ExportItem, job: ExportJob, bucket: str) -> ee.batch.Task:
-    name_prefix = f"{job.safe_aoi_name}/{Path(item.file_name).stem}"
+    name_prefix = _export_name_prefix(job, item)
     description = f"{item.index}_{item.month}_{job.safe_aoi_name}"[:100]
     if item.image is None:
         raise ValueError("Missing image for cloud export")
@@ -520,24 +548,53 @@ def _run_job(job: ExportJob) -> None:
                 job.touch()
                 continue
 
-            for item in job.iter_items_for_month(month):
+            month_items = list(job.iter_items_for_month(month))
+            for index_name in job.indices:
+                index_items = [item for item in month_items if item.index == index_name]
+                if not index_items:
+                    continue
                 try:
                     index_image = indices.compute_index(
-                        composite, item.index, job.geometry, job.scale_m
+                        composite, index_name, job.geometry, job.scale_m
                     )
-                    try:
-                        prepared_image, is_visualized = index_visualization.prepare_image_for_export(
-                            index_image, item.index, job.geometry, job.scale_m
-                        )
-                    except Exception:
-                        prepared_image, is_visualized = index_image, False
-                    item.image = prepared_image
-                    item.is_visualized = is_visualized
-                    item.status = "ready"
                 except Exception as exc:
-                    item.status = "failed"
-                    item.error = str(exc)
-            job.touch()
+                    for item in index_items:
+                        item.status = "failed"
+                        item.error = str(exc)
+                    job.touch()
+                    continue
+
+                analysis_items = [
+                    item for item in index_items if item.variant == "analysis"
+                ]
+                for item in analysis_items:
+                    item.image = index_image
+                    item.is_visualized = False
+                    item.status = "ready"
+
+                visual_items = [
+                    item for item in index_items if item.variant == "google_earth"
+                ]
+                if visual_items:
+                    try:
+                        visual_image, is_visualized = index_visualization.prepare_image_for_export(
+                            index_image, index_name, job.geometry, job.scale_m
+                        )
+                    except Exception as exc:
+                        for item in visual_items:
+                            item.status = "failed"
+                            item.error = str(exc)
+                    else:
+                        if is_visualized:
+                            for item in visual_items:
+                                item.image = visual_image
+                                item.is_visualized = True
+                                item.status = "ready"
+                        else:
+                            for item in visual_items:
+                                item.status = "failed"
+                                item.error = "Visualisation unavailable"
+                job.touch()
 
         if job.export_target == "zip":
             _process_zip_exports(job)
