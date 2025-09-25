@@ -27,12 +27,21 @@ TASK_POLL_SECONDS = 15
 SAFE_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_-]+")
 
 
+ExportVariant = Literal[
+    "analysis",
+    "google_earth",
+    "imagery_true",
+    "imagery_false",
+    "scene_true",
+]
+
+
 @dataclass
 class ExportItem:
     month: str
     index: str
     file_name: str
-    variant: Literal["analysis", "google_earth"] = "analysis"
+    variant: ExportVariant = "analysis"
     status: str = "pending"
     error: Optional[str] = None
     destination_uri: Optional[str] = None
@@ -232,6 +241,25 @@ def create_job(
                     file_name=google_name,
                 )
             )
+
+        imagery_true = f"imagery/S2_{month_code}_{safe_name}_true.tif"
+        imagery_false = f"imagery/S2_{month_code}_{safe_name}_false.tif"
+        items.append(
+            ExportItem(
+                month=month,
+                index="S2",
+                variant="imagery_true",
+                file_name=imagery_true,
+            )
+        )
+        items.append(
+            ExportItem(
+                month=month,
+                index="S2",
+                variant="imagery_false",
+                file_name=imagery_false,
+            )
+        )
 
     job = ExportJob(
         job_id=job_id,
@@ -520,6 +548,156 @@ def _process_cloud_exports(job: ExportJob) -> None:
     job.touch()
 
 
+def _stretch_to_byte(
+    image: ee.Image,
+    bands: Iterable[str],
+    geometry: ee.Geometry,
+    scale_m: int,
+    min_value: float = 0.0,
+    max_value: float = 3000.0,
+) -> ee.Image:
+    span = max(max_value - min_value, 1.0)
+    selected = image.select(list(bands)).resample("bilinear")
+    scaled = selected.subtract(min_value).divide(span).clamp(0, 1)
+    byte_image = scaled.multiply(255).toUint8()
+    return byte_image.clip(geometry).reproject("EPSG:4326", None, scale_m)
+
+
+def _prepare_imagery_items(job: ExportJob, month: str, composite: ee.Image) -> None:
+    month_items = list(job.iter_items_for_month(month))
+
+    true_items = [item for item in month_items if item.variant == "imagery_true"]
+    if true_items:
+        try:
+            true_rgb = _stretch_to_byte(
+                composite,
+                ("B4", "B3", "B2"),
+                job.geometry,
+                job.scale_m,
+            )
+        except Exception as exc:
+            for item in true_items:
+                item.status = "failed"
+                item.error = str(exc)
+        else:
+            for item in true_items:
+                item.image = true_rgb
+                item.is_visualized = True
+                item.status = "ready"
+
+    false_items = [item for item in month_items if item.variant == "imagery_false"]
+    if false_items:
+        try:
+            false_rgb = _stretch_to_byte(
+                composite,
+                ("B8", "B4", "B3"),
+                job.geometry,
+                job.scale_m,
+            )
+        except Exception as exc:
+            for item in false_items:
+                item.status = "failed"
+                item.error = str(exc)
+        else:
+            for item in false_items:
+                item.image = false_rgb
+                item.is_visualized = True
+                item.status = "ready"
+
+
+def _resolve_info(value: object) -> Optional[object]:
+    getter = getattr(value, "getInfo", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            return None
+    return value
+
+
+def _format_scene_date(timestamp: object, month_code: str) -> str:
+    info = _resolve_info(timestamp)
+    if isinstance(info, (int, float)):
+        try:
+            dt = datetime.utcfromtimestamp(float(info) / 1000.0)
+            return dt.strftime("%Y%m%d")
+        except (OverflowError, ValueError):
+            pass
+    if isinstance(info, str) and info:
+        cleaned = re.sub(r"[^0-9]", "", info)
+        if len(cleaned) >= 8:
+            return cleaned[:8]
+    return f"{month_code}00"
+
+
+def _prepare_scene_exports(job: ExportJob, month: str, collection: ee.ImageCollection) -> None:
+    existing = {
+        item.file_name
+        for item in job.iter_items_for_month(month)
+        if item.variant == "scene_true"
+    }
+
+    month_code = month.replace("-", "")
+    try:
+        images = gee.list_collection_images(collection)
+    except Exception:
+        images = []
+
+    new_items: List[ExportItem] = []
+    for idx, image in enumerate(images):
+        try:
+            image_obj = ee.Image(image)
+        except Exception:
+            image_obj = image  # type: ignore[assignment]
+
+        timestamp = getattr(image_obj, "get", lambda key: None)("system:time_start")
+        date_label = _format_scene_date(timestamp, month_code)
+
+        system_index = getattr(image_obj, "get", lambda key: None)("system:index")
+        index_info = _resolve_info(system_index)
+        if isinstance(index_info, str) and index_info.strip():
+            index_suffix = sanitize_name(index_info)
+        else:
+            index_suffix = f"scene{idx:02d}"
+
+        file_name = f"scenes/S2_{date_label}_{job.safe_aoi_name}_{index_suffix}_true.tif"
+        if file_name in existing:
+            continue
+
+        try:
+            rgb_image = _stretch_to_byte(
+                image_obj,
+                ("B4", "B3", "B2"),
+                job.geometry,
+                job.scale_m,
+            )
+        except Exception as exc:
+            item = ExportItem(
+                month=month,
+                index="S2",
+                variant="scene_true",
+                file_name=file_name,
+                status="failed",
+                error=str(exc),
+            )
+            new_items.append(item)
+            continue
+
+        item = ExportItem(
+            month=month,
+            index="S2",
+            variant="scene_true",
+            file_name=file_name,
+            image=rgb_image,
+            is_visualized=True,
+            status="ready",
+        )
+        new_items.append(item)
+
+    if new_items:
+        job.items.extend(new_items)
+
+
 def _run_job(job: ExportJob) -> None:
     with job.lock:
         job.state = "running"
@@ -549,6 +727,8 @@ def _run_job(job: ExportJob) -> None:
                 continue
 
             month_items = list(job.iter_items_for_month(month))
+            _prepare_imagery_items(job, month, composite)
+            _prepare_scene_exports(job, month, collection)
             for index_name in job.indices:
                 index_items = [item for item in month_items if item.index == index_name]
                 if not index_items:
