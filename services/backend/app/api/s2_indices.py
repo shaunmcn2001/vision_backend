@@ -13,6 +13,7 @@ from shapely.geometry import shape
 from starlette.background import BackgroundTask
 
 from app import exports, indices
+from app.services import zones as zone_service
 from app.utils.geometry import area_ha
 from app.utils.shapefile import shapefile_zip_to_geojson
 
@@ -83,6 +84,17 @@ async def prepare_aoi_geometry(
     return response
 
 
+class ProductionZoneOptions(BaseModel):
+    enabled: bool = Field(
+        False, description="When true, compute production zones for the requested months"
+    )
+    n_classes: int = Field(zone_service.DEFAULT_N_CLASSES, ge=3, le=7)
+    cv_mask_threshold: float = Field(zone_service.DEFAULT_CV_THRESHOLD, ge=0)
+    mmu_ha: float = Field(zone_service.DEFAULT_MIN_MAPPING_UNIT_HA, gt=0)
+    smooth_kernel_px: int = Field(zone_service.DEFAULT_SMOOTH_KERNEL_PX, ge=0)
+    simplify_tol_m: float = Field(zone_service.DEFAULT_SIMPLIFY_TOL_M, ge=0)
+
+
 class Sentinel2ExportRequest(BaseModel):
     aoi_geojson: dict = Field(..., description="GeoJSON polygon or multipolygon AOI")
     months: List[str] = Field(..., description="Months to export in YYYY-MM format")
@@ -93,6 +105,9 @@ class Sentinel2ExportRequest(BaseModel):
     aoi_name: str = Field(..., description="Name of the AOI used in filenames")
     scale_m: int = Field(10, description="Target output resolution in metres")
     cloud_prob_max: int = Field(40, description="Maximum S2 cloud probability to retain")
+    production_zones: ProductionZoneOptions | None = Field(
+        None, description="Optional production zone generation parameters"
+    )
 
     @validator("aoi_geojson")
     def _validate_geojson(cls, value: dict) -> dict:
@@ -154,10 +169,33 @@ class Sentinel2ExportRequest(BaseModel):
             raise ValueError("aoi_name cannot be empty")
         return trimmed
 
+    @validator("production_zones", pre=True)
+    def _normalise_zone_options(cls, value):
+        if value in (None, False, ""):
+            return None
+        if value is True:
+            return {"enabled": True}
+        if isinstance(value, ProductionZoneOptions):
+            return value
+        if isinstance(value, dict):
+            return value
+        raise ValueError("production_zones must be a boolean or object")
+
 
 @router.post("/indices")
 def start_export(request: Sentinel2ExportRequest):
     try:
+        zone_config = None
+        if request.production_zones and request.production_zones.enabled:
+            zone_config = exports.ZoneExportConfig(
+                n_classes=request.production_zones.n_classes,
+                cv_mask_threshold=request.production_zones.cv_mask_threshold,
+                min_mapping_unit_ha=request.production_zones.mmu_ha,
+                smooth_kernel_px=request.production_zones.smooth_kernel_px,
+                simplify_tolerance_m=request.production_zones.simplify_tol_m,
+                include_stats=True,
+            )
+
         job = exports.create_job(
             aoi_geojson=request.aoi_geojson,
             months=request.months,
@@ -166,6 +204,7 @@ def start_export(request: Sentinel2ExportRequest):
             aoi_name=request.aoi_name,
             scale_m=request.scale_m,
             cloud_prob_max=request.cloud_prob_max,
+            zone_config=zone_config,
         )
     except RuntimeError as exc:
         raise HTTPException(
