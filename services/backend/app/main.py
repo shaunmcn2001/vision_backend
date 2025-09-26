@@ -9,6 +9,7 @@ from app.api.fields import router as fields_router
 from app.api.fields_upload import router as fields_upload_router
 from app.api.tiles import router as tiles_router
 from app.api.s2_indices import router as s2_indices_router
+from app.api.zones import router as zones_router
 from app import gee
 import os
 
@@ -914,5 +915,6 @@ app.include_router(fields_router, prefix="/api/fields")
 app.include_router(fields_upload_router, prefix="/api/fields")
 app.include_router(tiles_router, prefix="/api")
 app.include_router(s2_indices_router)
+app.include_router(zones_router, prefix="/api")
 app.include_router(export_shapefile_router)
 
