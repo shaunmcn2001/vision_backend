@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import io
 import shutil
 import sys
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -323,6 +326,100 @@ def test_download_index_to_path_preserves_nodata_for_scalar(tmp_path, monkeypatc
     params = captured["params"]
     assert params["noDataValue"] == -9999
     assert params["formatOptions"] == {"cloudOptimized": False, "noDataValue": -9999}
+
+
+def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
+    class _FakeDownloadable:
+        def __init__(self, url: str):
+            self.url = url
+            self.calls: list[dict[str, object]] = []
+
+        def getDownloadURL(self, params: dict[str, object]) -> str:
+            self.calls.append(params)
+            return self.url
+
+    job = exports.ExportJob(
+        job_id="job-zones",
+        export_target="zip",
+        aoi_name="Field",
+        safe_aoi_name="field",
+        months=["2024-01"],
+        indices=["NDVI"],
+        scale_m=10,
+        cloud_prob_max=40,
+        geometry={"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]},
+        zone_config=exports.ZoneExportConfig(
+            n_classes=4,
+            cv_mask_threshold=0.3,
+            min_mapping_unit_ha=0.5,
+            smooth_kernel_px=1,
+            simplify_tolerance_m=5,
+            include_stats=True,
+        ),
+        zone_state=exports.ZoneExportState(status="ready"),
+    )
+
+    job.zone_state.prefix = exports._zone_prefix(job)
+    job.zone_artifacts = SimpleNamespace(
+        zone_image=_FakeDownloadable("https://example.com/raster"),
+        zone_vectors=_FakeDownloadable("https://example.com/vector"),
+        zonal_stats=_FakeDownloadable("https://example.com/stats"),
+        geometry={"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]},
+    )
+    job.items = []
+    job.temp_dir = tmp_path
+
+    def _make_zip(contents: dict[str, bytes]) -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for name, data in contents.items():
+                archive.writestr(name, data)
+        return buffer.getvalue()
+
+    raster_zip = _make_zip({"raster.tif": b"raster-bytes"})
+    vector_zip = _make_zip(
+        {
+            "zones.shp": b"shp-bytes",
+            "zones.shx": b"shx-bytes",
+            "zones.dbf": b"dbf-bytes",
+            "zones.prj": b"prj-bytes",
+        }
+    )
+    stats_csv = b"zone_id,value\n1,0.5\n"
+
+    responses = {
+        "https://example.com/raster": (raster_zip, "application/zip"),
+        "https://example.com/vector": (vector_zip, "application/zip"),
+        "https://example.com/stats": (stats_csv, "text/csv"),
+    }
+
+    monkeypatch.setattr(exports, "_download_bytes", lambda url: responses[url])
+
+    exports._process_zip_exports(job)
+
+    prefix = job.zone_state.prefix
+    assert job.zone_state.status == "completed"
+    assert job.state == "completed"
+    assert job.zone_state.paths["vectors"].endswith(".shp")
+    assert job.zone_state.paths["zonal_stats"].endswith("_zonal_stats.csv")
+    assert job.zone_artifacts.zone_vectors.calls[0]["fileFormat"] == "SHP"
+
+    shapefile_components = {
+        f"{prefix}.shp",
+        f"{prefix}.shx",
+        f"{prefix}.dbf",
+        f"{prefix}.prj",
+    }
+
+    for relative in shapefile_components:
+        assert (tmp_path / relative).exists()
+
+    assert job.zip_path is not None and job.zip_path.exists()
+    with zipfile.ZipFile(job.zip_path) as archive:
+        names = set(archive.namelist())
+        assert shapefile_components.issubset(names)
+        assert f"{prefix}.tif" in names
+        assert f"{prefix}_zonal_stats.csv" in names
 
 
 def test_run_job_marks_items_visualized(monkeypatch):

@@ -408,6 +408,49 @@ def _extract_tiff(payload: bytes, content_type: Optional[str]) -> bytes:
     raise RuntimeError("Download did not contain a GeoTIFF")
 
 
+def _extract_shapefile_archive(
+    url: str, temp_dir: Path, prefix: str
+) -> tuple[List[tuple[Path, str]], str]:
+    payload, _ = _download_bytes(url)
+    base_path = temp_dir / prefix
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+
+    extracted: List[tuple[Path, str]] = []
+    shapefile_name: Optional[str] = None
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        members = [info for info in archive.infolist() if not info.is_dir()]
+        if not members:
+            raise RuntimeError("Shapefile download was empty")
+
+        for info in members:
+            member_path = Path(info.filename)
+            name = member_path.name
+            if not name or name.startswith("__MACOSX"):
+                continue
+
+            suffixes = "".join(part.lower() for part in member_path.suffixes)
+            if not suffixes:
+                continue
+
+            destination = Path(f"{base_path}{suffixes}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(archive.read(info))
+
+            arcname = f"{prefix}{suffixes}"
+            extracted.append((destination, arcname))
+
+            if member_path.suffix.lower() == ".shp":
+                shapefile_name = arcname
+
+    if not extracted:
+        raise RuntimeError("Shapefile download did not contain any files")
+    if shapefile_name is None:
+        raise RuntimeError("Shapefile download did not include a .shp file")
+
+    return extracted, shapefile_name
+
+
 def _download_index_to_path(item: ExportItem, job: ExportJob, output_dir: Path) -> Path:
     if item.image is None:
         raise ValueError("Missing image for export item")
@@ -588,12 +631,8 @@ def _download_zone_artifacts(
     raster_payload = _extract_tiff(raster_bytes, raster_content_type)
     raster_path.write_bytes(raster_payload)
 
-    vector_name = f"{prefix}.geojson"
-    vector_path = temp_dir / vector_name
-    vector_path.parent.mkdir(parents=True, exist_ok=True)
-    vector_url = artifacts.zone_vectors.getDownloadURL({"fileFormat": "GeoJSON"})
-    vector_payload, _ = _download_bytes(vector_url)
-    vector_path.write_bytes(vector_payload)
+    vector_url = artifacts.zone_vectors.getDownloadURL({"fileFormat": "SHP"})
+    vector_files, vector_main = _extract_shapefile_archive(vector_url, temp_dir, prefix)
 
     stats_name: Optional[str] = None
     stats_path: Optional[Path] = None
@@ -605,16 +644,14 @@ def _download_zone_artifacts(
         stats_payload, _ = _download_bytes(stats_url)
         stats_path.write_bytes(stats_payload)
 
-    files: List[tuple[Path, str]] = [
-        (raster_path, raster_name),
-        (vector_path, vector_name),
-    ]
+    files: List[tuple[Path, str]] = [(raster_path, raster_name)]
+    files.extend(vector_files)
     if stats_name and stats_path:
         files.append((stats_path, stats_name))
 
     paths = {
         "raster": raster_name,
-        "vectors": vector_name,
+        "vectors": vector_main,
         "zonal_stats": stats_name,
     }
     return files, paths
