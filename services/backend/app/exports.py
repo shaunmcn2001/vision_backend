@@ -10,16 +10,19 @@ import threading
 import time
 import uuid
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Dict, Iterable, List, Literal, Optional, Tuple, TYPE_CHECKING
 
 import ee
 import requests
 from google.cloud import storage
 
 from app import gee, index_visualization, indices
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from app.services.zones import ZoneArtifacts
 
 MAX_CONCURRENT_EXPORTS = 4
 TASK_POLL_SECONDS = 15
@@ -55,6 +58,25 @@ class ExportItem:
 
 
 @dataclass
+class ZoneExportConfig:
+    n_classes: int
+    cv_mask_threshold: float
+    min_mapping_unit_ha: float
+    smooth_kernel_px: int
+    simplify_tolerance_m: float
+    include_stats: bool = True
+
+
+@dataclass
+class ZoneExportState:
+    status: str = "pending"
+    error: Optional[str] = None
+    prefix: Optional[str] = None
+    paths: Dict[str, Optional[str]] = field(default_factory=dict)
+    tasks: Dict[str, Dict[str, Optional[str]]] = field(default_factory=dict)
+
+
+@dataclass
 class ExportJob:
     job_id: str
     export_target: str
@@ -65,6 +87,9 @@ class ExportJob:
     scale_m: int
     cloud_prob_max: int
     geometry: ee.Geometry
+    zone_config: ZoneExportConfig | None = None
+    zone_state: ZoneExportState | None = None
+    zone_artifacts: "ZoneArtifacts | None" = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
     state: str = "pending"
@@ -81,6 +106,19 @@ class ExportJob:
         self.updated_at = datetime.utcnow()
 
     def to_status_dict(self) -> Dict:
+        zone_payload = None
+        if self.zone_config or self.zone_state:
+            state = self.zone_state or ZoneExportState(status="pending")
+            tasks = {name: dict(values) for name, values in state.tasks.items()}
+            zone_payload = {
+                "status": state.status,
+                "error": state.error,
+                "prefix": state.prefix,
+                "paths": dict(state.paths),
+                "tasks": tasks,
+                "config": asdict(self.zone_config) if self.zone_config else None,
+            }
+
         return {
             "job_id": self.job_id,
             "state": self.state,
@@ -106,6 +144,7 @@ class ExportJob:
                 }
                 for item in self.items
             ],
+            "zone_exports": zone_payload,
         }
 
     def all_completed(self) -> bool:
@@ -206,6 +245,31 @@ def sanitize_name(name: str) -> str:
     return cleaned or "aoi"
 
 
+def _zone_service():  # pragma: no cover - thin wrapper
+    from app.services import zones as zone_service
+
+    return zone_service
+
+
+def _zone_prefix(job: ExportJob) -> str:
+    zone_service = _zone_service()
+    return zone_service.export_prefix(job.aoi_name, job.months)
+
+
+def _zone_completed(job: ExportJob) -> bool:
+    if not job.zone_config:
+        return True
+    if job.zone_state is None:
+        return False
+    return job.zone_state.status in {None, "completed", "skipped"}
+
+
+def _zone_failed(job: ExportJob) -> bool:
+    if not job.zone_config or job.zone_state is None:
+        return False
+    return job.zone_state.status == "failed"
+
+
 def create_job(
     aoi_geojson: Dict,
     months: List[str],
@@ -214,6 +278,7 @@ def create_job(
     aoi_name: str,
     scale_m: int,
     cloud_prob_max: int,
+    zone_config: ZoneExportConfig | None = None,
 ) -> ExportJob:
     gee.initialize()
     geometry = gee.geometry_from_geojson(aoi_geojson)
@@ -273,6 +338,8 @@ def create_job(
         cloud_prob_max=cloud_prob_max,
         geometry=geometry,
         items=items,
+        zone_config=zone_config,
+        zone_state=ZoneExportState(status="pending") if zone_config else None,
     )
 
     _evict_expired_jobs()
@@ -448,6 +515,257 @@ def _start_gcs_task(item: ExportItem, job: ExportJob, bucket: str) -> ee.batch.T
     return task
 
 
+def _build_zone_artifacts_for_job(job: ExportJob) -> None:
+    if not job.zone_config or job.zone_state is None:
+        return
+
+    zone_service = _zone_service()
+    prefix = _zone_prefix(job)
+
+    with job.lock:
+        job.zone_state.status = "building"
+        job.zone_state.error = None
+        job.zone_state.prefix = prefix
+        job.touch()
+
+    try:
+        artifacts = zone_service.build_zone_artifacts(
+            job.geometry,
+            months=job.months,
+            cloud_prob_max=job.cloud_prob_max,
+            n_classes=job.zone_config.n_classes,
+            cv_mask_threshold=job.zone_config.cv_mask_threshold,
+            min_mapping_unit_ha=job.zone_config.min_mapping_unit_ha,
+            smooth_kernel_px=job.zone_config.smooth_kernel_px,
+            simplify_tolerance_m=job.zone_config.simplify_tolerance_m,
+            include_stats=job.zone_config.include_stats,
+        )
+    except Exception as exc:
+        with job.lock:
+            job.zone_artifacts = None
+            job.zone_state.status = "failed"
+            job.zone_state.error = str(exc)
+            if not job.error:
+                job.error = str(exc)
+            job.touch()
+        return
+
+    with job.lock:
+        job.zone_artifacts = artifacts
+        job.zone_state.status = "ready"
+        job.zone_state.error = None
+        job.touch()
+
+
+def _download_zone_artifacts(
+    job: ExportJob, temp_dir: Path
+) -> tuple[List[tuple[Path, str]], Dict[str, Optional[str]]]:
+    if not job.zone_artifacts or not job.zone_config or job.zone_state is None:
+        return [], {}
+
+    zone_service = _zone_service()
+    artifacts = job.zone_artifacts
+    prefix = job.zone_state.prefix or _zone_prefix(job)
+
+    raster_name = f"{prefix}.tif"
+    raster_path = temp_dir / raster_name
+    raster_path.parent.mkdir(parents=True, exist_ok=True)
+
+    raster_params = {
+        "scale": zone_service.DEFAULT_SCALE,
+        "region": artifacts.geometry,
+        "crs": zone_service.DEFAULT_CRS,
+        "filePerBand": False,
+        "fileFormat": "GeoTIFF",
+        "format": "GEO_TIFF",
+        "name": Path(raster_name).stem,
+        "maxPixels": gee.MAX_PIXELS,
+        "formatOptions": {"cloudOptimized": False, "noDataValue": 0},
+    }
+
+    raster_url = artifacts.zone_image.getDownloadURL(raster_params)
+    raster_bytes, raster_content_type = _download_bytes(raster_url)
+    raster_payload = _extract_tiff(raster_bytes, raster_content_type)
+    raster_path.write_bytes(raster_payload)
+
+    vector_name = f"{prefix}.geojson"
+    vector_path = temp_dir / vector_name
+    vector_path.parent.mkdir(parents=True, exist_ok=True)
+    vector_url = artifacts.zone_vectors.getDownloadURL({"fileFormat": "GeoJSON"})
+    vector_payload, _ = _download_bytes(vector_url)
+    vector_path.write_bytes(vector_payload)
+
+    stats_name: Optional[str] = None
+    stats_path: Optional[Path] = None
+    if job.zone_config.include_stats and artifacts.zonal_stats is not None:
+        stats_name = f"{prefix}_zonal_stats.csv"
+        stats_path = temp_dir / stats_name
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        stats_url = artifacts.zonal_stats.getDownloadURL({"fileFormat": "CSV"})
+        stats_payload, _ = _download_bytes(stats_url)
+        stats_path.write_bytes(stats_payload)
+
+    files: List[tuple[Path, str]] = [
+        (raster_path, raster_name),
+        (vector_path, vector_name),
+    ]
+    if stats_name and stats_path:
+        files.append((stats_path, stats_name))
+
+    paths = {
+        "raster": raster_name,
+        "vectors": vector_name,
+        "zonal_stats": stats_name,
+    }
+    return files, paths
+
+
+def _poll_zone_tasks(
+    job: ExportJob,
+    tasks: Dict[str, Optional[ee.batch.Task]],
+    *,
+    bucket: Optional[str] = None,
+) -> None:
+    if job.zone_state is None:
+        return
+
+    active = {name: task for name, task in tasks.items() if task is not None}
+    if not active:
+        job.zone_state.status = "completed"
+        job.touch()
+        return
+
+    completed_states = {"COMPLETED", "SUCCEEDED", "COMPLETED_WITH_ERRORS"}
+    failed_states = {"FAILED", "CANCELLED"}
+
+    while active:
+        time.sleep(TASK_POLL_SECONDS)
+        for name, task in list(active.items()):
+            try:
+                status = task.status() if task else {"state": "FAILED"}
+            except Exception as exc:  # pragma: no cover - EE failure surface
+                status = {"state": "FAILED", "error_message": str(exc)}
+            state = status.get("state")
+            task_info = job.zone_state.tasks.get(name, {})
+            task_info["state"] = state
+
+            if state in completed_states:
+                uris = status.get("destination_uris", []) or []
+                destination = uris[0] if uris else None
+                task_info["destination_uri"] = destination
+                if bucket and destination and destination.startswith(f"gs://{bucket}/"):
+                    blob_path = destination[len(f"gs://{bucket}/") :]
+                    task_info["signed_url"] = _generate_signed_gcs_url(bucket, blob_path)
+                elif destination:
+                    task_info["signed_url"] = destination
+                active.pop(name, None)
+            elif state in failed_states:
+                task_info["error"] = (
+                    status.get("error_message")
+                    or status.get("error_details")
+                    or str(status)
+                )
+                active.pop(name, None)
+            job.zone_state.tasks[name] = task_info
+        job.touch()
+
+    errors = [info.get("error") for info in job.zone_state.tasks.values() if info.get("error")]
+    if errors:
+        job.zone_state.status = "failed"
+        job.zone_state.error = errors[0]
+        if not job.error:
+            job.error = errors[0]
+    else:
+        job.zone_state.status = "completed"
+    job.touch()
+
+
+def _start_zone_cloud_exports(job: ExportJob) -> None:
+    if not job.zone_config or job.zone_state is None or job.zone_artifacts is None:
+        return
+
+    zone_service = _zone_service()
+    prefix = job.zone_state.prefix or _zone_prefix(job)
+    job.zone_state.prefix = prefix
+
+    try:
+        if job.export_target == "gcs":
+            bucket = _gcs_bucket()
+            tasks = zone_service.start_zone_exports(
+                job.zone_artifacts,
+                aoi_name=job.aoi_name,
+                months=job.months,
+                bucket=bucket,
+                include_stats=job.zone_config.include_stats,
+            )
+            job.zone_state.paths = {
+                "raster": f"gs://{bucket}/{prefix}.tif",
+                "vectors": f"gs://{bucket}/{prefix}",
+                "zonal_stats": (
+                    f"gs://{bucket}/{prefix}_zonal_stats.csv"
+                    if job.zone_config.include_stats
+                    else None
+                ),
+            }
+            job.zone_state.tasks = {
+                name: {
+                    "id": getattr(task, "id", None) if task else None,
+                    "state": "READY" if task else "SKIPPED",
+                    "destination_uri": None,
+                    "signed_url": None,
+                    "error": None,
+                }
+                for name, task in tasks.items()
+            }
+            job.zone_state.status = "exporting"
+            job.touch()
+            _poll_zone_tasks(job, tasks, bucket=bucket)
+        elif job.export_target == "drive":
+            folder = os.getenv("GEE_DRIVE_FOLDER", "Sentinel2_Indices") or "Sentinel2_Indices"
+            folder = folder.strip().rstrip("/") or "Sentinel2_Indices"
+            if not folder.endswith("zones"):
+                folder = f"{folder}/zones"
+            drive_prefix = prefix.split("/")[-1]
+            tasks = zone_service.start_zone_exports_drive(
+                job.zone_artifacts,
+                folder=folder,
+                prefix=drive_prefix,
+                include_stats=job.zone_config.include_stats,
+            )
+            job.zone_state.paths = {
+                "raster": f"drive://{folder}/{drive_prefix}.tif",
+                "vectors": f"drive://{folder}/{drive_prefix}",
+                "zonal_stats": (
+                    f"drive://{folder}/{drive_prefix}_zonal_stats.csv"
+                    if job.zone_config.include_stats
+                    else None
+                ),
+            }
+            job.zone_state.tasks = {
+                name: {
+                    "id": getattr(task, "id", None) if task else None,
+                    "state": "READY" if task else "SKIPPED",
+                    "destination_uri": None,
+                    "signed_url": None,
+                    "error": None,
+                }
+                for name, task in tasks.items()
+            }
+            job.zone_state.status = "exporting"
+            job.touch()
+            _poll_zone_tasks(job, tasks)
+        else:
+            job.zone_state.status = "failed"
+            job.zone_state.error = f"Unsupported export target for zones: {job.export_target}"
+            if not job.error:
+                job.error = job.zone_state.error
+            job.touch()
+    except Exception as exc:
+        job.zone_state.status = "failed"
+        job.zone_state.error = str(exc)
+        if not job.error:
+            job.error = str(exc)
+        job.touch()
 def _process_zip_exports(job: ExportJob) -> None:
     if job.temp_dir is None:
         job.temp_dir = Path(tempfile.mkdtemp(prefix="s2idx_"))
@@ -455,6 +773,9 @@ def _process_zip_exports(job: ExportJob) -> None:
     temp_dir = job.temp_dir
     if temp_dir is None:  # pragma: no cover - defensive
         raise RuntimeError("Temporary directory unavailable")
+
+    zone_files: List[tuple[Path, str]] = []
+    zone_paths: Dict[str, Optional[str]] = {}
 
     for item in job.items:
         if item.image is None:
@@ -475,20 +796,57 @@ def _process_zip_exports(job: ExportJob) -> None:
         finally:
             job.touch()
 
+    if job.zone_config and job.zone_state is not None:
+        if job.zone_state.status == "ready" and job.zone_artifacts is not None:
+            job.zone_state.status = "downloading"
+            job.zone_state.error = None
+            job.touch()
+            try:
+                zone_files, zone_paths = _download_zone_artifacts(job, temp_dir)
+            except Exception as exc:
+                job.zone_state.status = "failed"
+                job.zone_state.error = str(exc)
+                if not job.error:
+                    job.error = str(exc)
+            else:
+                job.zone_state.status = "completed"
+                job.zone_state.paths = zone_paths
+            finally:
+                job.touch()
+        elif job.zone_state.status not in {"failed", "completed"}:
+            job.zone_state.status = "failed"
+            job.zone_state.error = job.zone_state.error or "Zone artifacts unavailable"
+            if not job.error and job.zone_state.error:
+                job.error = job.zone_state.error
+            job.touch()
+
     successful = [item for item in job.items if item.status == "completed" and item.local_path]
-    if successful:
+    zip_entries: List[tuple[Path, str]] = []
+    for item in successful:
+        zip_entries.append((item.local_path, item.file_name))
+    zip_entries.extend(zone_files)
+
+    if zip_entries:
         zip_path = temp_dir / f"{job.safe_aoi_name}_sentinel2_indices.zip"
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for item in successful:
-                archive.write(item.local_path, arcname=item.file_name)
+            for path, arcname in zip_entries:
+                archive.write(path, arcname=arcname)
         job.zip_path = zip_path
 
-    if job.all_completed():
+    if job.zone_state is not None and job.zone_state.paths:
+        job.zone_state.paths = {key: zone_paths.get(key) for key in ["raster", "vectors", "zonal_stats"]}
+
+    if job.all_completed() and _zone_completed(job):
         job.state = "completed"
-    elif any(item.status == "completed" for item in job.items):
+    elif any(item.status == "completed" for item in job.items) or (
+        job.zone_state is not None and job.zone_state.status == "completed"
+    ):
         job.state = "partial"
     else:
         job.state = "failed"
+
+    if _zone_failed(job) and job.zone_state and job.zone_state.error and not job.error:
+        job.error = job.zone_state.error
     job.touch()
 
 
@@ -540,12 +898,26 @@ def _process_cloud_exports(job: ExportJob) -> None:
                 active.remove(item)
                 job.touch()
 
-    if job.all_completed():
+    if job.zone_config and job.zone_state is not None:
+        if job.zone_state.status == "ready":
+            _start_zone_cloud_exports(job)
+        elif job.zone_state.status == "building":
+            job.zone_state.status = "failed"
+            job.zone_state.error = job.zone_state.error or "Zone artifacts unavailable"
+            if not job.error and job.zone_state.error:
+                job.error = job.zone_state.error
+            job.touch()
+
+    if job.all_completed() and _zone_completed(job):
         job.state = "completed"
-    elif any(item.status == "completed" for item in job.items):
+    elif any(item.status == "completed" for item in job.items) or (
+        job.zone_state is not None and job.zone_state.status == "completed"
+    ):
         job.state = "partial"
     else:
         job.state = "failed"
+    if _zone_failed(job) and job.zone_state and job.zone_state.error and not job.error:
+        job.error = job.zone_state.error
     job.touch()
 
 
@@ -697,6 +1069,8 @@ def _run_job(job: ExportJob) -> None:
                                 item.status = "failed"
                                 item.error = "Visualisation unavailable"
                 job.touch()
+
+        _build_zone_artifacts_for_job(job)
 
         if job.export_target == "zip":
             _process_zip_exports(job)
