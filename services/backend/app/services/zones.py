@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 import os
 from typing import Dict, List, Mapping, Sequence
 
@@ -21,6 +22,36 @@ DEFAULT_METHOD = "ndvi_percentiles"
 DEFAULT_SAMPLE_SIZE = 8000
 DEFAULT_SCALE = 10
 DEFAULT_CRS = "EPSG:4326"
+
+
+def _subtract_years(reference: date, years: int) -> date:
+    """Return ``reference`` shifted ``years`` into the past."""
+
+    try:
+        return reference.replace(year=reference.year - years)
+    except ValueError:
+        # Handle 29 February in leap years gracefully.
+        return reference.replace(month=2, day=28, year=reference.year - years)
+
+
+def _month_sequence(start: date, end: date) -> List[str]:
+    """Generate ``YYYY-MM`` strings spanning ``start`` through ``end`` inclusive."""
+
+    if start > end:
+        raise ValueError("start date must not be after end date")
+
+    months: List[str] = []
+    current = date(start.year, start.month, 1)
+    terminal = date(end.year, end.month, 1)
+    while current <= terminal:
+        months.append(current.strftime("%Y-%m"))
+        if current.month == 12:
+            current = date(current.year + 1, 1, 1)
+        else:
+            current = date(current.year, current.month + 1, 1)
+    return months
+
+
 @dataclass(frozen=True)
 class ZoneArtifacts:
     """Container for the images/vectors used for production zone exports."""
@@ -31,8 +62,33 @@ class ZoneArtifacts:
     geometry: ee.Geometry
 
 
+@dataclass(frozen=True)
+class ProductionWindow:
+    """Metadata describing a rolling multi-year production window."""
+
+    start_month: str
+    end_month: str
+    months: List[str]
+
+
 def _ordered_months(months: Sequence[str]) -> List[str]:
     return list(dict.fromkeys(months))
+
+
+def _normalise_growth_months(growth_months: Sequence[str] | None) -> List[str]:
+    if not growth_months:
+        return []
+
+    normalised: List[str] = []
+    for value in growth_months:
+        month_str = str(value).strip()
+        if len(month_str) != 2 or not month_str.isdigit():
+            raise ValueError("growth months must be MM strings between 01 and 12")
+        if int(month_str) < 1 or int(month_str) > 12:
+            raise ValueError("growth months must be MM strings between 01 and 12")
+        if month_str not in normalised:
+            normalised.append(month_str)
+    return normalised
 
 
 def _month_bounds(months: Sequence[str]) -> tuple[str, str]:
@@ -52,6 +108,15 @@ def export_prefix(aoi_name: str, months: Sequence[str]) -> str:
     """Public helper that returns the export prefix for a zone export run."""
 
     return _export_prefix(aoi_name, months)
+
+
+def production5y_export_prefix(aoi_name: str, start_month: str, end_month: str) -> str:
+    """Return the export prefix for a rolling 5-year production window."""
+
+    safe_name = sanitize_name(aoi_name or "aoi")
+    start_fmt = start_month.replace("-", "")
+    end_fmt = end_month.replace("-", "")
+    return f"zones/PROD5Y_{start_fmt}_{end_fmt}_{safe_name}_zones"
 
 
 def month_bounds(months: Sequence[str]) -> tuple[str, str]:
@@ -81,6 +146,26 @@ def _build_monthly_composites(
 
 def _compute_ndvi(image: ee.Image) -> ee.Image:
     return image.normalizedDifference(["B8", "B4"]).rename("NDVI")
+
+
+def _compute_ndre(image: ee.Image) -> ee.Image:
+    return image.normalizedDifference(["B8", "B5"]).rename("NDRE")
+
+
+def _compute_ndmi(image: ee.Image) -> ee.Image:
+    return image.normalizedDifference(["B8", "B11"]).rename("NDMI")
+
+
+def _compute_bsi(image: ee.Image) -> ee.Image:
+    return image.expression(
+        "((swir1 + red) - (nir + blue)) / ((swir1 + red) + (nir + blue))",
+        {
+            "swir1": image.select("B11"),
+            "red": image.select("B4"),
+            "nir": image.select("B8"),
+            "blue": image.select("B2"),
+        },
+    ).rename("BSI")
 
 
 def _ndvi_temporal_stats(images: Sequence[ee.Image]) -> Mapping[str, ee.Image]:
@@ -398,6 +483,49 @@ def _build_multiindex_zones(
     return cleaned.rename("zone"), mean_images
 
 
+def _build_multiindex_zones_with_features(
+    *,
+    ndvi_stats: Mapping[str, ee.Image],
+    feature_images: Mapping[str, ee.Image],
+    geometry: ee.Geometry,
+    n_classes: int,
+    smooth_kernel_px: int,
+    min_mapping_unit_ha: float,
+    sample_size: int,
+) -> tuple[ee.Image, Dict[str, ee.Image]]:
+    stability = ndvi_stats["stability"]
+    masked_features: Dict[str, ee.Image] = {}
+    for name, image in feature_images.items():
+        masked_features[name] = image.updateMask(stability)
+
+    normalised = [
+        _normalise_feature(masked_features[name], geometry, name)
+        for name in sorted(masked_features)
+    ]
+    stack = ee.Image.cat(normalised).updateMask(stability)
+
+    training = stack.sample(
+        region=geometry,
+        scale=DEFAULT_SCALE,
+        numPixels=sample_size,
+        seed=42,
+        tileScale=4,
+        geometries=False,
+    )
+    clusterer = ee.Clusterer.wekaKMeans(n_classes).train(training)
+    clustered = stack.cluster(clusterer)
+    ranked = _rank_zones(clustered, ndvi_stats["mean"], geometry).updateMask(stability)
+    cleaned = _apply_cleanup(
+        ranked,
+        geometry,
+        n_classes=n_classes,
+        smooth_kernel_px=smooth_kernel_px,
+        min_mapping_unit_ha=min_mapping_unit_ha,
+    )
+
+    return cleaned.rename("zone"), masked_features
+
+
 def build_zone_artifacts(
     aoi_geojson: dict,
     *,
@@ -479,15 +607,174 @@ def build_zone_artifacts(
     )
 
 
+def build_production5y_zone_artifacts(
+    aoi_geojson: dict,
+    *,
+    years_back: int = 5,
+    growth_months: Sequence[str] | None = None,
+    cloud_prob_max: int = DEFAULT_CLOUD_PROB_MAX,
+    n_classes: int = DEFAULT_N_CLASSES,
+    cv_mask_threshold: float = DEFAULT_CV_THRESHOLD,
+    min_mapping_unit_ha: float = DEFAULT_MIN_MAPPING_UNIT_HA,
+    smooth_kernel_px: int = DEFAULT_SMOOTH_KERNEL_PX,
+    simplify_tolerance_m: float = DEFAULT_SIMPLIFY_TOL_M,
+    method: str = DEFAULT_METHOD,
+    sample_size: int = DEFAULT_SAMPLE_SIZE,
+    dem_asset: str | None = None,
+    include_stats: bool = True,
+) -> tuple[ZoneArtifacts, ProductionWindow]:
+    if years_back <= 0:
+        raise ValueError("years_back must be positive")
+    if n_classes < 3 or n_classes > 7:
+        raise ValueError("n_classes must be between 3 and 7")
+    if min_mapping_unit_ha <= 0:
+        raise ValueError("min_mapping_unit_ha must be positive")
+    if smooth_kernel_px < 0:
+        raise ValueError("smooth_kernel_px must be non-negative")
+
+    method_key = method.strip().lower()
+    if method_key not in {"ndvi_percentiles", "multiindex_kmeans"}:
+        raise ValueError("Unsupported method for production zones")
+
+    growth_filters = _normalise_growth_months(growth_months)
+
+    gee.initialize()
+    geometry = gee.geometry_from_geojson(aoi_geojson)
+
+    end_date = datetime.utcnow().date()
+    start_date = _subtract_years(end_date, years_back)
+    months = _month_sequence(start_date, end_date)
+    if not months:
+        raise ValueError("No months available for the requested window")
+
+    composites: List[tuple[str, ee.Image]] = []
+    for month in months:
+        _, composite = gee.monthly_sentinel2_collection(geometry, month, cloud_prob_max)
+        composite = (
+            composite.resample("bilinear").reproject(DEFAULT_CRS, None, DEFAULT_SCALE)
+        )
+        composites.append((month, composite))
+
+    ndvi_by_month: Dict[str, ee.Image] = {}
+    ndvi_images: List[ee.Image] = []
+    ndre_images: List[ee.Image] = []
+    ndmi_images: List[ee.Image] = []
+
+    for month, image in composites:
+        ndvi = _compute_ndvi(image)
+        ndvi_by_month[month] = ndvi
+        month_code = month[5:7]
+        if not growth_filters or month_code in growth_filters:
+            ndvi_images.append(ndvi)
+            ndre_images.append(_compute_ndre(image))
+            ndmi_images.append(_compute_ndmi(image))
+
+    if not ndvi_images:
+        raise ValueError("No monthly composites matched the growth_months filter")
+
+    stats = _ndvi_temporal_stats(ndvi_images)
+    cv_image = _ndvi_cv(stats["mean"], stats["std"])
+    stability = _stability_mask(cv_image, cv_mask_threshold)
+    stats = {**stats, "cv": cv_image, "stability": stability}
+
+    bsi_images: List[ee.Image] = []
+    for month, image in composites:
+        bsi = _compute_bsi(image)
+        ndvi = ndvi_by_month[month]
+        month_code = month[5:7]
+        if growth_filters and month_code not in growth_filters:
+            mask = ee.Image.constant(1)
+        else:
+            mask = ndvi.lt(0.2)
+        bsi_images.append(bsi.updateMask(mask))
+
+    bsi_collection = ee.ImageCollection(bsi_images)
+    bsi_ref = bsi_collection.median().rename("BSI_ref")
+    bsi_ref = bsi_ref.reproject(DEFAULT_CRS, None, DEFAULT_SCALE).clip(geometry)
+
+    dem_id = (dem_asset or "USGS/SRTMGL1_003").strip()
+    dem_image = ee.Image(dem_id).resample("bilinear").reproject(
+        DEFAULT_CRS, None, DEFAULT_SCALE
+    )
+    dem_image = dem_image.rename("elevation").clip(geometry)
+    slope_image = ee.Terrain.slope(dem_image).rename("slope").reproject(
+        DEFAULT_CRS, None, DEFAULT_SCALE
+    ).clip(geometry)
+
+    if method_key == "ndvi_percentiles":
+        zone_image = _build_percentile_zones(
+            ndvi_stats=stats,
+            geometry=geometry,
+            n_classes=n_classes,
+            smooth_kernel_px=smooth_kernel_px,
+            min_mapping_unit_ha=min_mapping_unit_ha,
+        )
+        feature_means: Dict[str, ee.Image] = {
+            "BSI_ref_mean": bsi_ref.updateMask(stats["stability"]),
+        }
+    else:
+        ndre_collection = ee.ImageCollection(ndre_images)
+        ndmi_collection = ee.ImageCollection(ndmi_images)
+        ndre_mean = ndre_collection.mean().rename("NDRE_mean")
+        ndmi_mean = ndmi_collection.mean().rename("NDMI_mean")
+        feature_images = {
+            "NDVI_mean": stats["mean"],
+            "NDRE_mean": ndre_mean,
+            "NDMI_mean": ndmi_mean,
+            "BSI_ref_mean": bsi_ref,
+            "elevation_mean": dem_image.rename("elevation_mean"),
+            "slope_mean": slope_image.rename("slope_mean"),
+        }
+        zone_image, feature_means = _build_multiindex_zones_with_features(
+            ndvi_stats=stats,
+            feature_images=feature_images,
+            geometry=geometry,
+            n_classes=n_classes,
+            smooth_kernel_px=smooth_kernel_px,
+            min_mapping_unit_ha=min_mapping_unit_ha,
+            sample_size=sample_size,
+        )
+
+    zone_image = zone_image.updateMask(zone_image.neq(0)).toInt16()
+    zone_image = zone_image.rename("zone").reproject(DEFAULT_CRS, None, DEFAULT_SCALE)
+
+    vectors = _prepare_vectors(zone_image, geometry, tolerance_m=simplify_tolerance_m)
+
+    stats_collection = None
+    if include_stats:
+        stats_images = _collect_stats_images(stats, feature_means)
+        stats_collection = ee.FeatureCollection(
+            vectors.map(lambda feature: _add_zonal_stats(feature, stats_images))
+        )
+
+    window = ProductionWindow(start_month=months[0], end_month=months[-1], months=months)
+
+    return (
+        ZoneArtifacts(
+            zone_image=zone_image,
+            zone_vectors=vectors,
+            zonal_stats=stats_collection,
+            geometry=geometry,
+        ),
+        window,
+    )
+
+
 def start_zone_exports(
     artifacts: ZoneArtifacts,
     *,
     aoi_name: str,
-    months: Sequence[str],
+    months: Sequence[str] | None,
     bucket: str,
     include_stats: bool = True,
+    prefix_override: str | None = None,
 ) -> Dict[str, ee.batch.Task]:
-    prefix = _export_prefix(aoi_name, months)
+    if prefix_override:
+        prefix = prefix_override
+    else:
+        if months is None:
+            raise ValueError("months must be provided when prefix_override is not set")
+        prefix = _export_prefix(aoi_name, months)
     description_base = prefix.split("/")[-1][:90]
 
     raster_task = ee.batch.Export.image.toCloudStorage(
@@ -521,6 +808,51 @@ def start_zone_exports(
             description=f"{description_base}_stats",
             bucket=bucket,
             fileNamePrefix=stats_prefix,
+            fileFormat="CSV",
+        )
+        stats_task.start()
+
+    return {"raster": raster_task, "vectors": vector_task, "stats": stats_task}
+
+
+def start_zone_exports_drive(
+    artifacts: ZoneArtifacts,
+    *,
+    folder: str,
+    prefix: str,
+    include_stats: bool = True,
+) -> Dict[str, ee.batch.Task]:
+    description_base = prefix.split("/")[-1][:90]
+
+    raster_task = ee.batch.Export.image.toDrive(
+        image=artifacts.zone_image,
+        description=f"{description_base}_raster",
+        folder=folder,
+        fileNamePrefix=prefix,
+        region=artifacts.geometry,
+        scale=DEFAULT_SCALE,
+        crs=DEFAULT_CRS,
+        maxPixels=gee.MAX_PIXELS,
+        fileFormat="GeoTIFF",
+    )
+    raster_task.start()
+
+    vector_task = ee.batch.Export.table.toDrive(
+        collection=artifacts.zone_vectors,
+        description=f"{description_base}_vectors",
+        folder=folder,
+        fileNamePrefix=prefix,
+        fileFormat="SHP",
+    )
+    vector_task.start()
+
+    stats_task = None
+    if include_stats and artifacts.zonal_stats is not None:
+        stats_task = ee.batch.Export.table.toDrive(
+            collection=artifacts.zonal_stats,
+            description=f"{description_base}_stats",
+            folder=folder,
+            fileNamePrefix=f"{prefix}_zonal_stats",
             fileFormat="CSV",
         )
         stats_task.start()
