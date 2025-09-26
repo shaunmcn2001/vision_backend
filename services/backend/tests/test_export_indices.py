@@ -177,16 +177,21 @@ _SIMPLE_POLYGON = {
 }
 
 
-def _build_export_request(indices: list[str]) -> s2_indices.Sentinel2ExportRequest:
-    return s2_indices.Sentinel2ExportRequest(
-        aoi_geojson=_SIMPLE_POLYGON,
-        months=["2024-01"],
-        indices=indices,
-        export_target="zip",
-        aoi_name="Field",
-        scale_m=10,
-        cloud_prob_max=40,
-    )
+def _build_export_request(
+    indices: list[str], production_zones: object | None = None
+) -> s2_indices.Sentinel2ExportRequest:
+    payload: dict[str, object] = {
+        "aoi_geojson": _SIMPLE_POLYGON,
+        "months": ["2024-01"],
+        "indices": indices,
+        "export_target": "zip",
+        "aoi_name": "Field",
+        "scale_m": 10,
+        "cloud_prob_max": 40,
+    }
+    if production_zones is not None:
+        payload["production_zones"] = production_zones
+    return s2_indices.Sentinel2ExportRequest(**payload)
 
 
 def test_sentinel2_export_request_accepts_mixed_case_indices():
@@ -223,6 +228,42 @@ def test_start_export_queues_canonical_indices(monkeypatch):
         "NDSI_Soil",
     ]
     assert result == {"job_id": "job-123", "state": "pending"}
+
+
+def test_start_export_includes_zone_config(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_create_job(**kwargs):
+        captured.update(kwargs)
+
+        class _Job:
+            job_id = "job-zone"
+            state = "pending"
+
+        return _Job()
+
+    monkeypatch.setattr(s2_indices.exports, "create_job", fake_create_job)
+
+    request = _build_export_request(
+        ["NDVI"],
+        production_zones={"enabled": True, "n_classes": 4, "cv_mask_threshold": 0.3},
+    )
+
+    result = s2_indices.start_export(request)
+
+    zone_config = captured.get("zone_config")
+    assert isinstance(zone_config, s2_indices.exports.ZoneExportConfig)
+    assert zone_config.n_classes == 4
+    assert zone_config.cv_mask_threshold == 0.3
+    assert zone_config.min_mapping_unit_ha == s2_indices.zone_service.DEFAULT_MIN_MAPPING_UNIT_HA
+    assert result == {"job_id": "job-zone", "state": "pending"}
+
+
+def test_production_zone_boolean_enables_defaults():
+    request = _build_export_request(["NDVI"], production_zones=True)
+    assert request.production_zones is not None
+    assert request.production_zones.enabled is True
+    assert request.production_zones.n_classes == s2_indices.zone_service.DEFAULT_N_CLASSES
 
 
 def test_start_export_returns_server_error_when_gee_initialisation_fails(monkeypatch):
