@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+
+TEST_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = TEST_DIR.parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.append(str(BACKEND_DIR))
 
 from app import exports
 from app.api import s2_indices

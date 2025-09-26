@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 import os
-from typing import Dict, List, Mapping, Sequence
+from typing import Dict, List, Mapping, Sequence, Union
 
 import ee
 
@@ -130,6 +130,12 @@ def resolve_export_bucket(explicit: str | None = None) -> str:
     if not bucket:
         raise RuntimeError("GEE_GCS_BUCKET or GCS_BUCKET must be set for zone exports")
     return bucket
+
+
+def _resolve_geometry(aoi: Union[dict, ee.Geometry]) -> ee.Geometry:
+    if isinstance(aoi, ee.Geometry):
+        return aoi
+    return gee.geometry_from_geojson(aoi)
 
 
 def _build_monthly_composites(
@@ -527,7 +533,7 @@ def _build_multiindex_zones_with_features(
 
 
 def build_zone_artifacts(
-    aoi_geojson: dict,
+    aoi_geojson: Union[dict, ee.Geometry],
     *,
     months: Sequence[str],
     cloud_prob_max: int = DEFAULT_CLOUD_PROB_MAX,
@@ -554,7 +560,7 @@ def build_zone_artifacts(
         raise ValueError("Unsupported method for production zones")
 
     gee.initialize()
-    geometry = gee.geometry_from_geojson(aoi_geojson)
+    geometry = _resolve_geometry(aoi_geojson)
 
     composites = _build_monthly_composites(geometry, months, cloud_prob_max)
     if not composites:
@@ -608,7 +614,7 @@ def build_zone_artifacts(
 
 
 def build_production5y_zone_artifacts(
-    aoi_geojson: dict,
+    aoi_geojson: Union[dict, ee.Geometry],
     *,
     years_back: int = 5,
     growth_months: Sequence[str] | None = None,
@@ -639,7 +645,7 @@ def build_production5y_zone_artifacts(
     growth_filters = _normalise_growth_months(growth_months)
 
     gee.initialize()
-    geometry = gee.geometry_from_geojson(aoi_geojson)
+    geometry = _resolve_geometry(aoi_geojson)
 
     end_date = datetime.utcnow().date()
     start_date = _subtract_years(end_date, years_back)
