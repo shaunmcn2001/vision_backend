@@ -16,16 +16,14 @@ class ProductionZonesRequest(BaseModel):
     aoi_geojson: dict = Field(..., description="Polygon or multipolygon AOI GeoJSON")
     aoi_name: str = Field(..., description="AOI name used in export prefixes")
     months: List[str] = Field(..., description="Months in YYYY-MM format")
-    indices_for_zoning: List[str] = Field(
-        default_factory=lambda: list(zone_service.DEFAULT_ZONE_INDICES),
-        description="Indices to include when clustering zones",
-    )
     cloud_prob_max: int = Field(zone_service.DEFAULT_CLOUD_PROB_MAX, ge=0, le=100)
-    k_zones: int = Field(zone_service.DEFAULT_K_ZONES, ge=2)
+    n_classes: int = Field(zone_service.DEFAULT_N_CLASSES, ge=3, le=7)
     cv_mask_threshold: float = Field(zone_service.DEFAULT_CV_THRESHOLD, ge=0)
-    min_mapping_unit_ha: float = Field(zone_service.DEFAULT_MIN_MAPPING_UNIT_HA, gt=0)
+    mmu_ha: float = Field(zone_service.DEFAULT_MIN_MAPPING_UNIT_HA, gt=0)
+    smooth_kernel_px: int = Field(zone_service.DEFAULT_SMOOTH_KERNEL_PX, ge=0)
+    simplify_tol_m: float = Field(zone_service.DEFAULT_SIMPLIFY_TOL_M, ge=0)
+    method: str = Field(zone_service.DEFAULT_METHOD, description="Zone generation method")
     include_zonal_stats: bool = Field(True, description="Export per-zone statistics CSV")
-    sample_size: int = Field(zone_service.DEFAULT_SAMPLE_SIZE, gt=0)
 
     @validator("aoi_geojson")
     def _validate_geojson(cls, value: dict) -> dict:
@@ -71,12 +69,13 @@ def create_production_zones(request: ProductionZonesRequest):
         artifacts = zone_service.build_zone_artifacts(
             request.aoi_geojson,
             months=request.months,
-            indices_for_zoning=request.indices_for_zoning,
             cloud_prob_max=request.cloud_prob_max,
-            k_zones=request.k_zones,
             cv_mask_threshold=request.cv_mask_threshold,
-            min_mapping_unit_ha=request.min_mapping_unit_ha,
-            sample_size=request.sample_size,
+            n_classes=request.n_classes,
+            min_mapping_unit_ha=request.mmu_ha,
+            smooth_kernel_px=request.smooth_kernel_px,
+            simplify_tolerance_m=request.simplify_tol_m,
+            method=request.method,
             include_stats=request.include_zonal_stats,
         )
     except ValueError as exc:
@@ -123,7 +122,8 @@ def create_production_zones(request: ProductionZonesRequest):
             "months": request.months,
             "month_start": start_month,
             "month_end": end_month,
-            "k_zones": request.k_zones,
+            "n_classes": request.n_classes,
+            "method": request.method,
         },
     }
 

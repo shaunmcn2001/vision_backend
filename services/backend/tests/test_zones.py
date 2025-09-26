@@ -59,7 +59,8 @@ def test_create_production_zones_endpoint(monkeypatch):
         aoi_geojson=_sample_polygon(),
         aoi_name="Demo",
         months=["2024-03", "2024-05"],
-        indices_for_zoning=["NDVI", "NDRE"],
+        method="multiindex_kmeans",
+        n_classes=5,
     )
 
     response = create_production_zones(request)
