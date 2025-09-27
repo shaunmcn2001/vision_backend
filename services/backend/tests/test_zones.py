@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from app.api.zones import ProductionZonesRequest, create_production_zones
@@ -41,46 +39,41 @@ def test_production_zones_request_normalises_months():
 
 
 def test_create_production_zones_endpoint(monkeypatch):
-    monkeypatch.setattr(zones, "build_zone_artifacts", lambda *args, **kwargs: SimpleNamespace())
-
-    class _Task:
-        def __init__(self, task_id: str):
-            self.id = task_id
-
-        def status(self):
-            return {"state": "READY"}
-
-    def _fake_exports(_artifacts, **kwargs):
+    def _fake_export(_aoi, _name, months, **kwargs):
         return {
-            "raster": _Task("task_r"),
-            "vectors": _Task("task_v"),
-            "stats": _Task("task_s"),
+            "paths": {
+                "raster": "zones/PROD_202403_202405_demo_zones.tif",
+                "vectors": "zones/PROD_202403_202405_demo_zones.shp",
+                "zonal_stats": "zones/PROD_202403_202405_demo_zones_zonal_stats.csv",
+            },
+            "tasks": {
+                "raster": {"id": "task_r", "state": "READY", "destination_uri": "gs://zones/demo.tif"},
+                "vectors": {"id": "task_v", "state": "READY", "destination_uri": "gs://zones/demo.shp"},
+                "zonal_stats": {"id": "task_s", "state": "READY", "destination_uri": "gs://zones/demo.csv"},
+            },
+            "metadata": {"used_months": months, "skipped_months": [], "mmu_applied": True},
+            "prefix": "zones/PROD_202403_202405_demo_zones",
+            "bucket": "zones-bucket",
         }
 
-    monkeypatch.setattr(zones, "start_zone_exports", _fake_exports)
-    monkeypatch.setattr(zones, "resolve_export_bucket", lambda explicit=None: "zones-bucket")
-    monkeypatch.setattr(zones, "export_prefix", lambda *args, **kwargs: "zones/PROD_202403_202405_demo_zones")
-    monkeypatch.setattr(zones, "month_bounds", lambda months: (months[0], months[-1]))
+    monkeypatch.setattr(zones, "export_selected_period_zones", _fake_export)
 
     request = ProductionZonesRequest(
         aoi_geojson=_sample_polygon(),
         aoi_name="Demo",
         months=["2024-03", "2024-05"],
-        method="multiindex_kmeans",
         n_classes=5,
     )
 
     response = create_production_zones(request)
-    assert response["bucket"] == "zones-bucket"
+    assert response["ok"] is True
+    assert response["ym_start"] == "2024-03"
+    assert response["ym_end"] == "2024-05"
     assert response["paths"]["raster"].endswith("demo_zones.tif")
-    assert response["paths"]["vectors"].endswith("demo_zones.shp")
+    assert response["prefix"].endswith("demo_zones")
 
     raster_task = response["tasks"]["raster"]
     assert raster_task["id"] == "task_r"
     assert raster_task["state"] == "READY"
-    assert raster_task["destination_uri"].endswith("demo_zones.tif")
-    assert raster_task["destination_uris"] == [raster_task["destination_uri"]]
-
-    assert response["metadata"]["month_start"] == "2024-03"
-    assert response["metadata"]["month_end"] == "2024-05"
+    assert raster_task["destination_uri"].endswith("demo.tif")
 
