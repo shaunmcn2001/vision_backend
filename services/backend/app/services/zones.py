@@ -72,7 +72,19 @@ class ProductionWindow:
 
 
 def _ordered_months(months: Sequence[str]) -> List[str]:
-    return list(dict.fromkeys(months))
+    unique: dict[str, datetime] = {}
+    for raw in months:
+        month_str = str(raw).strip()
+        if month_str in unique:
+            continue
+        try:
+            parsed = datetime.strptime(month_str, "%Y-%m")
+        except ValueError as exc:
+            raise ValueError(f"Invalid month format: {raw}") from exc
+        unique[month_str] = parsed
+
+    ordered = sorted(unique.items(), key=lambda item: item[1])
+    return [month for month, _ in ordered]
 
 
 def _normalise_growth_months(growth_months: Sequence[str] | None) -> List[str]:
