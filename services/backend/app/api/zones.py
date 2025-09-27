@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, validator
@@ -46,7 +46,13 @@ class ProductionZonesRequest(_BaseAOIRequest):
     mmu_ha: float = Field(zone_service.DEFAULT_MIN_MAPPING_UNIT_HA, gt=0)
     smooth_kernel_px: int = Field(zone_service.DEFAULT_SMOOTH_KERNEL_PX, ge=0)
     simplify_tol_m: float = Field(zone_service.DEFAULT_SIMPLIFY_TOL_M, ge=0)
-    method: str = Field(zone_service.DEFAULT_METHOD, description="Zone generation method")
+    export_target: Literal["zip", "gcs", "drive"] = Field(
+        "zip", description="Destination for exports"
+    )
+    gcs_bucket: Optional[str] = Field(None, description="Override GCS bucket for exports")
+    gcs_prefix: Optional[str] = Field(
+        None, description="Optional prefix before zones/ when exporting to GCS"
+    )
     include_zonal_stats: bool = Field(True, description="Export per-zone statistics CSV")
 
     @validator("months")
@@ -119,91 +125,51 @@ class ProductionZones5YRequest(_BaseAOIRequest):
 @router.post("/production")
 def create_production_zones(request: ProductionZonesRequest):
     try:
-        artifacts = zone_service.build_zone_artifacts(
+        result = zone_service.export_selected_period_zones(
             request.aoi_geojson,
-            months=request.months,
+            request.aoi_name,
+            request.months,
             cloud_prob_max=request.cloud_prob_max,
-            cv_mask_threshold=request.cv_mask_threshold,
             n_classes=request.n_classes,
-            min_mapping_unit_ha=request.mmu_ha,
+            cv_mask_threshold=request.cv_mask_threshold,
+            mmu_ha=request.mmu_ha,
             smooth_kernel_px=request.smooth_kernel_px,
-            simplify_tolerance_m=request.simplify_tol_m,
-            method=request.method,
-            include_stats=request.include_zonal_stats,
+            simplify_tol_m=request.simplify_tol_m,
+            export_target=request.export_target,
+            gcs_bucket=request.gcs_bucket,
+            gcs_prefix=request.gcs_prefix,
+            include_zonal_stats=request.include_zonal_stats,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    try:
-        bucket = zone_service.resolve_export_bucket()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    result.pop("artifacts", None)
+    metadata = result.get("metadata", {}) or {}
+    used_months: List[str] = metadata.get("used_months") or request.months
+    ym_start = used_months[0]
+    ym_end = used_months[-1]
 
-    prefix = zone_service.export_prefix(request.aoi_name, request.months)
-    stats_prefix = prefix + "_zonal_stats"
-    start_month, end_month = zone_service.month_bounds(request.months)
-
-    paths = {
-        "raster": f"gs://{bucket}/{prefix}.tif",
-        "vectors": f"gs://{bucket}/{prefix}.shp",
-        "zonal_stats": (
-            f"gs://{bucket}/{stats_prefix}.csv" if request.include_zonal_stats else None
-        ),
+    response = {
+        "ok": True,
+        "ym_start": ym_start,
+        "ym_end": ym_end,
+        "paths": result.get("paths", {}),
+        "tasks": result.get("tasks", {}),
+        "metadata": metadata,
     }
 
-    tasks = zone_service.start_zone_exports(
-        artifacts,
-        aoi_name=request.aoi_name,
-        months=request.months,
-        bucket=bucket,
-        include_stats=request.include_zonal_stats,
-    )
+    if request.export_target == "gcs":
+        response["bucket"] = result.get("bucket")
+        response["prefix"] = result.get("prefix")
+    elif request.export_target == "drive":
+        response["folder"] = result.get("folder")
+        response["prefix"] = result.get("prefix")
+    else:
+        response["prefix"] = result.get("prefix")
 
-    def _task_payload(name: str, task):
-        if task is None:
-            return None
-        try:
-            status = task.status() or {}
-        except Exception:  # pragma: no cover - defensive
-            status = {}
-
-        destination = paths.get(name)
-        destination_uris = status.get("destination_uris")
-        if not destination_uris and destination:
-            destination_uris = [destination]
-
-        payload = {
-            "id": getattr(task, "id", None),
-            "state": status.get("state"),
-            "type": status.get("type"),
-            "destination_uris": destination_uris,
-        }
-        if destination:
-            payload["destination_uri"] = destination
-        error = status.get("error_message") or status.get("error_details")
-        if error:
-            payload["error"] = error
-        return payload
-
-    return {
-        "bucket": bucket,
-        "paths": paths,
-        "tasks": {
-            "raster": _task_payload("raster", tasks["raster"]),
-            "vectors": _task_payload("vectors", tasks["vectors"]),
-            "zonal_stats": _task_payload("zonal_stats", tasks["stats"]),
-        },
-        "metadata": {
-            "aoi_name": request.aoi_name,
-            "months": request.months,
-            "month_start": start_month,
-            "month_end": end_month,
-            "n_classes": request.n_classes,
-            "method": request.method,
-        },
-    }
+    return response
 
 
 @router.post("/production5y")

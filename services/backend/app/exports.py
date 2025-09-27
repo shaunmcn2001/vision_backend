@@ -74,6 +74,7 @@ class ZoneExportState:
     prefix: Optional[str] = None
     paths: Dict[str, Optional[str]] = field(default_factory=dict)
     tasks: Dict[str, Dict[str, Optional[str]]] = field(default_factory=dict)
+    metadata: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -116,6 +117,7 @@ class ExportJob:
                 "prefix": state.prefix,
                 "paths": dict(state.paths),
                 "tasks": tasks,
+                "metadata": dict(state.metadata),
                 "config": asdict(self.zone_config) if self.zone_config else None,
             }
 
@@ -572,17 +574,22 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
         job.touch()
 
     try:
-        artifacts = zone_service.build_zone_artifacts(
+        result = zone_service.export_selected_period_zones(
             job.geometry,
-            months=job.months,
+            job.aoi_name,
+            job.months,
             cloud_prob_max=job.cloud_prob_max,
             n_classes=job.zone_config.n_classes,
             cv_mask_threshold=job.zone_config.cv_mask_threshold,
-            min_mapping_unit_ha=job.zone_config.min_mapping_unit_ha,
+            mmu_ha=job.zone_config.min_mapping_unit_ha,
             smooth_kernel_px=job.zone_config.smooth_kernel_px,
-            simplify_tolerance_m=job.zone_config.simplify_tolerance_m,
-            include_stats=job.zone_config.include_stats,
+            simplify_tol_m=job.zone_config.simplify_tolerance_m,
+            export_target="zip",
+            include_zonal_stats=job.zone_config.include_stats,
         )
+        artifacts = result.get("artifacts")
+        metadata = result.get("metadata", {}) or {}
+        prefix = result.get("prefix") or prefix
     except Exception as exc:
         with job.lock:
             job.zone_artifacts = None
@@ -597,6 +604,8 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
         job.zone_artifacts = artifacts
         job.zone_state.status = "ready"
         job.zone_state.error = None
+        job.zone_state.prefix = prefix
+        job.zone_state.metadata = metadata  # type: ignore[attr-defined]
         job.touch()
 
 
