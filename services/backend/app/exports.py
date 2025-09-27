@@ -737,7 +737,7 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
             )
             job.zone_state.paths = {
                 "raster": f"gs://{bucket}/{prefix}.tif",
-                "vectors": f"gs://{bucket}/{prefix}",
+                "vectors": f"gs://{bucket}/{prefix}.shp",
                 "zonal_stats": (
                     f"gs://{bucket}/{prefix}_zonal_stats.csv"
                     if job.zone_config.include_stats
@@ -771,7 +771,7 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
             )
             job.zone_state.paths = {
                 "raster": f"drive://{folder}/{drive_prefix}.tif",
-                "vectors": f"drive://{folder}/{drive_prefix}",
+                "vectors": f"drive://{folder}/{drive_prefix}.shp",
                 "zonal_stats": (
                     f"drive://{folder}/{drive_prefix}_zonal_stats.csv"
                     if job.zone_config.include_stats

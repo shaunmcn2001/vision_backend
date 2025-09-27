@@ -34,7 +34,7 @@ def test_production_zones_request_normalises_months():
     request = ProductionZonesRequest(
         aoi_geojson=_sample_polygon(),
         aoi_name="  Demo Field  ",
-        months=["2024-03", "2024-03", "2024-05"],
+        months=["2024-05", "2024-03", "2024-03"],
     )
     assert request.months == ["2024-03", "2024-05"]
     assert request.aoi_name == "Demo Field"
@@ -43,11 +43,18 @@ def test_production_zones_request_normalises_months():
 def test_create_production_zones_endpoint(monkeypatch):
     monkeypatch.setattr(zones, "build_zone_artifacts", lambda *args, **kwargs: SimpleNamespace())
 
+    class _Task:
+        def __init__(self, task_id: str):
+            self.id = task_id
+
+        def status(self):
+            return {"state": "READY"}
+
     def _fake_exports(_artifacts, **kwargs):
         return {
-            "raster": SimpleNamespace(id="task_r"),
-            "vectors": SimpleNamespace(id="task_v"),
-            "stats": SimpleNamespace(id="task_s"),
+            "raster": _Task("task_r"),
+            "vectors": _Task("task_v"),
+            "stats": _Task("task_s"),
         }
 
     monkeypatch.setattr(zones, "start_zone_exports", _fake_exports)
@@ -66,5 +73,14 @@ def test_create_production_zones_endpoint(monkeypatch):
     response = create_production_zones(request)
     assert response["bucket"] == "zones-bucket"
     assert response["paths"]["raster"].endswith("demo_zones.tif")
-    assert response["tasks"]["raster"]["id"] == "task_r"
+    assert response["paths"]["vectors"].endswith("demo_zones.shp")
+
+    raster_task = response["tasks"]["raster"]
+    assert raster_task["id"] == "task_r"
+    assert raster_task["state"] == "READY"
+    assert raster_task["destination_uri"].endswith("demo_zones.tif")
+    assert raster_task["destination_uris"] == [raster_task["destination_uri"]]
+
+    assert response["metadata"]["month_start"] == "2024-03"
+    assert response["metadata"]["month_end"] == "2024-05"
 
