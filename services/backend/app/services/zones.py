@@ -4,12 +4,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 import os
-from typing import Dict, List, Mapping, Sequence, Union
+from typing import Dict, List, Mapping, Sequence, Tuple, Union
 
 import ee
 
 from app import gee
 from app.exports import sanitize_name
+from app.utils.geometry import area_ha
 
 
 DEFAULT_CLOUD_PROB_MAX = 40
@@ -152,14 +153,54 @@ def _resolve_geometry(aoi: Union[dict, ee.Geometry]) -> ee.Geometry:
 
 def _build_monthly_composites(
     geometry: ee.Geometry, months: Sequence[str], cloud_prob_max: int
-) -> List[ee.Image]:
-    composites: List[ee.Image] = []
-    for month in _ordered_months(months):
-        _, composite = gee.monthly_sentinel2_collection(geometry, month, cloud_prob_max)
-        composites.append(
+) -> Tuple[List[tuple[str, ee.Image]], List[str]]:
+    composites: List[tuple[str, ee.Image]] = []
+    skipped: List[str] = []
+    ordered = _ordered_months(months)
+    for month in ordered:
+        collection, composite = gee.monthly_sentinel2_collection(
+            geometry, month, cloud_prob_max
+        )
+        try:
+            scene_count = int(ee.Number(collection.size()).getInfo() or 0)
+        except Exception as exc:  # pragma: no cover - server side failure
+            raise RuntimeError(f"Failed to evaluate Sentinel-2 collection for {month}: {exc}")
+        if scene_count == 0:
+            skipped.append(month)
+            continue
+
+        reproj = (
             composite.resample("bilinear").reproject(DEFAULT_CRS, None, DEFAULT_SCALE)
         )
-    return composites
+        ndvi = _compute_ndvi(reproj)
+        try:
+            valid_pixels = int(
+                ee.Number(
+                    ndvi.mask()
+                    .reduceRegion(
+                        reducer=ee.Reducer.count(),
+                        geometry=geometry,
+                        scale=DEFAULT_SCALE,
+                        bestEffort=True,
+                        tileScale=4,
+                        maxPixels=gee.MAX_PIXELS,
+                    )
+                    .get("NDVI")
+                ).getInfo()
+                or 0
+            )
+        except Exception as exc:  # pragma: no cover - server side failure
+            raise RuntimeError(
+                f"Failed to determine valid pixel count for {month}: {exc}"
+            ) from exc
+
+        if valid_pixels == 0:
+            skipped.append(month)
+            continue
+
+        composites.append((month, reproj.clip(geometry)))
+
+    return composites, skipped
 
 
 def _compute_ndvi(image: ee.Image) -> ee.Image:
@@ -544,6 +585,99 @@ def _build_multiindex_zones_with_features(
     return cleaned.rename("zone"), masked_features
 
 
+def _prepare_selected_period_artifacts(
+    aoi_geojson: Union[dict, ee.Geometry],
+    *,
+    geometry: ee.Geometry,
+    months: Sequence[str],
+    cloud_prob_max: int,
+    n_classes: int,
+    cv_mask_threshold: float,
+    min_mapping_unit_ha: float,
+    smooth_kernel_px: int,
+    simplify_tol_m: float,
+    method: str,
+    sample_size: int,
+    include_stats: bool,
+) -> tuple[ZoneArtifacts, Dict[str, object]]:
+    composites, skipped_months = _build_monthly_composites(
+        geometry, months, cloud_prob_max
+    )
+    if not composites:
+        raise ValueError("No valid Sentinel-2 scenes were found for the selected months")
+
+    ordered_months = [month for month, _ in composites]
+    ndvi_images = [_compute_ndvi(image) for _, image in composites]
+    stats = _ndvi_temporal_stats(ndvi_images)
+    cv_image = _ndvi_cv(stats["mean"], stats["std"])
+    stability = _stability_mask(cv_image, cv_mask_threshold)
+    stats = {**stats, "cv": cv_image, "stability": stability}
+
+    mmu_value = max(min_mapping_unit_ha, 0)
+    mmu_applied = True
+    if isinstance(aoi_geojson, dict):
+        try:
+            if area_ha(aoi_geojson) < min_mapping_unit_ha:
+                mmu_value = 0
+                mmu_applied = False
+        except Exception:  # pragma: no cover - fallback if area calc fails
+            mmu_value = max(min_mapping_unit_ha, 0)
+            mmu_applied = True
+
+    method_key = method.strip().lower()
+    extra_means: Dict[str, ee.Image] = {}
+
+    if method_key == "ndvi_percentiles":
+        zone_image = _build_percentile_zones(
+            ndvi_stats=stats,
+            geometry=geometry,
+            n_classes=n_classes,
+            smooth_kernel_px=smooth_kernel_px,
+            min_mapping_unit_ha=mmu_value,
+        )
+    else:
+        zone_image, mean_images = _build_multiindex_zones(
+            ndvi_stats=stats,
+            composites=[image for _, image in composites],
+            geometry=geometry,
+            n_classes=n_classes,
+            smooth_kernel_px=smooth_kernel_px,
+            min_mapping_unit_ha=mmu_value,
+            sample_size=sample_size,
+        )
+        extra_means = {
+            name: image.updateMask(stats["stability"])
+            for name, image in mean_images.items()
+        }
+
+    zone_image = zone_image.updateMask(zone_image.neq(0)).toInt16()
+    zone_image = zone_image.rename("zone").reproject(DEFAULT_CRS, None, DEFAULT_SCALE)
+
+    vectors = _prepare_vectors(zone_image, geometry, tolerance_m=simplify_tol_m)
+
+    stats_collection = None
+    stats_images = _collect_stats_images(stats, extra_means)
+    if include_stats:
+        stats_collection = ee.FeatureCollection(
+            vectors.map(lambda feature: _add_zonal_stats(feature, stats_images))
+        )
+
+    artifacts = ZoneArtifacts(
+        zone_image=zone_image,
+        zone_vectors=vectors,
+        zonal_stats=stats_collection,
+        geometry=geometry,
+    )
+
+    metadata: Dict[str, object] = {
+        "used_months": ordered_months,
+        "skipped_months": skipped_months,
+        "mmu_applied": mmu_value > 0 and mmu_applied,
+    }
+
+    return artifacts, metadata
+
+
 def build_zone_artifacts(
     aoi_geojson: Union[dict, ee.Geometry],
     *,
@@ -574,55 +708,22 @@ def build_zone_artifacts(
     gee.initialize()
     geometry = _resolve_geometry(aoi_geojson)
 
-    composites = _build_monthly_composites(geometry, months, cloud_prob_max)
-    if not composites:
-        raise ValueError("No monthly composites were generated")
-
-    ndvi_images = [_compute_ndvi(image) for image in composites]
-    stats = _ndvi_temporal_stats(ndvi_images)
-    cv_image = _ndvi_cv(stats["mean"], stats["std"])
-    stability = _stability_mask(cv_image, cv_mask_threshold)
-    stats = {**stats, "cv": cv_image, "stability": stability}
-
-    if method_key == "ndvi_percentiles":
-        zone_image = _build_percentile_zones(
-            ndvi_stats=stats,
-            geometry=geometry,
-            n_classes=n_classes,
-            smooth_kernel_px=smooth_kernel_px,
-            min_mapping_unit_ha=min_mapping_unit_ha,
-        )
-        extra_means: Dict[str, ee.Image] = {}
-    else:
-        zone_image, mean_images = _build_multiindex_zones(
-            ndvi_stats=stats,
-            composites=composites,
-            geometry=geometry,
-            n_classes=n_classes,
-            smooth_kernel_px=smooth_kernel_px,
-            min_mapping_unit_ha=min_mapping_unit_ha,
-            sample_size=sample_size,
-        )
-        extra_means = {name: image.updateMask(stats["stability"]) for name, image in mean_images.items()}
-
-    zone_image = zone_image.updateMask(zone_image.neq(0)).toInt16()
-    zone_image = zone_image.rename("zone").reproject(DEFAULT_CRS, None, DEFAULT_SCALE)
-
-    vectors = _prepare_vectors(zone_image, geometry, tolerance_m=simplify_tolerance_m)
-
-    stats_collection = None
-    if include_stats:
-        stats_images = _collect_stats_images(stats, extra_means)
-        stats_collection = ee.FeatureCollection(
-            vectors.map(lambda feature: _add_zonal_stats(feature, stats_images))
-        )
-
-    return ZoneArtifacts(
-        zone_image=zone_image,
-        zone_vectors=vectors,
-        zonal_stats=stats_collection,
+    artifacts, _metadata = _prepare_selected_period_artifacts(
+        aoi_geojson,
         geometry=geometry,
+        months=months,
+        cloud_prob_max=cloud_prob_max,
+        n_classes=n_classes,
+        cv_mask_threshold=cv_mask_threshold,
+        min_mapping_unit_ha=min_mapping_unit_ha,
+        smooth_kernel_px=smooth_kernel_px,
+        simplify_tol_m=simplify_tolerance_m,
+        method=method_key,
+        sample_size=sample_size,
+        include_stats=include_stats,
     )
+
+    return artifacts
 
 
 def build_production5y_zone_artifacts(
@@ -876,4 +977,161 @@ def start_zone_exports_drive(
         stats_task.start()
 
     return {"raster": raster_task, "vectors": vector_task, "stats": stats_task}
+
+
+def _task_payload(task: ee.batch.Task | None) -> Dict[str, object]:
+    if task is None:
+        return {}
+    payload: Dict[str, object] = {"id": getattr(task, "id", None)}
+    try:
+        status = task.status() or {}
+    except Exception:  # pragma: no cover - defensive
+        status = {}
+    if status.get("state"):
+        payload["state"] = status.get("state")
+    destination = status.get("destination_uris") or []
+    if destination:
+        payload["destination_uris"] = destination
+    error = status.get("error_message") or status.get("error_details")
+    if error:
+        payload["error"] = error
+    return payload
+
+
+def export_selected_period_zones(
+    aoi_geojson: Union[dict, ee.Geometry],
+    aoi_name: str,
+    months: Sequence[str],
+    *,
+    cloud_prob_max: int = DEFAULT_CLOUD_PROB_MAX,
+    n_classes: int = DEFAULT_N_CLASSES,
+    cv_mask_threshold: float = DEFAULT_CV_THRESHOLD,
+    mmu_ha: float = DEFAULT_MIN_MAPPING_UNIT_HA,
+    smooth_kernel_px: int = DEFAULT_SMOOTH_KERNEL_PX,
+    simplify_tol_m: float = DEFAULT_SIMPLIFY_TOL_M,
+    export_target: str = "zip",
+    gcs_bucket: str | None = None,
+    gcs_prefix: str | None = None,
+    include_zonal_stats: bool = True,
+) -> Dict[str, object]:
+    if not months:
+        raise ValueError("months must contain at least one YYYY-MM value")
+    ordered_months = _ordered_months(months)
+    if n_classes < 3 or n_classes > 7:
+        raise ValueError("n_classes must be between 3 and 7")
+    if smooth_kernel_px < 0:
+        raise ValueError("smooth_kernel_px must be non-negative")
+    if mmu_ha < 0:
+        raise ValueError("mmu_ha must be non-negative")
+
+    gee.initialize()
+    geometry = _resolve_geometry(aoi_geojson)
+
+    artifacts, metadata = _prepare_selected_period_artifacts(
+        aoi_geojson,
+        geometry=geometry,
+        months=ordered_months,
+        cloud_prob_max=cloud_prob_max,
+        n_classes=n_classes,
+        cv_mask_threshold=cv_mask_threshold,
+        min_mapping_unit_ha=mmu_ha,
+        smooth_kernel_px=smooth_kernel_px,
+        simplify_tol_m=simplify_tol_m,
+        method=DEFAULT_METHOD,
+        sample_size=DEFAULT_SAMPLE_SIZE,
+        include_stats=include_zonal_stats,
+    )
+
+    used_months: List[str] = list(metadata.get("used_months", []))
+    skipped: List[str] = list(metadata.get("skipped_months", []))
+    if not used_months:
+        raise ValueError("No valid Sentinel-2 scenes available for the selected period")
+
+    prefix_base = export_prefix(aoi_name, used_months)
+    stats_name = f"{prefix_base}_zonal_stats.csv" if include_zonal_stats else None
+
+    export_target = (export_target or "zip").strip().lower()
+    if export_target not in {"zip", "gcs", "drive"}:
+        raise ValueError("export_target must be one of zip, gcs, or drive")
+
+    result: Dict[str, object] = {
+        "paths": {
+            "raster": f"{prefix_base}.tif",
+            "vectors": f"{prefix_base}.shp",
+            "zonal_stats": stats_name,
+        },
+        "tasks": {},
+        "prefix": prefix_base,
+        "metadata": {
+            "used_months": used_months,
+            "skipped_months": skipped,
+            "mmu_applied": bool(metadata.get("mmu_applied", True)),
+        },
+        "artifacts": artifacts,
+    }
+
+    if export_target == "zip":
+        return result
+
+    if export_target == "gcs":
+        bucket = resolve_export_bucket(gcs_bucket)
+        cleaned_prefix = prefix_base
+        if gcs_prefix:
+            trimmed = gcs_prefix.strip().strip("/")
+            if trimmed:
+                cleaned_prefix = f"{trimmed}/{prefix_base}"
+        tasks = start_zone_exports(
+            artifacts,
+            aoi_name=aoi_name,
+            months=used_months,
+            bucket=bucket,
+            include_stats=include_zonal_stats,
+            prefix_override=cleaned_prefix,
+        )
+        result["bucket"] = bucket
+        result["prefix"] = cleaned_prefix
+        result["paths"] = {
+            "raster": f"gs://{bucket}/{cleaned_prefix}.tif",
+            "vectors": f"gs://{bucket}/{cleaned_prefix}.shp",
+            "zonal_stats": (
+                f"gs://{bucket}/{cleaned_prefix}_zonal_stats.csv"
+                if include_zonal_stats
+                else None
+            ),
+        }
+        result["tasks"] = {
+            "raster": _task_payload(tasks.get("raster")),
+            "vectors": _task_payload(tasks.get("vectors")),
+            "zonal_stats": _task_payload(tasks.get("stats")),
+        }
+        return result
+
+    folder = (os.getenv("GEE_DRIVE_FOLDER") or "Sentinel2_Indices").strip() or "Sentinel2_Indices"
+    folder = folder.rstrip("/")
+    if not folder.endswith("zones"):
+        folder = f"{folder}/zones"
+    drive_prefix = prefix_base.split("/")[-1]
+    tasks = start_zone_exports_drive(
+        artifacts,
+        folder=folder,
+        prefix=drive_prefix,
+        include_stats=include_zonal_stats,
+    )
+    result["folder"] = folder
+    result["prefix"] = drive_prefix
+    result["paths"] = {
+        "raster": f"drive://{folder}/{drive_prefix}.tif",
+        "vectors": f"drive://{folder}/{drive_prefix}.shp",
+        "zonal_stats": (
+            f"drive://{folder}/{drive_prefix}_zonal_stats.csv"
+            if include_zonal_stats
+            else None
+        ),
+    }
+    result["tasks"] = {
+        "raster": _task_payload(tasks.get("raster")),
+        "vectors": _task_payload(tasks.get("vectors")),
+        "zonal_stats": _task_payload(tasks.get("stats")),
+    }
+    return result
 

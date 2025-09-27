@@ -124,6 +124,107 @@ def export_ui():
         font-size: 14px;
       }
 
+      .hidden {
+        display: none !important;
+      }
+
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .nested-panel {
+        margin-top: 12px;
+        padding: 16px;
+        border-radius: 12px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+      }
+
+      .nested-panel .grid {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      }
+
+      .nested-panel .subfield {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .results-panel {
+        margin-top: 24px;
+        padding: 16px;
+        border-radius: 12px;
+        border: 1px solid #d8dee9;
+        background: #f1f5f9;
+      }
+
+      .results-panel.hidden {
+        display: none;
+      }
+
+      .results-panel h3 {
+        font-size: 16px;
+        font-weight: 600;
+        color: #1f2933;
+        margin-bottom: 12px;
+      }
+
+      .zone-artifacts {
+        list-style: none;
+        display: grid;
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+      }
+
+      .zone-artifacts li {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 14px;
+        border-radius: 10px;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+      }
+
+      .artifact-label {
+        font-weight: 600;
+        color: #1f2933;
+        font-size: 14px;
+      }
+
+      .artifact-output {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        font-size: 13px;
+        color: #475569;
+      }
+
+      .artifact-output a {
+        color: #2563eb;
+        font-weight: 600;
+        text-decoration: none;
+      }
+
+      .artifact-output a:hover {
+        text-decoration: underline;
+      }
+
+      .status-text {
+        color: #475569;
+      }
+
+      .zones-info {
+        margin-top: 14px;
+        font-size: 13px;
+        color: #475569;
+      }
+
       .file-upload {
         border: 2px dashed #d0d7e3;
         border-radius: 12px;
@@ -460,6 +561,42 @@ def export_ui():
          </div>
 
          <div class="form-group">
+           <label class="label" for="zonesToggle">Production zones</label>
+           <div class="toggle-row">
+             <input type="checkbox" id="zonesToggle" />
+             <label for="zonesToggle">Enable productivity zones for the selected period</label>
+           </div>
+           <div class="help-text">Compute stable NDVI-based production zones and export a raster, shapefile, and optional zonal statistics table.</div>
+           <div id="zonesOptions" class="nested-panel hidden" aria-hidden="true">
+             <div class="grid">
+               <div class="subfield">
+                 <label class="label" for="zonesClasses">Number of classes</label>
+                 <select class="select-field" id="zonesClasses">
+                   <option value="3" selected>3 classes</option>
+                   <option value="5">5 classes</option>
+                 </select>
+               </div>
+               <div class="subfield">
+                 <label class="label" for="zonesCv">Stability (CV) threshold</label>
+                 <input type="number" class="input-field" id="zonesCv" step="0.01" min="0" value="0.25" />
+               </div>
+               <div class="subfield">
+                 <label class="label" for="zonesMmu">Minimum mapping unit (ha)</label>
+                 <input type="number" class="input-field" id="zonesMmu" step="0.1" min="0" value="0.5" />
+               </div>
+               <div class="subfield">
+                 <label class="label" for="zonesSmooth">Smooth kernel (px)</label>
+                 <input type="number" class="input-field" id="zonesSmooth" step="1" min="0" value="1" />
+               </div>
+               <div class="subfield">
+                 <label class="label" for="zonesSimplify">Simplify tolerance (m)</label>
+                 <input type="number" class="input-field" id="zonesSimplify" step="1" min="0" value="5" />
+               </div>
+             </div>
+           </div>
+         </div>
+
+         <div class="form-group">
            <label class="label" for="apiKey">API key (optional)</label>
            <input type="text" class="input-field" id="apiKey" name="api_key" placeholder="x-api-key value" />
            <div class="help-text">Only required when API key enforcement is enabled for the backend.</div>
@@ -467,6 +604,30 @@ def export_ui():
 
          <button type="submit" class="export-button">Start export</button>
          <div class="status-message" id="statusMessage" role="status" aria-live="polite"></div>
+         <div id="zonesPanel" class="results-panel hidden" aria-live="polite">
+           <h3>Production zones</h3>
+           <ul class="zone-artifacts">
+             <li>
+               <span class="artifact-label">Raster</span>
+               <span class="artifact-output" data-zone-artifact="raster">
+                 <span class="status-text">Not requested</span>
+               </span>
+             </li>
+             <li>
+               <span class="artifact-label">Shapefile</span>
+               <span class="artifact-output" data-zone-artifact="vectors">
+                 <span class="status-text">Not requested</span>
+               </span>
+             </li>
+             <li>
+               <span class="artifact-label">Zonal stats CSV</span>
+               <span class="artifact-output" data-zone-artifact="zonal_stats">
+                 <span class="status-text">Not requested</span>
+               </span>
+             </li>
+           </ul>
+           <div class="zones-info" id="zonesInfo"></div>
+         </div>
        </form>
      </div>
 
@@ -484,6 +645,20 @@ def export_ui():
        const aoiNameInput = document.getElementById('aoiName');
        const exportDestinationSelect = document.getElementById('exportDestination');
        const apiKeyInput = document.getElementById('apiKey');
+       const zonesToggle = document.getElementById('zonesToggle');
+       const zonesOptions = document.getElementById('zonesOptions');
+       const zonesClasses = document.getElementById('zonesClasses');
+       const zonesCvInput = document.getElementById('zonesCv');
+       const zonesMmuInput = document.getElementById('zonesMmu');
+       const zonesSmoothInput = document.getElementById('zonesSmooth');
+       const zonesSimplifyInput = document.getElementById('zonesSimplify');
+       const zonesPanel = document.getElementById('zonesPanel');
+       const zonesInfo = document.getElementById('zonesInfo');
+       const zoneArtifactElements = {
+         raster: document.querySelector('[data-zone-artifact="raster"]'),
+         vectors: document.querySelector('[data-zone-artifact="vectors"]'),
+         zonal_stats: document.querySelector('[data-zone-artifact="zonal_stats"]'),
+       };
 
        const { origin, pathname } = window.location;
        const lastSlashIndex = pathname.lastIndexOf('/');
@@ -495,8 +670,157 @@ def export_ui():
        };
 
        const POLL_INTERVAL_MS = 5000;
+       let zonesEnabledGlobal = false;
+       let zoneEndpointData = null;
+       let zoneJobData = null;
+       let currentExportTarget = 'zip';
 
        const getIndicesCheckboxes = () => Array.from(document.querySelectorAll('input[name="indices"]'));
+
+       const toggleZoneOptions = () => {
+         const enabled = zonesToggle.checked;
+         if (enabled) {
+           zonesOptions.classList.remove('hidden');
+           zonesOptions.setAttribute('aria-hidden', 'false');
+         } else {
+           zonesOptions.classList.add('hidden');
+           zonesOptions.setAttribute('aria-hidden', 'true');
+         }
+       };
+
+       const resetZonePanel = () => {
+         zonesPanel.classList.add('hidden');
+         zonesInfo.textContent = '';
+         Object.values(zoneArtifactElements).forEach((el) => {
+           if (!el) {
+             return;
+           }
+           el.innerHTML = '<span class="status-text">Not requested</span>';
+         });
+       };
+
+       const setZoneArtifactStatus = (kind, info) => {
+         const container = zoneArtifactElements[kind];
+         if (!container) {
+           return;
+         }
+         container.innerHTML = '';
+         const textSpan = document.createElement('span');
+         textSpan.className = 'status-text';
+         textSpan.textContent = info.text;
+         container.appendChild(textSpan);
+         if (info.url) {
+           const link = document.createElement('a');
+           link.href = info.url;
+           link.target = '_blank';
+           link.rel = 'noopener';
+           link.textContent = info.filename || 'Download';
+           container.appendChild(link);
+         }
+       };
+
+       const renderZonePanel = () => {
+         if (!zonesEnabledGlobal) {
+           resetZonePanel();
+           return;
+         }
+
+         zonesPanel.classList.remove('hidden');
+
+         const zoneData = zoneJobData || {};
+         const endpointData = zoneEndpointData || {};
+         const zonePaths = (zoneData.paths && zoneData.paths) || {};
+         const endpointPaths = (endpointData.paths && endpointData.paths) || {};
+         const metadata = zoneData.metadata || endpointData.metadata || {};
+
+         const usedMonths = Array.isArray(metadata.used_months) ? metadata.used_months : [];
+         const skippedMonths = Array.isArray(metadata.skipped_months) ? metadata.skipped_months : [];
+         const mmuApplied = metadata.mmu_applied;
+
+         const infoParts = [];
+         if (usedMonths.length) {
+           infoParts.push(`Period: ${usedMonths[0]} – ${usedMonths[usedMonths.length - 1]}`);
+         }
+         if (skippedMonths.length) {
+           infoParts.push(`Skipped: ${skippedMonths.join(', ')}`);
+         }
+         if (typeof mmuApplied === 'boolean') {
+           infoParts.push(mmuApplied ? 'MMU applied' : 'MMU skipped (AOI smaller than threshold)');
+         }
+         zonesInfo.textContent = infoParts.join(' · ');
+
+         const includeStats = !(
+           (zonePaths.zonal_stats === null || typeof zonePaths.zonal_stats === 'undefined') &&
+           (endpointPaths.zonal_stats === null || typeof endpointPaths.zonal_stats === 'undefined')
+         );
+
+         const computeStatus = (kind) => {
+           if (kind === 'zonal_stats' && !includeStats) {
+             return { text: 'Not requested' };
+           }
+
+           const jobTask = (zoneData.tasks && zoneData.tasks[kind]) || {};
+           const endpointTask = (endpointData.tasks && endpointData.tasks[kind]) || {};
+           const error = jobTask.error || endpointTask.error;
+           if (error) {
+             return { text: `Failed: ${error}` };
+           }
+
+           const downloadUrl =
+             jobTask.signed_url ||
+             jobTask.destination_uri ||
+             endpointTask.signed_url ||
+             endpointTask.destination_uri ||
+             null;
+           const filenameSource =
+             (zonePaths && zonePaths[kind]) ||
+             (endpointPaths && endpointPaths[kind]) ||
+             null;
+           const filename = filenameSource ? String(filenameSource).split('/').pop() : undefined;
+
+           if (downloadUrl) {
+             return { text: 'Ready', url: downloadUrl, filename };
+           }
+
+           if (currentExportTarget === 'zip') {
+             if (zoneData.status === 'completed') {
+               return {
+                 text: filename ? `Included (${filename})` : 'Included in ZIP',
+               };
+             }
+             const zoneStatus = zoneData.status || endpointTask.state || 'Preparing…';
+             return { text: `Status: ${zoneStatus}` };
+           }
+
+           const taskState = jobTask.state || endpointTask.state;
+           return { text: taskState ? `Status: ${taskState}` : 'Pending…' };
+         };
+
+         ['raster', 'vectors', 'zonal_stats'].forEach((kind) => {
+           setZoneArtifactStatus(kind, computeStatus(kind));
+         });
+       };
+
+       const primeZonePanel = () => {
+         zonesEnabledGlobal = true;
+         zoneEndpointData = null;
+         zoneJobData = null;
+         zonesPanel.classList.remove('hidden');
+         zonesInfo.textContent = 'Preparing production zones…';
+         ['raster', 'vectors', 'zonal_stats'].forEach((kind) => {
+           setZoneArtifactStatus(kind, { text: 'Queued…' });
+         });
+       };
+
+       const updateZonePanelFromEndpoint = (data) => {
+         zoneEndpointData = data || null;
+         renderZonePanel();
+       };
+
+       const updateZonePanelFromJob = (zone) => {
+         zoneJobData = zone || null;
+         renderZonePanel();
+       };
 
        const updateFileStatus = (text) => {
          fileStatus.textContent = text || 'No file chosen';
@@ -605,10 +929,10 @@ def export_ui():
          let message = 'Checking export status…';
          let type = 'pending';
 
-         switch (job.state) {
-           case 'pending':
-             message = `Export job queued… ${completed} of ${total} ready${failed ? ` (${failed} failed)` : ''}.`;
-             break;
+        switch (job.state) {
+          case 'pending':
+            message = `Export job queued… ${completed} of ${total} ready${failed ? ` (${failed} failed)` : ''}.`;
+            break;
            case 'running':
              message = `Building exports: ${completed} of ${total} ready${failed ? ` (${failed} failed)` : ''}${active ? `, ${active} in progress` : ''}.`;
              break;
@@ -628,9 +952,12 @@ def export_ui():
              break;
            default:
              message = `Job status: ${job.state || 'unknown'}.`;
-         }
+        }
 
-         setStatus(message, type);
+        setStatus(message, type);
+        if (job.zone_exports) {
+          updateZonePanelFromJob(job.zone_exports);
+        }
        };
 
        const pollJob = async (jobId, exportTarget, headers) => {
@@ -688,6 +1015,39 @@ def export_ui():
          return response.json();
        };
 
+       const queueZonesProduction = async (
+         geometry,
+         aoiName,
+         months,
+         zoneParams,
+         exportTarget,
+         headers
+       ) => {
+         const response = await fetch(buildUrl('zones/production'), {
+           method: 'POST',
+           headers: { ...headers, 'Content-Type': 'application/json' },
+           body: JSON.stringify({
+             aoi_geojson: geometry,
+             aoi_name: aoiName,
+             months,
+             cloud_prob_max: 40,
+             n_classes: zoneParams.n_classes,
+             cv_mask_threshold: zoneParams.cv_mask_threshold,
+             mmu_ha: zoneParams.mmu_ha,
+             smooth_kernel_px: zoneParams.smooth_kernel_px,
+             simplify_tol_m: zoneParams.simplify_tol_m,
+             export_target: exportTarget,
+             include_zonal_stats: zoneParams.include_zonal_stats,
+           }),
+         });
+         if (!response.ok) {
+           throw new Error(await readError(response));
+         }
+         const data = await response.json();
+         updateZonePanelFromEndpoint(data);
+         return data;
+       };
+
        let isProcessing = false;
 
        const setIndicesSelection = (checked) => {
@@ -716,6 +1076,17 @@ def export_ui():
        };
 
        setDefaultDates();
+       toggleZoneOptions();
+
+       if (zonesToggle) {
+         zonesToggle.addEventListener('change', () => {
+           toggleZoneOptions();
+           if (!zonesToggle.checked) {
+             zonesEnabledGlobal = false;
+             resetZonePanel();
+           }
+         });
+       }
 
        fileUpload.addEventListener('click', () => {
          fileInput.click();
@@ -771,38 +1142,101 @@ def export_ui():
            return;
          }
 
-         const apiKey = apiKeyInput.value.trim();
-         const headers = apiKey ? { 'x-api-key': apiKey } : {};
-         const exportTarget = exportDestinationSelect.value;
-         const aoiName = aoiNameInput.value.trim();
-         const monthCount = months.length;
-         const indexCount = selectedIndices.length;
+        const apiKey = apiKeyInput.value.trim();
+        const headers = apiKey ? { 'x-api-key': apiKey } : {};
+        const exportTarget = exportDestinationSelect.value;
+        const zonesEnabled = zonesToggle.checked;
+        let zoneParams = null;
+        if (zonesEnabled) {
+          const nClasses = parseInt(zonesClasses.value, 10);
+          const cvThreshold = parseFloat(zonesCvInput.value);
+          const mmu = parseFloat(zonesMmuInput.value);
+          const smooth = parseInt(zonesSmoothInput.value, 10);
+          const simplify = parseFloat(zonesSimplifyInput.value);
+          if (!Number.isInteger(nClasses) || ![3, 5].includes(nClasses)) {
+            setStatus('Choose either 3 or 5 production classes.', 'error');
+            return;
+          }
+          if ([cvThreshold, mmu, smooth, simplify].some((value) => Number.isNaN(value) || value < 0)) {
+            setStatus('Production zone parameters must be non-negative numbers.', 'error');
+            return;
+          }
+          zoneParams = {
+            n_classes: nClasses,
+            cv_mask_threshold: cvThreshold,
+            mmu_ha: mmu,
+            smooth_kernel_px: smooth,
+            simplify_tol_m: simplify,
+            include_zonal_stats: true,
+          };
+        }
+        const aoiName = aoiNameInput.value.trim();
+        const monthCount = months.length;
+        const indexCount = selectedIndices.length;
 
-         setStatus('Uploading shapefile to prepare AOI geometry…', 'pending');
-         isProcessing = true;
-         setProcessingState(true);
+        currentExportTarget = exportTarget;
+        if (zonesEnabled) {
+          primeZonePanel();
+        } else {
+          zonesEnabledGlobal = false;
+          resetZonePanel();
+        }
+
+        setStatus('Uploading shapefile to prepare AOI geometry…', 'pending');
+        isProcessing = true;
+        setProcessingState(true);
 
          try {
            const aoiPayload = await uploadAndFetchGeometry(fileInput.files[0], aoiName, headers);
-           const { geometry, aoi_name: sanitizedAoiName } = aoiPayload;
-           const jobAoiName = sanitizedAoiName || aoiName;
-           if (sanitizedAoiName && sanitizedAoiName !== aoiName) {
-             console.info(`AOI name sanitised to "${sanitizedAoiName}" for export filenames.`);
-           }
+          const { geometry, aoi_name: sanitizedAoiName } = aoiPayload;
+          const jobAoiName = sanitizedAoiName || aoiName;
+          if (sanitizedAoiName && sanitizedAoiName !== aoiName) {
+            console.info(`AOI name sanitised to "${sanitizedAoiName}" for export filenames.`);
+          }
 
-           setStatus('Queueing Sentinel-2 export job…', 'pending');
+          setStatus('Queueing Sentinel-2 export job…', 'pending');
 
-           const queueResponse = await fetch(buildUrl('export/s2/indices'), {
-             method: 'POST',
-             headers: { ...headers, 'Content-Type': 'application/json' },
-             body: JSON.stringify({
-               aoi_geojson: geometry,
-               months,
-               indices: selectedIndices,
-               export_target: exportTarget,
-               aoi_name: jobAoiName,
-             }),
-           });
+          let zonePromise = null;
+          if (zonesEnabled && zoneParams) {
+            zonePromise = queueZonesProduction(
+              geometry,
+              jobAoiName,
+              months,
+              zoneParams,
+              exportTarget,
+              headers
+            ).catch((error) => {
+              const message = error instanceof Error ? error.message : String(error);
+              zonesPanel.classList.remove('hidden');
+              ['raster', 'vectors', 'zonal_stats'].forEach((kind) => {
+                setZoneArtifactStatus(kind, { text: `Failed: ${message}` });
+              });
+              zonesInfo.textContent = 'Production zones request failed.';
+              return null;
+            });
+          }
+
+          const queueResponse = await fetch(buildUrl('export/s2/indices'), {
+            method: 'POST',
+            headers: { ...headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              aoi_geojson: geometry,
+              months,
+              indices: selectedIndices,
+              export_target: exportTarget,
+              aoi_name: jobAoiName,
+              production_zones: zonesEnabled
+                ? {
+                    enabled: true,
+                    n_classes: zoneParams.n_classes,
+                    cv_mask_threshold: zoneParams.cv_mask_threshold,
+                    mmu_ha: zoneParams.mmu_ha,
+                    smooth_kernel_px: zoneParams.smooth_kernel_px,
+                    simplify_tol_m: zoneParams.simplify_tol_m,
+                  }
+                : { enabled: false },
+            }),
+          });
 
            if (!queueResponse.ok) {
              throw new Error(await readError(queueResponse));
@@ -818,11 +1252,11 @@ def export_ui():
 
            const finalStatus = await pollJob(jobId, exportTarget, headers);
 
-           if (exportTarget === 'zip') {
-             setStatus('Exports ready. Preparing ZIP download…', 'pending');
-             await downloadZip(jobId, headers);
-           } else {
-             const summary = await fetchExportSummary(jobId, headers);
+          if (exportTarget === 'zip') {
+            setStatus('Exports ready. Preparing ZIP download…', 'pending');
+            await downloadZip(jobId, headers);
+          } else {
+            const summary = await fetchExportSummary(jobId, headers);
              if (summary && Array.isArray(summary.items)) {
                console.groupCollapsed('Sentinel-2 export destinations');
                summary.items.forEach((item) => {
@@ -833,9 +1267,13 @@ def export_ui():
              } else {
                console.info('Export summary', summary);
              }
-           }
+          }
 
-           const items = Array.isArray(finalStatus.items) ? finalStatus.items : [];
+          if (zonePromise) {
+            await zonePromise;
+          }
+
+          const items = Array.isArray(finalStatus.items) ? finalStatus.items : [];
            const successful = items.filter((item) => item.status === 'completed').length;
            const failed = items.filter((item) => item.status === 'failed').length;
            const total = items.length;
@@ -860,17 +1298,21 @@ def export_ui():
              );
            }
 
-           form.reset();
-           setDefaultDates();
-           updateFileStatus('No file chosen');
-           getIndicesCheckboxes().forEach((checkbox) => {
-             checkbox.checked = false;
-           });
-           const defaultCheckbox = document.getElementById('index-ndvi');
-           if (defaultCheckbox) {
-             defaultCheckbox.checked = true;
-           }
-         } catch (error) {
+          form.reset();
+          setDefaultDates();
+          updateFileStatus('No file chosen');
+          getIndicesCheckboxes().forEach((checkbox) => {
+            checkbox.checked = false;
+          });
+          const defaultCheckbox = document.getElementById('index-ndvi');
+          if (defaultCheckbox) {
+            defaultCheckbox.checked = true;
+          }
+          zonesToggle.checked = false;
+          toggleZoneOptions();
+          zonesEnabledGlobal = false;
+          resetZonePanel();
+        } catch (error) {
            console.error('Export workflow failed', error);
            const message = error instanceof Error ? error.message : String(error);
            setStatus(`Export failed: ${message}`, 'error');
