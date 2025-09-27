@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -52,19 +53,15 @@ class ProductionZonesRequest(_BaseAOIRequest):
     def _validate_months(cls, value: List[str]) -> List[str]:
         if not value:
             raise ValueError("At least one month must be provided")
-        seen = []
+        parsed: dict[str, datetime] = {}
         for month in value:
             month_str = str(month).strip()
-            if len(month_str) != 7 or month_str[4] != "-":
-                raise ValueError(f"Invalid month format: {month}")
-            year_part, month_part = month_str.split("-")
-            if not (year_part.isdigit() and month_part.isdigit()):
-                raise ValueError(f"Invalid month value: {month}")
-            if int(month_part) < 1 or int(month_part) > 12:
-                raise ValueError(f"Month must be between 01 and 12: {month}")
-            if month_str not in seen:
-                seen.append(month_str)
-        return seen
+            try:
+                parsed.setdefault(month_str, datetime.strptime(month_str, "%Y-%m"))
+            except ValueError as exc:
+                raise ValueError(f"Invalid month format: {month}") from exc
+        ordered = sorted(parsed.items(), key=lambda item: item[1])
+        return [month for month, _ in ordered]
 
 
 class ProductionZones5YRequest(_BaseAOIRequest):
@@ -144,6 +141,18 @@ def create_production_zones(request: ProductionZonesRequest):
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    prefix = zone_service.export_prefix(request.aoi_name, request.months)
+    stats_prefix = prefix + "_zonal_stats"
+    start_month, end_month = zone_service.month_bounds(request.months)
+
+    paths = {
+        "raster": f"gs://{bucket}/{prefix}.tif",
+        "vectors": f"gs://{bucket}/{prefix}.shp",
+        "zonal_stats": (
+            f"gs://{bucket}/{stats_prefix}.csv" if request.include_zonal_stats else None
+        ),
+    }
+
     tasks = zone_service.start_zone_exports(
         artifacts,
         aoi_name=request.aoi_name,
@@ -152,26 +161,39 @@ def create_production_zones(request: ProductionZonesRequest):
         include_stats=request.include_zonal_stats,
     )
 
-    prefix = zone_service.export_prefix(request.aoi_name, request.months)
-    stats_prefix = prefix + "_zonal_stats"
-    start_month, end_month = zone_service.month_bounds(request.months)
-
-    def _task_payload(task):
+    def _task_payload(name: str, task):
         if task is None:
             return None
-        return {"id": getattr(task, "id", None)}
+        try:
+            status = task.status() or {}
+        except Exception:  # pragma: no cover - defensive
+            status = {}
+
+        destination = paths.get(name)
+        destination_uris = status.get("destination_uris")
+        if not destination_uris and destination:
+            destination_uris = [destination]
+
+        payload = {
+            "id": getattr(task, "id", None),
+            "state": status.get("state"),
+            "type": status.get("type"),
+            "destination_uris": destination_uris,
+        }
+        if destination:
+            payload["destination_uri"] = destination
+        error = status.get("error_message") or status.get("error_details")
+        if error:
+            payload["error"] = error
+        return payload
 
     return {
         "bucket": bucket,
-        "paths": {
-            "raster": f"gs://{bucket}/{prefix}.tif",
-            "vectors": f"gs://{bucket}/{prefix}",
-            "zonal_stats": f"gs://{bucket}/{stats_prefix}.csv" if request.include_zonal_stats else None,
-        },
+        "paths": paths,
         "tasks": {
-            "raster": _task_payload(tasks["raster"]),
-            "vectors": _task_payload(tasks["vectors"]),
-            "zonal_stats": _task_payload(tasks["stats"]),
+            "raster": _task_payload("raster", tasks["raster"]),
+            "vectors": _task_payload("vectors", tasks["vectors"]),
+            "zonal_stats": _task_payload("zonal_stats", tasks["stats"]),
         },
         "metadata": {
             "aoi_name": request.aoi_name,
@@ -239,7 +261,7 @@ def create_production_zones_5y(request: ProductionZones5YRequest):
         stats_prefix = prefix + "_zonal_stats"
         paths = {
             "raster": f"gs://{bucket}/{prefix}.tif",
-            "vectors": f"gs://{bucket}/{prefix}",
+            "vectors": f"gs://{bucket}/{prefix}.shp",
             "zonal_stats": (
                 f"gs://{bucket}/{stats_prefix}.csv" if request.include_zonal_stats else None
             ),
@@ -262,7 +284,7 @@ def create_production_zones_5y(request: ProductionZones5YRequest):
         )
         paths = {
             "raster": f"drive://{folder}/{drive_prefix}.tif",
-            "vectors": f"drive://{folder}/{drive_prefix}",
+            "vectors": f"drive://{folder}/{drive_prefix}.shp",
             "zonal_stats": (
                 f"drive://{folder}/{drive_prefix}_zonal_stats.csv"
                 if request.include_zonal_stats
