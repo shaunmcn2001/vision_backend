@@ -786,6 +786,7 @@ def export_selected_period_zones(
     aoi_name: str,
     months: Sequence[str],
     *,
+    geometry: ee.Geometry | None = None,
     cloud_prob_max: int = DEFAULT_CLOUD_PROB_MAX,
     n_classes: int = DEFAULT_N_CLASSES,
     cv_mask_threshold: float = DEFAULT_CV_THRESHOLD,
@@ -808,7 +809,7 @@ def export_selected_period_zones(
         raise ValueError("mmu_ha must be non-negative")
 
     gee.initialize()
-    geometry = _resolve_geometry(aoi_geojson)
+    geometry = geometry or _resolve_geometry(aoi_geojson)
 
     artifacts, metadata = _prepare_selected_period_artifacts(
         aoi_geojson,

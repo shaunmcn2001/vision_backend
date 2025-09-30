@@ -94,6 +94,7 @@ class ExportJob:
     indices: List[str]
     scale_m: int
     cloud_prob_max: int
+    aoi_geojson: Dict
     geometry: ee.Geometry
     zone_config: ZoneExportConfig | None = None
     zone_state: ZoneExportState | None = None
@@ -347,6 +348,7 @@ def create_job(
         indices=index_names,
         scale_m=scale_m,
         cloud_prob_max=cloud_prob_max,
+        aoi_geojson=aoi_geojson,
         geometry=geometry,
         items=items,
         zone_config=zone_config,
@@ -584,9 +586,10 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
 
     try:
         result = zone_service.export_selected_period_zones(
-            job.geometry,
+            job.aoi_geojson,
             job.aoi_name,
             job.months,
+            geometry=job.geometry,
             cloud_prob_max=job.cloud_prob_max,
             n_classes=job.zone_config.n_classes,
             cv_mask_threshold=job.zone_config.cv_mask_threshold,
