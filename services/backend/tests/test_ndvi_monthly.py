@@ -230,3 +230,16 @@ def test_cache_paths_and_payload(monkeypatch):
         },
         "data": [{"month": 1, "gndvi": 0.42}],
     }
+
+
+def test_ndvi_links_uses_gee_bucket(monkeypatch):
+    monkeypatch.delenv("GCS_BUCKET", raising=False)
+    monkeypatch.setenv("GEE_GCS_BUCKET", "gee-only")
+    monkeypatch.setattr(routes, "sign_url", lambda path: f"signed://{path}")
+
+    response = routes.ndvi_links("field-7", 2023, index="ndvi")
+
+    assert response["json"]["gs"] == "gs://gee-only/index-results/ndvi/field-7/2023.json"
+    assert response["json"]["signed"] == "signed://index-results/ndvi/field-7/2023.json"
+    assert response["csv"]["gs"] == "gs://gee-only/index-results/ndvi/field-7/2023.csv"
+    assert response["csv"]["signed"] == "signed://index-results/ndvi/field-7/2023.csv"

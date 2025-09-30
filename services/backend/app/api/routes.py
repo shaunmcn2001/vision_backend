@@ -4,7 +4,7 @@ from typing import Any, Literal, get_args
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 import ee, os
-from app.services.gcs import download_json, exists, sign_url
+from app.services.gcs import bucket_name, download_json, exists, sign_url
 from app.services.indices import SUPPORTED_INDICES
 from app.services.ndvi import (
     DEFAULT_COLLECTION,
@@ -129,10 +129,17 @@ def ndvi_years(field_id: str, index: SupportedIndex = Query("ndvi")):
 def ndvi_links(field_id: str, year: int, index: SupportedIndex = Query("ndvi")):
     json_path = gcs_index_path(index, field_id, year)
     csv_path = gcs_index_csv_path(index, field_id, year)
+    bucket = bucket_name()
     return {
         "index": index,
-        "json": {"gs": f"gs://{os.getenv('GCS_BUCKET')}/{json_path}", "signed": sign_url(json_path)},
-        "csv":  {"gs": f"gs://{os.getenv('GCS_BUCKET')}/{csv_path}",  "signed": sign_url(csv_path)}
+        "json": {
+            "gs": f"gs://{bucket}/{json_path}",
+            "signed": sign_url(json_path),
+        },
+        "csv": {
+            "gs": f"gs://{bucket}/{csv_path}",
+            "signed": sign_url(csv_path),
+        },
     }
 
 router.include_router(export_router, prefix="/export", tags=["export"])
