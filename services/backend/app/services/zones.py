@@ -23,6 +23,12 @@ DEFAULT_METHOD = "ndvi_percentiles"
 DEFAULT_SAMPLE_SIZE = 8000
 DEFAULT_SCALE = 10
 DEFAULT_CRS = "EPSG:4326"
+
+STABILITY_MASK_EMPTY_ERROR = (
+    "All pixels were masked out by the stability threshold when computing NDVI percentiles. "
+    "Try lowering the coefficient of variation threshold, expanding the selected months, "
+    "or switching the zone method."
+)
 @dataclass(frozen=True)
 class ZoneArtifacts:
     """Container for the images/vectors used for production zone exports."""
@@ -186,11 +192,10 @@ def _stability_mask(cv_image: ee.Image, threshold: float) -> ee.Image:
 def _percentile_thresholds(
     image: ee.Image, geometry: ee.Geometry, n_classes: int
 ) -> ee.List:
-    percent_steps = ee.List.sequence(1, n_classes - 1)
-    percentiles = percent_steps.map(lambda i: ee.Number(i).multiply(100).divide(n_classes))
-    output_names = percent_steps.map(
-        lambda i: ee.String("cut_").cat(ee.Number(i).format("%02d"))
-    )
+    percent_steps = list(range(1, n_classes))
+    percentiles = ee.List([step * 100 / n_classes for step in percent_steps])
+    output_names_py = [f"cut_{step:02d}" for step in percent_steps]
+    output_names = ee.List(output_names_py)
     reducer = ee.Reducer.percentile(percentiles, output_names)
     stats = image.reduceRegion(
         reducer=reducer,
@@ -200,6 +205,21 @@ def _percentile_thresholds(
         tileScale=4,
         maxPixels=gee.MAX_PIXELS,
     )
+
+    try:
+        keys_object = stats.keys() if hasattr(stats, "keys") else []
+        if hasattr(keys_object, "getInfo"):
+            keys_info = keys_object.getInfo()
+        else:
+            keys_info = list(keys_object)
+    except Exception as exc:  # pragma: no cover - defensive guard for EE failures
+        raise RuntimeError(f"Failed to evaluate NDVI percentile keys: {exc}") from exc
+
+    present_keys = set(keys_info or [])
+    missing_names = [name for name in output_names_py if name not in present_keys]
+    if missing_names:
+        raise ValueError(STABILITY_MASK_EMPTY_ERROR)
+
     return output_names.map(lambda name: ee.Number(stats.get(name)))
 
 
@@ -341,9 +361,12 @@ def _build_percentile_zones(
     smooth_kernel_px: int,
     min_mapping_unit_ha: float,
 ) -> ee.Image:
-    ranked = _classify_by_percentiles(
-        ndvi_stats["mean"].updateMask(ndvi_stats["stability"]), geometry, n_classes
-    )
+    try:
+        ranked = _classify_by_percentiles(
+            ndvi_stats["mean"].updateMask(ndvi_stats["stability"]), geometry, n_classes
+        )
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
     ranked = ranked.updateMask(ndvi_stats["stability"])
     cleaned = _apply_cleanup(
         ranked,
@@ -564,13 +587,16 @@ def _prepare_selected_period_artifacts(
     extra_means: Dict[str, ee.Image] = {}
 
     if method_key == "ndvi_percentiles":
-        zone_image = _build_percentile_zones(
-            ndvi_stats=stats,
-            geometry=geometry,
-            n_classes=n_classes,
-            smooth_kernel_px=smooth_kernel_px,
-            min_mapping_unit_ha=mmu_value,
-        )
+        try:
+            zone_image = _build_percentile_zones(
+                ndvi_stats=stats,
+                geometry=geometry,
+                n_classes=n_classes,
+                smooth_kernel_px=smooth_kernel_px,
+                min_mapping_unit_ha=mmu_value,
+            )
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
     else:
         zone_image, mean_images = _build_multiindex_zones(
             ndvi_stats=stats,
