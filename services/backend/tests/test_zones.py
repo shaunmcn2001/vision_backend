@@ -44,6 +44,12 @@ def test_create_production_zones_endpoint(monkeypatch):
             "paths": {
                 "raster": "zones/PROD_202403_202405_demo_zones.tif",
                 "vectors": "zones/PROD_202403_202405_demo_zones.shp",
+                "vector_components": {
+                    "shp": "zones/PROD_202403_202405_demo_zones.shp",
+                    "dbf": "zones/PROD_202403_202405_demo_zones.dbf",
+                    "shx": "zones/PROD_202403_202405_demo_zones.shx",
+                    "prj": "zones/PROD_202403_202405_demo_zones.prj",
+                },
                 "zonal_stats": "zones/PROD_202403_202405_demo_zones_zonal_stats.csv",
             },
             "tasks": {
@@ -70,6 +76,7 @@ def test_create_production_zones_endpoint(monkeypatch):
     assert response["ym_start"] == "2024-03"
     assert response["ym_end"] == "2024-05"
     assert response["paths"]["raster"].endswith("demo_zones.tif")
+    assert response["paths"]["vector_components"]["dbf"].endswith("demo_zones.dbf")
     assert response["prefix"].endswith("demo_zones")
 
     raster_task = response["tasks"]["raster"]
