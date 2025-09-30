@@ -41,6 +41,12 @@ def _build_zip_job(tmp_path, job_id: str = "job-zip"):
         indices=["NDVI"],
         scale_m=10,
         cloud_prob_max=40,
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [
+                [[0, 0], [0.001, 0], [0.001, 0.001], [0, 0.001], [0, 0]],
+            ],
+        },
         geometry=None,
     )
 
@@ -110,6 +116,12 @@ def test_prepare_imagery_items_sets_visualized(monkeypatch):
         indices=["NDVI"],
         scale_m=10,
         cloud_prob_max=40,
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [
+                [[0, 0], [0.001, 0], [0.001, 0.001], [0, 0.001], [0, 0]],
+            ],
+        },
         geometry={"type": "Point", "coordinates": [0, 0]},
     )
     true_item = exports.ExportItem(
@@ -212,6 +224,12 @@ def test_get_job_evicts_expired_jobs(tmp_path):
         indices=["NDVI"],
         scale_m=10,
         cloud_prob_max=40,
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [
+                [[0, 0], [0.001, 0], [0.001, 0.001], [0, 0.001], [0, 0]],
+            ],
+        },
         geometry=None,
     )
 
@@ -266,6 +284,12 @@ def test_download_index_to_path_uses_visualized_format(tmp_path, monkeypatch):
         indices=["NDVI"],
         scale_m=10,
         cloud_prob_max=40,
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [
+                [[0, 0], [0.001, 0], [0.001, 0.001], [0, 0.001], [0, 0]],
+            ],
+        },
         geometry={"type": "Point", "coordinates": [0, 0]},
     )
 
@@ -306,6 +330,12 @@ def test_download_index_to_path_preserves_nodata_for_scalar(tmp_path, monkeypatc
         indices=["NDVI"],
         scale_m=10,
         cloud_prob_max=40,
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [
+                [[0, 0], [0.001, 0], [0.001, 0.001], [0, 0.001], [0, 0]],
+            ],
+        },
         geometry={"type": "Point", "coordinates": [0, 0]},
     )
 
@@ -347,6 +377,12 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
         indices=["NDVI"],
         scale_m=10,
         cloud_prob_max=40,
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [
+                [[0, 0], [0.001, 0], [0.001, 0.001], [0, 0.001], [0, 0]],
+            ],
+        },
         geometry={"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]},
         zone_config=exports.ZoneExportConfig(
             n_classes=4,
@@ -456,6 +492,146 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
             assert Path(path).exists()
 
 
+def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
+    geometry_sentinel = object()
+    job = exports.ExportJob(
+        job_id="job-mmu",
+        export_target="zip",
+        aoi_name="Tiny Field",
+        safe_aoi_name="tiny_field",
+        months=["2024-01"],
+        indices=["NDVI"],
+        scale_m=10,
+        cloud_prob_max=40,
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [
+                [[0, 0], [0.0001, 0], [0.0001, 0.0001], [0, 0.0001], [0, 0]],
+            ],
+        },
+        geometry=geometry_sentinel,  # type: ignore[arg-type]
+        zone_config=exports.ZoneExportConfig(
+            n_classes=3,
+            cv_mask_threshold=0.3,
+            min_mapping_unit_ha=5.0,
+            smooth_kernel_px=1,
+            simplify_tolerance_m=5,
+            include_stats=True,
+        ),
+        zone_state=exports.ZoneExportState(status="pending"),
+    )
+    job.items = []
+    job.temp_dir = tmp_path / "scratch"
+    job.temp_dir.mkdir()
+
+    captured: dict[str, object] = {}
+
+    class _FakeDownloadable:
+        def __init__(self, url: str):
+            self.url = url
+            self.calls: list[dict[str, object]] = []
+
+        def getDownloadURL(self, params: dict[str, object]) -> str:
+            self.calls.append(params)
+            return self.url
+
+    def _make_zip(contents: dict[str, bytes]) -> bytes:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for name, data in contents.items():
+                archive.writestr(name, data)
+        return buffer.getvalue()
+
+    raster_url = "https://example.com/mmu-raster"
+    vector_url = "https://example.com/mmu-vectors"
+    stats_url = "https://example.com/mmu-stats"
+
+    artifacts = SimpleNamespace(
+        zone_image=_FakeDownloadable(raster_url),
+        zone_vectors=_FakeDownloadable(vector_url),
+        zonal_stats=_FakeDownloadable(stats_url),
+        geometry="fake-geometry",
+    )
+
+    def fake_export_selected_period_zones(
+        aoi_geojson,
+        aoi_name,
+        months,
+        *,
+        geometry=None,
+        **kwargs,
+    ):
+        captured["aoi_geojson"] = aoi_geojson
+        captured["geometry"] = geometry
+        captured["kwargs"] = kwargs
+        return {
+            "artifacts": artifacts,
+            "metadata": {
+                "used_months": list(months),
+                "skipped_months": [],
+                "mmu_applied": False,
+            },
+            "prefix": "zones/PROD_202401_202401_tiny_field_zones",
+        }
+
+    fake_zone_service = SimpleNamespace(
+        DEFAULT_SCALE=10,
+        DEFAULT_CRS="EPSG:4326",
+        export_selected_period_zones=fake_export_selected_period_zones,
+        export_prefix=lambda name, months: "zones/PROD_202401_202401_tiny_field_zones",
+    )
+
+    monkeypatch.setattr(exports, "_zone_service", lambda: fake_zone_service)
+
+    monkeypatch.setattr(
+        exports,
+        "_download_bytes",
+        lambda url: {
+            raster_url: (_make_zip({"zone.tif": b"raster"}), "application/zip"),
+            vector_url: (
+                _make_zip(
+                    {
+                        "zone.shp": b"shp",
+                        "zone.shx": b"shx",
+                        "zone.dbf": b"dbf",
+                        "zone.prj": b"prj",
+                    }
+                ),
+                "application/zip",
+            ),
+            stats_url: (b"zone_id,value\n1,0.2\n", "text/csv"),
+        }[url],
+    )
+
+    output_dir = tmp_path / "output"
+    monkeypatch.setenv("OUTPUT_DIR", str(output_dir))
+
+    exports._build_zone_artifacts_for_job(job)
+
+    assert job.zone_state is not None
+    assert job.zone_state.metadata.get("mmu_applied") is False
+    assert captured["aoi_geojson"] is job.aoi_geojson
+    assert captured["geometry"] is geometry_sentinel
+    assert captured["kwargs"]["mmu_ha"] == job.zone_config.min_mapping_unit_ha
+
+    exports._process_zip_exports(job)
+
+    assert job.zone_state.paths["raster"].endswith(".tif")
+    assert job.zone_state.paths["vectors"].endswith(".shp")
+    assert job.zone_state.paths["zonal_stats"].endswith("_zonal_stats.csv")
+
+    assert job.zip_path is not None and job.zip_path.exists()
+    with zipfile.ZipFile(job.zip_path) as archive:
+        names = set(archive.namelist())
+        assert "zones/PROD_202401_202401_tiny_field_zones.tif" in names
+        assert "zones/PROD_202401_202401_tiny_field_zones.shp" in names
+        assert "zones/PROD_202401_202401_tiny_field_zones_zonal_stats.csv" in names
+
+    archive_entries = job.zone_state.metadata.get(exports.ZONE_ARCHIVE_METADATA_KEY)
+    assert archive_entries
+    assert all(entry.get("included_in_zip") for entry in archive_entries if isinstance(entry, dict))
+
+
 def test_run_job_marks_items_visualized(monkeypatch):
     job = exports.ExportJob(
         job_id="job-run",
@@ -466,6 +642,12 @@ def test_run_job_marks_items_visualized(monkeypatch):
         indices=["NDVI"],
         scale_m=10,
         cloud_prob_max=40,
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [
+                [[0, 0], [0.001, 0], [0.001, 0.001], [0, 0.001], [0, 0]],
+            ],
+        },
         geometry={"type": "Point", "coordinates": [0, 0]},
     )
     analysis_item = exports.ExportItem(
@@ -525,6 +707,12 @@ def test_cleanup_job_files_removes_zone_exports(tmp_path):
         indices=["NDVI"],
         scale_m=10,
         cloud_prob_max=40,
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [
+                [[0, 0], [0.001, 0], [0.001, 0.001], [0, 0.001], [0, 0]],
+            ],
+        },
         geometry={"type": "Point", "coordinates": [0, 0]},
         zone_state=exports.ZoneExportState(status="completed"),
     )
