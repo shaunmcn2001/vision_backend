@@ -178,6 +178,8 @@ class Sentinel2ExportRequest(BaseModel):
         if isinstance(value, ProductionZoneOptions):
             return value
         if isinstance(value, dict):
+            if "enabled" not in value:
+                return {**value, "enabled": True}
             return value
         raise ValueError("production_zones must be a boolean or object")
 
