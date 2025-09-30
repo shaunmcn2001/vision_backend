@@ -747,6 +747,12 @@ def export_ui():
          if (typeof mmuApplied === 'boolean') {
            infoParts.push(mmuApplied ? 'MMU applied' : 'MMU skipped (AOI smaller than threshold)');
          }
+         const overallStatus = zoneData.status || endpointData.status;
+         const overallError = zoneData.error || endpointData.error;
+         if (overallStatus === 'failed' || overallError) {
+           const errorText = overallError ? String(overallError) : 'Unknown error';
+           infoParts.push(`Error: ${errorText}`);
+         }
          zonesInfo.textContent = infoParts.join(' · ');
 
          const includeStats = !(
@@ -761,6 +767,11 @@ def export_ui():
 
            const jobTask = (zoneData.tasks && zoneData.tasks[kind]) || {};
            const endpointTask = (endpointData.tasks && endpointData.tasks[kind]) || {};
+           const overallStatus = zoneData.status || endpointData.status;
+           const overallError = zoneData.error || endpointData.error;
+           if (overallStatus === 'failed' || overallError) {
+             return { text: overallError ? `Failed: ${overallError}` : 'Failed' };
+           }
            const error = jobTask.error || endpointTask.error;
            if (error) {
              return { text: `Failed: ${error}` };
@@ -789,6 +800,9 @@ def export_ui():
                };
              }
              const zoneStatus = zoneData.status || endpointTask.state || 'Preparing…';
+             if (zoneStatus === 'failed' && overallError) {
+               return { text: `Failed: ${overallError}` };
+             }
              return { text: `Status: ${zoneStatus}` };
            }
 
