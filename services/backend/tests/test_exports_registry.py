@@ -368,6 +368,8 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
     )
     job.items = []
     job.temp_dir = tmp_path
+    output_dir = tmp_path / "exports_out"
+    monkeypatch.setenv("OUTPUT_DIR", str(output_dir))
 
     def _make_zip(contents: dict[str, bytes]) -> bytes:
         buffer = io.BytesIO()
@@ -402,6 +404,10 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
     assert job.state == "completed"
     assert job.zone_state.paths["vectors"].endswith(".shp")
     assert job.zone_state.paths["zonal_stats"].endswith("_zonal_stats.csv")
+    vector_components = job.zone_state.paths["vector_components"]
+    assert vector_components["dbf"].endswith(".dbf")
+    assert vector_components["shx"].endswith(".shx")
+    assert vector_components["prj"].endswith(".prj")
     assert job.zone_artifacts.zone_vectors.calls[0]["fileFormat"] == "SHP"
 
     shapefile_components = {
@@ -415,9 +421,17 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
         assert (tmp_path / relative).exists()
 
     assert job.zip_path is not None and job.zip_path.exists()
+    assert job.zip_path.parent == output_dir
     with zipfile.ZipFile(job.zip_path) as archive:
         names = set(archive.namelist())
-        assert shapefile_components.issubset(names)
+        expected_entries = {
+            f"{prefix}.tif",
+            *shapefile_components,
+            f"{prefix}_zonal_stats.csv",
+        }
+        for entry in expected_entries:
+            assert entry in names
+            assert entry.startswith("zones/")
         assert f"{prefix}.tif" in names
         assert f"{prefix}_zonal_stats.csv" in names
 
