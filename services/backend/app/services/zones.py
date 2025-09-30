@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import os
+import math
 from typing import Dict, List, Mapping, Sequence, Tuple, Union
 
 import ee
@@ -23,6 +24,9 @@ DEFAULT_METHOD = "ndvi_percentiles"
 DEFAULT_SAMPLE_SIZE = 8000
 DEFAULT_SCALE = 10
 DEFAULT_CRS = "EPSG:4326"
+
+STABILITY_THRESHOLD_SEQUENCE = [0.5, 0.6, 0.8, 1.0]
+MIN_STABILITY_SURVIVAL_RATIO = 0.2
 
 STABILITY_MASK_EMPTY_ERROR = (
     "All pixels were masked out by the stability threshold when computing NDVI percentiles. "
@@ -187,6 +191,41 @@ def _ndvi_cv(mean_image: ee.Image, std_image: ee.Image) -> ee.Image:
 
 def _stability_mask(cv_image: ee.Image, threshold: float) -> ee.Image:
     return cv_image.lte(threshold)
+
+
+def _pixel_count(image: ee.Image, geometry: ee.Geometry, *, context: str) -> int:
+    try:
+        reduced = image.reduceRegion(
+            reducer=ee.Reducer.count(),
+            geometry=geometry,
+            scale=DEFAULT_SCALE,
+            bestEffort=True,
+            tileScale=4,
+            maxPixels=gee.MAX_PIXELS,
+        )
+    except Exception as exc:  # pragma: no cover - server side failure
+        raise RuntimeError(f"Failed to evaluate {context}: {exc}") from exc
+
+    try:
+        reduced_info = reduced.getInfo() if hasattr(reduced, "getInfo") else reduced
+    except Exception as exc:  # pragma: no cover - server side failure
+        raise RuntimeError(f"Failed to evaluate {context}: {exc}") from exc
+
+    if isinstance(reduced_info, dict):
+        values = list(reduced_info.values())
+        value = values[0] if values else 0
+    else:
+        value = reduced_info
+
+    try:
+        numeric = float(value or 0)
+    except Exception:  # pragma: no cover - guard for unexpected types
+        numeric = 0.0
+
+    if not math.isfinite(numeric):
+        numeric = 0.0
+
+    return int(max(numeric, 0))
 
 
 def _percentile_thresholds(
@@ -569,7 +608,47 @@ def _prepare_selected_period_artifacts(
     ndvi_images = [_compute_ndvi(image) for _, image in composites]
     stats = _ndvi_temporal_stats(ndvi_images)
     cv_image = _ndvi_cv(stats["mean"], stats["std"])
-    stability = _stability_mask(cv_image, cv_mask_threshold)
+
+    initial_threshold = float(cv_mask_threshold)
+    thresholds_to_try: List[float] = [initial_threshold]
+    for fallback in STABILITY_THRESHOLD_SEQUENCE:
+        if fallback > initial_threshold + 1e-9:
+            thresholds_to_try.append(fallback)
+
+    total_pixels = _pixel_count(
+        cv_image, geometry, context="stability baseline pixel count"
+    )
+    if total_pixels <= 0:
+        raise ValueError(STABILITY_MASK_EMPTY_ERROR)
+
+    stability = None
+    final_threshold = initial_threshold
+    survival_ratio = 0.0
+    surviving_pixels = 0
+    thresholds_tested: List[float] = []
+    ratio_history: List[float] = []
+
+    for idx, threshold in enumerate(thresholds_to_try):
+        thresholds_tested.append(float(threshold))
+        candidate = _stability_mask(cv_image, threshold)
+        surviving_pixels = _pixel_count(
+            candidate.updateMask(candidate),
+            geometry,
+            context="stability surviving pixel count",
+        )
+        ratio = (surviving_pixels / total_pixels) if total_pixels else 0.0
+        ratio_history.append(ratio)
+        stability = candidate
+        final_threshold = float(threshold)
+        survival_ratio = ratio
+        if ratio >= MIN_STABILITY_SURVIVAL_RATIO or idx == len(thresholds_to_try) - 1:
+            break
+
+    if stability is None:
+        raise ValueError(STABILITY_MASK_EMPTY_ERROR)
+
+    low_confidence = final_threshold > initial_threshold + 1e-9
+
     stats = {**stats, "cv": cv_image, "stability": stability}
 
     mmu_value = max(min_mapping_unit_ha, 0)
@@ -635,6 +714,33 @@ def _prepare_selected_period_artifacts(
         "used_months": ordered_months,
         "skipped_months": skipped_months,
         "mmu_applied": mmu_value > 0 and mmu_applied,
+    }
+
+    stability_metadata = {
+        "initial_threshold": initial_threshold,
+        "final_threshold": final_threshold,
+        "survival_ratio": survival_ratio,
+        "surviving_pixels": surviving_pixels,
+        "total_pixels": total_pixels,
+        "thresholds_tested": thresholds_tested,
+        "low_confidence": low_confidence,
+        "target_ratio": MIN_STABILITY_SURVIVAL_RATIO,
+    }
+
+    metadata["stability"] = stability_metadata
+    metadata["low_confidence"] = low_confidence
+
+    debug_block = metadata.setdefault("debug", {})
+    debug_block["stability"] = {
+        "initial_threshold": initial_threshold,
+        "final_threshold": final_threshold,
+        "thresholds_tested": thresholds_tested,
+        "survival_ratios": ratio_history,
+        "survival_ratio": survival_ratio,
+        "surviving_pixels": surviving_pixels,
+        "total_pixels": total_pixels,
+        "target_ratio": MIN_STABILITY_SURVIVAL_RATIO,
+        "low_confidence": low_confidence,
     }
 
     return artifacts, metadata
@@ -852,6 +958,7 @@ def export_selected_period_zones(
         include_stats=include_zonal_stats,
     )
 
+    metadata = dict(metadata)
     used_months: List[str] = list(metadata.get("used_months", []))
     skipped: List[str] = list(metadata.get("skipped_months", []))
     if not used_months:
@@ -871,6 +978,14 @@ def export_selected_period_zones(
         "prj": f"{prefix_base}.prj",
     }
 
+    metadata.update(
+        {
+            "used_months": used_months,
+            "skipped_months": skipped,
+            "mmu_applied": bool(metadata.get("mmu_applied", True)),
+        }
+    )
+
     result: Dict[str, object] = {
         "paths": {
             "raster": f"{prefix_base}.tif",
@@ -880,13 +995,13 @@ def export_selected_period_zones(
         },
         "tasks": {},
         "prefix": prefix_base,
-        "metadata": {
-            "used_months": used_months,
-            "skipped_months": skipped,
-            "mmu_applied": bool(metadata.get("mmu_applied", True)),
-        },
+        "metadata": metadata,
         "artifacts": artifacts,
     }
+
+    debug_info = metadata.get("debug") if isinstance(metadata, dict) else None
+    if debug_info:
+        result["debug"] = debug_info
 
     if export_target == "zip":
         return result
