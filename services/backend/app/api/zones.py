@@ -72,6 +72,20 @@ class ProductionZonesRequest(_BaseAOIRequest):
 
 @router.post("/production")
 def create_production_zones(request: ProductionZonesRequest):
+    resolved_bucket: Optional[str] = request.gcs_bucket
+    if request.export_target == "gcs":
+        resolved_bucket = (
+            (request.gcs_bucket or "").strip()
+            or os.getenv("GEE_GCS_BUCKET")
+            or os.getenv("GCS_BUCKET")
+            or ""
+        ).strip()
+        if not resolved_bucket:
+            raise HTTPException(
+                status_code=400,
+                detail="A GCS bucket must be provided when export_target is 'gcs'.",
+            )
+
     try:
         result = zone_service.export_selected_period_zones(
             request.aoi_geojson,
@@ -84,7 +98,7 @@ def create_production_zones(request: ProductionZonesRequest):
             smooth_kernel_px=request.smooth_kernel_px,
             simplify_tol_m=request.simplify_tol_m,
             export_target=request.export_target,
-            gcs_bucket=request.gcs_bucket,
+            gcs_bucket=resolved_bucket,
             gcs_prefix=request.gcs_prefix,
             include_zonal_stats=request.include_zonal_stats,
         )
