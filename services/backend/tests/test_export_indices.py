@@ -259,6 +259,38 @@ def test_start_export_includes_zone_config(monkeypatch):
     assert result == {"job_id": "job-zone", "state": "pending"}
 
 
+def test_start_export_enables_zone_config_when_options_provided(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_create_job(**kwargs):
+        captured.update(kwargs)
+
+        class _Job:
+            job_id = "job-zone-options"
+            state = "pending"
+
+        return _Job()
+
+    monkeypatch.setattr(s2_indices.exports, "create_job", fake_create_job)
+
+    request = _build_export_request(
+        ["NDVI"], production_zones={"n_classes": 5, "mmu_ha": 3.5}
+    )
+
+    result = s2_indices.start_export(request)
+
+    assert request.production_zones is not None
+    assert request.production_zones.enabled is True
+    assert request.production_zones.n_classes == 5
+    assert request.production_zones.mmu_ha == 3.5
+
+    zone_config = captured.get("zone_config")
+    assert isinstance(zone_config, s2_indices.exports.ZoneExportConfig)
+    assert zone_config.n_classes == 5
+    assert zone_config.min_mapping_unit_ha == 3.5
+    assert result == {"job_id": "job-zone-options", "state": "pending"}
+
+
 def test_production_zone_boolean_enables_defaults():
     request = _build_export_request(["NDVI"], production_zones=True)
     assert request.production_zones is not None
