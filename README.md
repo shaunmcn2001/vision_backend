@@ -41,6 +41,23 @@ request to `/export/s2/indices` with the following JSON payload:
 }
 ```
 
+Supplying a `production_zones` object enables the optional zone export pipeline.
+When any zone options are provided the feature is automatically activated, so the
+following payload will compute five production classes using the supplied
+minimum mapping unit:
+
+```json
+{
+  "production_zones": {
+    "n_classes": 5,
+    "mmu_ha": 3
+  }
+}
+```
+
+Explicitly set `"enabled": false` within the object to opt out while still
+including option overrides.
+
 Supported `export_target` values:
 
 * `zip`: downloads are retrieved from `GET /export/s2/indices/{job_id}/download`
