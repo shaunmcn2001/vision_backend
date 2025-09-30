@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from fastapi import HTTPException
 
 from app.api.zones import ProductionZonesRequest, create_production_zones
@@ -13,6 +12,49 @@ def _sample_polygon() -> dict:
         "type": "Polygon",
         "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]],
     }
+
+
+def test_percentile_thresholds_raise_when_mask_removes_all_pixels(monkeypatch):
+    class _FakeList(list):
+        def map(self, func):
+            return _FakeList([func(item) for item in self])
+
+    class _FakeKeys:
+        def getInfo(self):
+            return []
+
+    class _FakeDictionary:
+        def keys(self):
+            return _FakeKeys()
+
+        def get(self, _name):  # pragma: no cover - not used when raising
+            return None
+
+    class _FakeImage:
+        def reduceRegion(self, **_kwargs):
+            return _FakeDictionary()
+
+    class _FakeEE:
+        class Reducer:
+            @staticmethod
+            def percentile(percentiles, names):  # pragma: no cover - passthrough stub
+                return {"percentiles": percentiles, "names": names}
+
+        @staticmethod
+        def List(values):
+            return _FakeList(list(values))
+
+        @staticmethod
+        def Number(value):  # pragma: no cover - not used when raising
+            return value
+
+    fake_ee = _FakeEE()
+    monkeypatch.setattr(zones, "ee", fake_ee)
+
+    with pytest.raises(ValueError) as excinfo:
+        zones._percentile_thresholds(_FakeImage(), geometry=object(), n_classes=5)
+
+    assert str(excinfo.value) == zones.STABILITY_MASK_EMPTY_ERROR
 
 
 def test_export_prefix_formats_months_and_name():
