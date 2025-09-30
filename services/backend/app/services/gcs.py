@@ -2,14 +2,18 @@ import os, json
 from google.cloud import storage
 from datetime import timedelta
 
+
+def _bucket_name() -> str:
+    name = (os.environ.get("GEE_GCS_BUCKET") or os.environ.get("GCS_BUCKET") or "").strip()
+    if not name:
+        raise RuntimeError("GEE_GCS_BUCKET or GCS_BUCKET env vars are required for GCS access")
+    return name
+
 def _client():
     return storage.Client()
 
 def _bucket():
-    name = os.environ.get("GCS_BUCKET")
-    if not name:
-        raise RuntimeError("GCS_BUCKET env var is required")
-    return _client().bucket(name)
+    return _client().bucket(_bucket_name())
 
 def upload_json(data: dict, path: str, content_type: str = "application/json") -> str:
     bucket = _bucket()
