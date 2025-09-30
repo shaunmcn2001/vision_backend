@@ -400,6 +400,8 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
     exports._process_zip_exports(job)
 
     prefix = job.zone_state.prefix
+    assert prefix is not None
+    assert prefix.startswith("zones/PROD_")
     assert job.zone_state.status == "completed"
     assert job.state == "completed"
     assert job.zone_state.paths["vectors"].endswith(".shp")
@@ -434,6 +436,24 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
             assert entry.startswith("zones/")
         assert f"{prefix}.tif" in names
         assert f"{prefix}_zonal_stats.csv" in names
+
+    archive_metadata = job.zone_state.metadata[exports.ZONE_ARCHIVE_METADATA_KEY]
+    archived_names = {
+        entry["arcname"]
+        for entry in archive_metadata
+        if isinstance(entry, dict) and entry.get("included_in_zip")
+    }
+    assert archived_names == {
+        f"{prefix}.tif",
+        *shapefile_components,
+        f"{prefix}_zonal_stats.csv",
+    }
+    for entry in archive_metadata:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        if path:
+            assert Path(path).exists()
 
 
 def test_run_job_marks_items_visualized(monkeypatch):
@@ -493,3 +513,35 @@ def test_run_job_marks_items_visualized(monkeypatch):
     assert visual_item.image == "visual-image"
     assert visual_item.is_visualized is True
     assert visual_item.status == "ready"
+
+
+def test_cleanup_job_files_removes_zone_exports(tmp_path):
+    job = exports.ExportJob(
+        job_id="job-clean",
+        export_target="zip",
+        aoi_name="Field",
+        safe_aoi_name="field",
+        months=["2024-01"],
+        indices=["NDVI"],
+        scale_m=10,
+        cloud_prob_max=40,
+        geometry={"type": "Point", "coordinates": [0, 0]},
+        zone_state=exports.ZoneExportState(status="completed"),
+    )
+    job.temp_dir = tmp_path
+    job.zip_path = tmp_path / "archive.zip"
+    job.zip_path.write_text("zip")
+    zone_file = tmp_path / "zones" / "PROD_test_zones.tif"
+    zone_file.parent.mkdir(parents=True, exist_ok=True)
+    zone_file.write_text("zone")
+    job.zone_state.metadata[exports.ZONE_ARCHIVE_METADATA_KEY] = [
+        {"path": str(zone_file), "arcname": "zones/PROD_test_zones.tif", "included_in_zip": True}
+    ]
+
+    exports.JOB_REGISTRY[job.job_id] = job
+    zip_path = job.zip_path
+    exports.cleanup_job_files(job)
+
+    assert not zone_file.exists()
+    assert zip_path is not None and not zip_path.exists()
+    assert job.cleaned is True

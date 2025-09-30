@@ -170,6 +170,8 @@ TERMINAL_STATES = frozenset({"completed", "failed", "partial"})
 JOB_RETENTION_TTL = timedelta(hours=24)
 EVICTED_REGISTRY_TTL = timedelta(hours=6)
 
+ZONE_ARCHIVE_METADATA_KEY = "zip_entries"
+
 EVICTED_JOBS: Dict[str, datetime] = {}
 
 
@@ -845,6 +847,7 @@ def _process_zip_exports(job: ExportJob) -> None:
 
     zone_files: List[tuple[Path, str]] = []
     zone_paths: Dict[str, Optional[str]] = {}
+    zone_archive_entries: List[Dict[str, object]] = []
 
     for item in job.items:
         if item.image is None:
@@ -872,6 +875,12 @@ def _process_zip_exports(job: ExportJob) -> None:
             job.touch()
             try:
                 zone_files, zone_paths = _download_zone_artifacts(job, temp_dir)
+                zone_archive_entries = [
+                    {"path": str(path), "arcname": arcname, "included_in_zip": False}
+                    for path, arcname in zone_files
+                ]
+                if zone_archive_entries:
+                    job.zone_state.metadata[ZONE_ARCHIVE_METADATA_KEY] = zone_archive_entries
             except Exception as exc:
                 job.zone_state.status = "failed"
                 job.zone_state.error = str(exc)
@@ -890,10 +899,13 @@ def _process_zip_exports(job: ExportJob) -> None:
             job.touch()
 
     successful = [item for item in job.items if item.status == "completed" and item.local_path]
-    zip_entries: List[tuple[Path, str]] = []
-    for item in successful:
-        zip_entries.append((item.local_path, item.file_name))
-    zip_entries.extend(zone_files)
+    zip_entries: List[tuple[Path, str]] = [
+        (item.local_path, item.file_name)
+        for item in successful
+        if item.local_path is not None
+    ]
+    if zone_files:
+        zip_entries.extend(zone_files)
 
     if zip_entries:
         output_dir = _output_dir()
@@ -902,6 +914,12 @@ def _process_zip_exports(job: ExportJob) -> None:
             for path, arcname in zip_entries:
                 archive.write(path, arcname=arcname)
         job.zip_path = zip_path
+        if job.zone_state is not None:
+            entries = job.zone_state.metadata.get(ZONE_ARCHIVE_METADATA_KEY)
+            if isinstance(entries, list):
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        entry["included_in_zip"] = True
 
     if job.zone_state is not None and job.zone_state.paths:
         keep_keys = ("raster", "vectors", "zonal_stats", "vector_components")
@@ -1193,6 +1211,19 @@ def cleanup_job_files(job: ExportJob) -> None:
                 item.signed_url = None
                 if local_path is not None or item.status == "completed":
                     item.cleaned = True
+
+            if job.zone_state is not None:
+                metadata_entries = job.zone_state.metadata.get(ZONE_ARCHIVE_METADATA_KEY)
+                if isinstance(metadata_entries, list):
+                    for entry in metadata_entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        path_str = entry.get("path")
+                        included = entry.get("included_in_zip")
+                        if path_str and (included is True or included is None):
+                            paths_to_remove.append(Path(path_str))
+                        entry["included_in_zip"] = False
+                    job.zone_state.metadata[ZONE_ARCHIVE_METADATA_KEY] = metadata_entries
 
             job.temp_dir = None
             job.zip_path = None
