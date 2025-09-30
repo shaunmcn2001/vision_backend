@@ -14,6 +14,96 @@ def _sample_polygon() -> dict:
     }
 
 
+def _run_prepare_with_counts(monkeypatch, survival_counts, *, cv_threshold, total_pixels=100):
+    class _FakeZoneImage:
+        def updateMask(self, *_args, **_kwargs):
+            return self
+
+        def neq(self, _value):
+            return self
+
+        def toInt16(self):
+            return self
+
+        def rename(self, _name):
+            return self
+
+        def reproject(self, *_args, **_kwargs):
+            return self
+
+    class _FakeVectors:
+        pass
+
+    class _FakeCVImage:
+        def __init__(self, total: int):
+            self._total = total
+
+        def reduceRegion(self, **_kwargs):
+            return {"NDVI_cv": self._total}
+
+    class _FakeMask:
+        def __init__(self, threshold: float, count: int):
+            self.threshold = threshold
+            self._count = count
+
+        def updateMask(self, *_args, **_kwargs):
+            return self
+
+        def reduceRegion(self, **_kwargs):
+            return {"NDVI_cv": self._count}
+
+    class _FakeEE:
+        class Reducer:
+            @staticmethod
+            def count():
+                return object()
+
+    def _fake_build_monthly_composites(_geometry, months, _cloud_prob_max):
+        return [(months[0], object())], []
+
+    def _fake_compute_ndvi(_image):
+        return object()
+
+    def _fake_temporal_stats(_images):
+        return {"mean": object(), "median": object(), "std": object()}
+
+    def _fake_cv(_mean, _std):
+        return _FakeCVImage(total_pixels)
+
+    def _fake_stability_mask(_image, threshold):
+        key = round(float(threshold), 3)
+        if key not in survival_counts:
+            raise AssertionError(f"Unexpected threshold {threshold}")
+        return _FakeMask(key, survival_counts[key])
+
+    monkeypatch.setattr(zones, "ee", _FakeEE())
+    monkeypatch.setattr(zones, "_build_monthly_composites", _fake_build_monthly_composites)
+    monkeypatch.setattr(zones, "_compute_ndvi", _fake_compute_ndvi)
+    monkeypatch.setattr(zones, "_ndvi_temporal_stats", _fake_temporal_stats)
+    monkeypatch.setattr(zones, "_ndvi_cv", _fake_cv)
+    monkeypatch.setattr(zones, "_stability_mask", _fake_stability_mask)
+    monkeypatch.setattr(zones, "_build_percentile_zones", lambda **_kwargs: _FakeZoneImage())
+    monkeypatch.setattr(zones, "_prepare_vectors", lambda *_args, **_kwargs: _FakeVectors())
+    monkeypatch.setattr(zones, "area_ha", lambda *_args, **_kwargs: 10)
+
+    artifacts, metadata = zones._prepare_selected_period_artifacts(
+        _sample_polygon(),
+        geometry=object(),
+        months=["2024-01"],
+        cloud_prob_max=20,
+        n_classes=5,
+        cv_mask_threshold=cv_threshold,
+        min_mapping_unit_ha=0.5,
+        smooth_kernel_px=1,
+        simplify_tol_m=5,
+        method="ndvi_percentiles",
+        sample_size=100,
+        include_stats=False,
+    )
+
+    return artifacts, metadata
+
+
 def test_percentile_thresholds_raise_when_mask_removes_all_pixels(monkeypatch):
     class _FakeList(list):
         def map(self, func):
@@ -152,4 +242,43 @@ def test_create_production_zones_requires_bucket_for_gcs(monkeypatch):
         excinfo.value.detail
         == "A GCS bucket must be provided when export_target is 'gcs'."
     )
+
+
+def test_prepare_selected_period_artifacts_retries_thresholds(monkeypatch):
+    survival_counts = {0.25: 5, 0.5: 10, 0.6: 18, 0.8: 28, 1.0: 35}
+    artifacts, metadata = _run_prepare_with_counts(
+        monkeypatch, survival_counts, cv_threshold=0.25
+    )
+
+    assert artifacts.zone_image.__class__.__name__ == "_FakeZoneImage"
+
+    stability = metadata["stability"]
+    assert stability["thresholds_tested"] == [0.25, 0.5, 0.6, 0.8]
+    assert stability["final_threshold"] == pytest.approx(0.8)
+    assert stability["survival_ratio"] == pytest.approx(0.28)
+    assert stability["low_confidence"] is True
+    assert metadata["low_confidence"] is True
+
+    debug = metadata["debug"]["stability"]
+    assert debug["thresholds_tested"] == [0.25, 0.5, 0.6, 0.8]
+    assert debug["low_confidence"] is True
+    assert debug["survival_ratios"] == pytest.approx([0.05, 0.1, 0.18, 0.28])
+
+
+def test_prepare_selected_period_artifacts_retains_initial_threshold(monkeypatch):
+    survival_counts = {0.5: 30, 0.6: 60, 0.8: 80, 1.0: 90}
+    _artifacts, metadata = _run_prepare_with_counts(
+        monkeypatch, survival_counts, cv_threshold=0.5
+    )
+
+    stability = metadata["stability"]
+    assert stability["thresholds_tested"] == [0.5]
+    assert stability["final_threshold"] == pytest.approx(0.5)
+    assert stability["survival_ratio"] == pytest.approx(0.3)
+    assert stability["low_confidence"] is False
+    assert metadata["low_confidence"] is False
+
+    debug = metadata["debug"]["stability"]
+    assert debug["thresholds_tested"] == [0.5]
+    assert debug["survival_ratios"] == pytest.approx([0.3])
 

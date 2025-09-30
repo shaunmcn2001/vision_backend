@@ -122,6 +122,10 @@ def create_production_zones(request: ProductionZonesRequest):
         "metadata": metadata,
     }
 
+    debug_info = result.get("debug") or metadata.get("debug")
+    if debug_info:
+        response["debug"] = debug_info
+
     if request.export_target == "gcs":
         response["bucket"] = result.get("bucket")
         response["prefix"] = result.get("prefix")
