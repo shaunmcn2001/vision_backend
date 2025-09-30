@@ -172,6 +172,29 @@ def test_production_zones_request_normalises_months():
     assert request.aoi_name == "Demo Field"
 
 
+def test_production_zones_request_accepts_range():
+    request = ProductionZonesRequest(
+        aoi_geojson=_sample_polygon(),
+        aoi_name="Range",
+        start_month="2024-01",
+        end_month="2024-03",
+    )
+
+    assert request.months == ["2024-01", "2024-02", "2024-03"]
+
+
+def test_production_zones_request_rejects_conflicting_inputs():
+    with pytest.raises(ValueError) as excinfo:
+        ProductionZonesRequest(
+            aoi_geojson=_sample_polygon(),
+            aoi_name="Conflict",
+            months=["2024-01"],
+            start_month="2024-01",
+        )
+
+    assert "either months[] or start_month/end_month" in str(excinfo.value)
+
+
 def test_create_production_zones_endpoint(monkeypatch):
     def _fake_export(_aoi, _name, months, **kwargs):
         return {
@@ -191,7 +214,27 @@ def test_create_production_zones_endpoint(monkeypatch):
                 "vectors": {"id": "task_v", "state": "READY", "destination_uri": "gs://zones/demo.shp"},
                 "zonal_stats": {"id": "task_s", "state": "READY", "destination_uri": "gs://zones/demo.csv"},
             },
-            "metadata": {"used_months": months, "skipped_months": [], "mmu_applied": True},
+            "metadata": {
+                "used_months": months,
+                "skipped_months": ["2024-04"],
+                "mmu_applied": True,
+                "stability": {
+                    "initial_threshold": 0.25,
+                    "final_threshold": 0.6,
+                    "thresholds_tested": [0.25, 0.5, 0.6],
+                    "survival_ratio": 0.32,
+                    "surviving_pixels": 32,
+                    "total_pixels": 100,
+                    "target_ratio": zones.MIN_STABILITY_SURVIVAL_RATIO,
+                    "low_confidence": False,
+                },
+                "debug": {
+                    "stability": {
+                        "survival_ratios": [0.1, 0.2, 0.32],
+                        "thresholds_tested": [0.25, 0.5, 0.6],
+                    }
+                },
+            },
             "prefix": "zones/PROD_202403_202405_demo_zones",
             "bucket": "zones-bucket",
         }
@@ -218,6 +261,16 @@ def test_create_production_zones_endpoint(monkeypatch):
     assert raster_task["state"] == "READY"
     assert raster_task["destination_uri"].endswith("demo.tif")
 
+    debug = response["debug"]
+    assert debug["requested_months"] == ["2024-03", "2024-05"]
+    assert debug["skipped_months"] == ["2024-04"]
+    assert debug["retry_thresholds"] == [0.25, 0.5, 0.6]
+    stability = debug["stability"]
+    assert stability["initial_threshold"] == 0.25
+    assert stability["final_threshold"] == 0.6
+    assert stability["survival_ratio"] == 0.32
+    assert stability["survival_ratios"] == [0.1, 0.2, 0.32]
+
 
 def test_create_production_zones_requires_bucket_for_gcs(monkeypatch):
     def _fail_export(*_args, **_kwargs):  # pragma: no cover - should not run
@@ -242,6 +295,34 @@ def test_create_production_zones_requires_bucket_for_gcs(monkeypatch):
         excinfo.value.detail
         == "A GCS bucket must be provided when export_target is 'gcs'."
     )
+
+
+def test_create_production_zones_with_range_request(monkeypatch):
+    captured = {}
+
+    def _fake_export(_aoi, _name, months, **_kwargs):
+        captured["months"] = months
+        return {
+            "paths": {},
+            "tasks": {},
+            "metadata": {"used_months": months, "skipped_months": []},
+            "prefix": "zones/demo",
+        }
+
+    monkeypatch.setattr(zones, "export_selected_period_zones", _fake_export)
+
+    request = ProductionZonesRequest(
+        aoi_geojson=_sample_polygon(),
+        aoi_name="Demo",
+        start_month="2024-01",
+        end_month="2024-02",
+    )
+
+    response = create_production_zones(request)
+
+    assert captured["months"] == ["2024-01", "2024-02"]
+    assert response["debug"]["requested_months"] == ["2024-01", "2024-02"]
+    assert response["debug"]["stability"] is None
 
 
 def test_prepare_selected_period_artifacts_retries_thresholds(monkeypatch):
