@@ -268,7 +268,7 @@ def _simplify_vectors(vectors: ee.FeatureCollection, tolerance_m: float) -> ee.F
         return vectors
 
     def _simplify(feature: ee.Feature) -> ee.Feature:
-        geom = feature.geometry().simplify(maxError=tolerance_m, preserveTopology=True)
+        geom = feature.geometry().simplify(maxError=tolerance_m)
         zone_value = ee.Number(feature.get("zone")).toInt()
         return feature.setGeometry(geom).set({"zone": zone_value, "zone_id": zone_value})
 
