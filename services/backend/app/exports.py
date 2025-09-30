@@ -31,6 +31,13 @@ IMAGERY_SCALE_M = 10
 SAFE_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_-]+")
 
 
+def _output_dir() -> Path:
+    base = os.getenv("OUTPUT_DIR", "./exports")
+    path = Path(base).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 ExportVariant = Literal[
     "analysis",
     "google_earth",
@@ -72,7 +79,7 @@ class ZoneExportState:
     status: str = "pending"
     error: Optional[str] = None
     prefix: Optional[str] = None
-    paths: Dict[str, Optional[str]] = field(default_factory=dict)
+    paths: Dict[str, object] = field(default_factory=dict)
     tasks: Dict[str, Dict[str, Optional[str]]] = field(default_factory=dict)
     metadata: Dict[str, object] = field(default_factory=dict)
 
@@ -642,6 +649,11 @@ def _download_zone_artifacts(
 
     vector_url = artifacts.zone_vectors.getDownloadURL({"fileFormat": "SHP"})
     vector_files, vector_main = _extract_shapefile_archive(vector_url, temp_dir, prefix)
+    vector_components: Dict[str, str] = {}
+    for _, arcname in vector_files:
+        suffix = Path(arcname).suffix.lower().lstrip(".")
+        if suffix:
+            vector_components[suffix] = arcname
 
     stats_name: Optional[str] = None
     stats_path: Optional[Path] = None
@@ -661,6 +673,7 @@ def _download_zone_artifacts(
     paths = {
         "raster": raster_name,
         "vectors": vector_main,
+        "vector_components": vector_components,
         "zonal_stats": stats_name,
     }
     return files, paths
@@ -744,9 +757,14 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
                 bucket=bucket,
                 include_stats=job.zone_config.include_stats,
             )
+            component_uris = {
+                ext: f"gs://{bucket}/{prefix}.{ext}"
+                for ext in ["shp", "dbf", "shx", "prj"]
+            }
             job.zone_state.paths = {
                 "raster": f"gs://{bucket}/{prefix}.tif",
-                "vectors": f"gs://{bucket}/{prefix}.shp",
+                "vectors": component_uris["shp"],
+                "vector_components": component_uris,
                 "zonal_stats": (
                     f"gs://{bucket}/{prefix}_zonal_stats.csv"
                     if job.zone_config.include_stats
@@ -778,9 +796,14 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
                 prefix=drive_prefix,
                 include_stats=job.zone_config.include_stats,
             )
+            component_uris = {
+                ext: f"drive://{folder}/{drive_prefix}.{ext}"
+                for ext in ["shp", "dbf", "shx", "prj"]
+            }
             job.zone_state.paths = {
                 "raster": f"drive://{folder}/{drive_prefix}.tif",
-                "vectors": f"drive://{folder}/{drive_prefix}.shp",
+                "vectors": component_uris["shp"],
+                "vector_components": component_uris,
                 "zonal_stats": (
                     f"drive://{folder}/{drive_prefix}_zonal_stats.csv"
                     if job.zone_config.include_stats
@@ -873,14 +896,18 @@ def _process_zip_exports(job: ExportJob) -> None:
     zip_entries.extend(zone_files)
 
     if zip_entries:
-        zip_path = temp_dir / f"{job.safe_aoi_name}_sentinel2_indices.zip"
+        output_dir = _output_dir()
+        zip_path = output_dir / f"{job.safe_aoi_name}_sentinel2_indices.zip"
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path, arcname in zip_entries:
                 archive.write(path, arcname=arcname)
         job.zip_path = zip_path
 
     if job.zone_state is not None and job.zone_state.paths:
-        job.zone_state.paths = {key: zone_paths.get(key) for key in ["raster", "vectors", "zonal_stats"]}
+        keep_keys = ("raster", "vectors", "zonal_stats", "vector_components")
+        job.zone_state.paths = {
+            key: zone_paths.get(key) for key in keep_keys if key in zone_paths
+        }
 
     if job.all_completed() and _zone_completed(job):
         job.state = "completed"
