@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from fastapi import HTTPException
+
 from app.api.zones import ProductionZonesRequest, create_production_zones
 from app.services import zones
 
@@ -83,4 +85,29 @@ def test_create_production_zones_endpoint(monkeypatch):
     assert raster_task["id"] == "task_r"
     assert raster_task["state"] == "READY"
     assert raster_task["destination_uri"].endswith("demo.tif")
+
+
+def test_create_production_zones_requires_bucket_for_gcs(monkeypatch):
+    def _fail_export(*_args, **_kwargs):  # pragma: no cover - should not run
+        raise AssertionError("export_selected_period_zones should not be called")
+
+    monkeypatch.setattr(zones, "export_selected_period_zones", _fail_export)
+    monkeypatch.delenv("GEE_GCS_BUCKET", raising=False)
+    monkeypatch.delenv("GCS_BUCKET", raising=False)
+
+    request = ProductionZonesRequest(
+        aoi_geojson=_sample_polygon(),
+        aoi_name="Demo",
+        months=["2024-03"],
+        export_target="gcs",
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        create_production_zones(request)
+
+    assert excinfo.value.status_code == 400
+    assert (
+        excinfo.value.detail
+        == "A GCS bucket must be provided when export_target is 'gcs'."
+    )
 
