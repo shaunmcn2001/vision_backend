@@ -1023,7 +1023,7 @@ def export_ui():
          exportTarget,
          headers
        ) => {
-         const response = await fetch(buildUrl('zones/production'), {
+         const response = await fetch(buildUrl('api/zones/production'), {
            method: 'POST',
            headers: { ...headers, 'Content-Type': 'application/json' },
            body: JSON.stringify({
