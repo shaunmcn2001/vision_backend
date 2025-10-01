@@ -16,7 +16,14 @@ def _sample_polygon() -> dict:
     }
 
 
-def _run_prepare_with_counts(monkeypatch, survival_counts, *, cv_threshold, total_pixels=100):
+def _run_prepare_with_counts(
+    monkeypatch,
+    survival_counts,
+    *,
+    cv_threshold,
+    total_pixels=100,
+    composite_metadata=None,
+):
     class _FakeZoneImage:
         def updateMask(self, *_args, **_kwargs):
             return self
@@ -60,8 +67,10 @@ def _run_prepare_with_counts(monkeypatch, survival_counts, *, cv_threshold, tota
             def count():
                 return object()
 
-    def _fake_build_monthly_composites(_geometry, months, _cloud_prob_max):
-        return [(months[0], object())], []
+    metadata = composite_metadata or {"composite_mode": "monthly"}
+
+    def _fake_build_series(_geometry, months, _cloud_prob_max):
+        return [(months[0], object())], [], metadata
 
     def _fake_compute_ndvi(_image):
         return object()
@@ -79,7 +88,7 @@ def _run_prepare_with_counts(monkeypatch, survival_counts, *, cv_threshold, tota
         return _FakeMask(key, survival_counts[key])
 
     monkeypatch.setattr(zones, "ee", _FakeEE())
-    monkeypatch.setattr(zones, "_build_monthly_composites", _fake_build_monthly_composites)
+    monkeypatch.setattr(zones, "_build_composite_series", _fake_build_series)
     monkeypatch.setattr(zones, "_compute_ndvi", _fake_compute_ndvi)
     monkeypatch.setattr(zones, "_ndvi_temporal_stats", _fake_temporal_stats)
     monkeypatch.setattr(zones, "_ndvi_cv", _fake_cv)
@@ -100,8 +109,11 @@ def _run_prepare_with_counts(monkeypatch, survival_counts, *, cv_threshold, tota
         n_classes=5,
         cv_mask_threshold=cv_threshold,
         min_mapping_unit_ha=0.5,
-        smooth_kernel_px=1,
+        smooth_radius_m=15,
+        open_radius_m=10,
+        close_radius_m=10,
         simplify_tol_m=5,
+        simplify_buffer_m=0,
         method="ndvi_percentiles",
         sample_size=100,
         include_stats=False,
@@ -337,7 +349,7 @@ def test_create_production_zones_with_range_request(monkeypatch):
     assert response["debug"]["stability"] is None
 
 
-def test_prepare_selected_period_artifacts_retries_thresholds(monkeypatch):
+def test_prepare_selected_period_artifacts_reports_stability(monkeypatch):
     survival_counts = {0.25: 5, 0.5: 10, 1.0: 18, 1.5: 28, 2.0: 35}
     artifacts, metadata = _run_prepare_with_counts(
         monkeypatch, survival_counts, cv_threshold=0.25
@@ -346,18 +358,19 @@ def test_prepare_selected_period_artifacts_retries_thresholds(monkeypatch):
     assert artifacts.zone_image.__class__.__name__ == "_FakeZoneImage"
     assert metadata["percentile_thresholds"] == [0.2, 0.4, 0.6, 0.8]
     assert metadata["palette"] == list(zones.ZONE_PALETTE[:5])
+    assert metadata["composite_mode"] == "monthly"
 
     stability = metadata["stability"]
-    assert stability["thresholds_tested"] == [0.25, 0.5, 1.0, 1.5]
-    assert stability["final_threshold"] == pytest.approx(1.5)
-    assert stability["survival_ratio"] == pytest.approx(0.28)
-    assert stability["low_confidence"] is True
-    assert metadata["low_confidence"] is True
+    assert stability["thresholds_tested"] == [0.25]
+    assert stability["final_threshold"] == pytest.approx(0.25)
+    assert stability["survival_ratio"] == pytest.approx(0.05)
+    assert stability["low_confidence"] is False
+    assert metadata["low_confidence"] is False
 
     debug = metadata["debug"]["stability"]
-    assert debug["thresholds_tested"] == [0.25, 0.5, 1.0, 1.5]
-    assert debug["low_confidence"] is True
-    assert debug["survival_ratios"] == pytest.approx([0.05, 0.1, 0.18, 0.28])
+    assert debug["thresholds_tested"] == [0.25]
+    assert debug["low_confidence"] is False
+    assert debug["survival_ratios"] == pytest.approx([0.05])
 
 
 def test_prepare_selected_period_artifacts_retains_initial_threshold(monkeypatch):
@@ -376,6 +389,22 @@ def test_prepare_selected_period_artifacts_retains_initial_threshold(monkeypatch
     debug = metadata["debug"]["stability"]
     assert debug["thresholds_tested"] == [0.5]
     assert debug["survival_ratios"] == pytest.approx([0.3])
+
+
+def test_prepare_selected_period_artifacts_records_scene_mode(monkeypatch):
+    survival_counts = {0.25: 25, 0.5: 40, 1.0: 60}
+    _artifacts, metadata = _run_prepare_with_counts(
+        monkeypatch,
+        survival_counts,
+        cv_threshold=0.25,
+        composite_metadata={"composite_mode": "scene", "scene_count": 7},
+    )
+
+    assert metadata["composite_mode"] == "scene"
+    assert metadata["scene_count"] == 7
+    assert metadata["palette"] == list(zones.ZONE_PALETTE[:5])
+    assert metadata["percentile_thresholds"] == [0.2, 0.4, 0.6, 0.8]
+    assert metadata["low_confidence"] is False
 
 
 def test_apply_cleanup_uses_meter_operations(monkeypatch):
@@ -449,14 +478,18 @@ def test_apply_cleanup_uses_meter_operations(monkeypatch):
         fake_image,
         geometry="geom",
         n_classes=5,
-        smooth_kernel_px=2,
+        smooth_radius_m=15,
+        open_radius_m=10,
+        close_radius_m=10,
         min_mapping_unit_ha=1.0,
     )
 
     assert result is fake_image
     meter_calls = [entry for entry in calls if entry[0] in {"mode", "min", "max"}]
     assert all(args[1] == "meters" for _, args in meter_calls)
-    assert any(args[0] == 20 for _, args in meter_calls)
+    radii = [args[0] for _, args in meter_calls]
+    assert 15 in radii
+    assert radii.count(10) >= 2
     assert fake_image.mask_obj.calls[0][1][1] == "meters"
     assert fake_area.lt_calls[0][0] == pytest.approx(10_000.0)
 
@@ -533,10 +566,10 @@ def test_simplify_vectors_sets_area_and_buffer(monkeypatch):
 
     monkeypatch.setattr(zones, "ee", _FakeEE())
 
-    simplified = zones._simplify_vectors(collection, tolerance_m=15)
+    simplified = zones._simplify_vectors(collection, tolerance_m=15, buffer_m=2)
     feature = simplified.features[0]
     assert geometry.simplify_args == [15]
-    assert geometry.buffer_args == [0]
+    assert geometry.buffer_args == [2]
     assert feature.props["zone_id"].__class__.__name__ != "NoneType"
     assert feature.props["area_m2"].value == 12_000
     assert feature.props["area_ha"] == pytest.approx(1.2)
