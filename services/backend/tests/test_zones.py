@@ -275,19 +275,19 @@ def test_create_production_zones_endpoint(monkeypatch):
                 "palette": list(zones.ZONE_PALETTE[:5]),
                 "percentile_thresholds": [0.1, 0.2, 0.3, 0.4],
                 "stability": {
-                    "initial_threshold": 0.25,
-                    "final_threshold": 1.0,
-                    "thresholds_tested": [0.25, 0.5, 1.0],
-                    "survival_ratio": 0.32,
-                    "surviving_pixels": 32,
+                    "initial_threshold": 0.5,
+                    "final_threshold": 1.5,
+                    "thresholds_tested": [0.5, 1.0, 1.5],
+                    "survival_ratio": 0.35,
+                    "surviving_pixels": 35,
                     "total_pixels": 100,
                     "target_ratio": zones.MIN_STABILITY_SURVIVAL_RATIO,
-                    "low_confidence": False,
+                    "low_confidence": True,
                 },
                 "debug": {
                     "stability": {
-                        "survival_ratios": [0.1, 0.22, 0.32],
-                        "thresholds_tested": [0.25, 0.5, 1.0],
+                        "survival_ratios": [0.2, 0.3, 0.35],
+                        "thresholds_tested": [0.5, 1.0, 1.5],
                     }
                 },
             },
@@ -322,14 +322,27 @@ def test_create_production_zones_endpoint(monkeypatch):
     debug = response["debug"]
     assert debug["requested_months"] == ["2024-03", "2024-05"]
     assert debug["skipped_months"] == ["2024-04"]
-    assert debug["retry_thresholds"] == [0.25, 0.5, 1.0]
+    assert debug["retry_thresholds"] == [0.5, 1.0, 1.5]
     stability = debug["stability"]
-    assert stability["initial_threshold"] == 0.25
-    assert stability["final_threshold"] == 1.0
-    assert stability["survival_ratio"] == 0.32
-    assert stability["survival_ratios"] == [0.1, 0.22, 0.32]
+    assert stability["initial_threshold"] == 0.5
+    assert stability["final_threshold"] == 1.5
+    assert stability["survival_ratio"] == 0.35
+    assert stability["survival_ratios"] == [0.2, 0.3, 0.35]
     assert response["palette"] == list(zones.ZONE_PALETTE[:5])
     assert response["thresholds"] == [0.1, 0.2, 0.3, 0.4]
+
+
+def test_production_zones_request_defaults():
+    request = ProductionZonesRequest(
+        aoi_geojson=_sample_polygon(),
+        aoi_name="Defaults",
+        months=["2024-01"],
+    )
+
+    assert request.cv_mask_threshold == zones.DEFAULT_CV_THRESHOLD
+    assert request.mmu_ha == zones.DEFAULT_MIN_MAPPING_UNIT_HA
+    assert request.smooth_radius_m == zones.DEFAULT_SMOOTH_RADIUS_M
+    assert request.simplify_buffer_m == zones.DEFAULT_SIMPLIFY_BUFFER_M
 
 
 def test_create_production_zones_requires_bucket_for_gcs(monkeypatch):
