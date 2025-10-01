@@ -523,18 +523,16 @@ def _classify_by_percentiles(
     band_name = ee.String(image.bandNames().get(0))
     image = image.rename(band_name)
     thresholds = _percentile_thresholds(image, geometry, n_classes)
-    initial = ee.Image.constant(n_classes)
+    zero = image.multiply(0)
 
-    def _assign(current, item):
+    def _accumulate(current: ee.Image, threshold: ee.Number) -> ee.Image:
         current_image = ee.Image(current)
-        info = ee.List(item)
-        idx = ee.Number(info.get(0))
-        threshold = ee.Number(info.get(1))
-        class_value = idx.add(1)
-        return current_image.where(image.lte(threshold), class_value)
+        threshold_value = ee.Number(threshold)
+        gt_band = image.gt(threshold_value)
+        return current_image.add(gt_band)
 
-    pairs = ee.List.sequence(0, thresholds.size().subtract(1)).zip(thresholds)
-    classified = ee.Image(pairs.iterate(_assign, initial))
+    summed = ee.Image(thresholds.iterate(_accumulate, zero))
+    classified = summed.add(1).toInt()
     return classified.rename("zone"), thresholds
 
 
