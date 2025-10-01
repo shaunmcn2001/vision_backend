@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+import calendar
+from datetime import date, datetime
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -48,6 +49,12 @@ class ProductionZonesRequest(_BaseAOIRequest):
     end_month: Optional[str] = Field(
         None, description="End month in YYYY-MM format (inclusive)",
     )
+    start_date: Optional[date] = Field(
+        None, description="Start date in YYYY-MM-DD format (inclusive)",
+    )
+    end_date: Optional[date] = Field(
+        None, description="End date in YYYY-MM-DD format (inclusive)",
+    )
     cloud_prob_max: int = Field(zone_service.DEFAULT_CLOUD_PROB_MAX, ge=0, le=100)
     n_classes: int = Field(zone_service.DEFAULT_N_CLASSES, ge=3, le=7)
     cv_mask_threshold: float = Field(zone_service.DEFAULT_CV_THRESHOLD, ge=0)
@@ -71,27 +78,73 @@ class ProductionZonesRequest(_BaseAOIRequest):
         months = values.get("months")
         start_month = values.get("start_month")
         end_month = values.get("end_month")
+        start_date_value = values.get("start_date")
+        end_date_value = values.get("end_date")
 
-        if months and (start_month or end_month):
-            raise ValueError("Provide either months[] or start_month/end_month, not both")
+        months_provided = bool(months)
+        month_range_provided = start_month is not None or end_month is not None
+        date_range_provided = start_date_value is not None or end_date_value is not None
 
-        if months is None:
-            if start_month is None and end_month is None:
-                raise ValueError("Either months[] or start/end month range must be provided")
+        modes_selected = sum(
+            1
+            for provided in (months_provided, month_range_provided, date_range_provided)
+            if provided
+        )
+
+        if modes_selected == 0:
+            raise ValueError(
+                "Either months[], start_month/end_month, or start_date/end_date must be provided"
+            )
+        if modes_selected > 1:
+            raise ValueError(
+                "Provide only one of months[], start_month/end_month, or start_date/end_date"
+            )
+
+        def _parse_month(value: str, field_name: str) -> datetime:
+            month_str = str(value).strip()
+            try:
+                return datetime.strptime(month_str, "%Y-%m")
+            except ValueError as exc:  # pragma: no cover - defensive
+                raise ValueError(f"Invalid month format for {field_name}: {value}") from exc
+
+        def _month_end(dt: datetime) -> date:
+            last_day = calendar.monthrange(dt.year, dt.month)[1]
+            return date(dt.year, dt.month, last_day)
+
+        def _parse_date(value, field_name: str) -> date:
+            if isinstance(value, date):
+                return value
+            value_str = str(value).strip()
+            try:
+                return date.fromisoformat(value_str)
+            except ValueError as exc:
+                raise ValueError(f"Invalid date format for {field_name}: {value}") from exc
+
+        if months_provided:
+            parsed_months: List[str] = []
+            start_dt: datetime | None = None
+            end_dt: datetime | None = None
+            for raw in months:
+                parsed = _parse_month(raw, "months[]")
+                parsed_months.append(parsed.strftime("%Y-%m"))
+                start_dt = parsed if start_dt is None or parsed < start_dt else start_dt
+                end_dt = parsed if end_dt is None or parsed > end_dt else end_dt
+
+            if not parsed_months:
+                raise ValueError("At least one month must be provided")
+
+            start_dt = start_dt or _parse_month(parsed_months[0], "months[]")
+            end_dt = end_dt or start_dt
+            values["months"] = parsed_months
+            values["start_date"] = date(start_dt.year, start_dt.month, 1)
+            values["end_date"] = _month_end(end_dt)
+            return values
+
+        if month_range_provided:
             if start_month is None or end_month is None:
                 raise ValueError("Both start_month and end_month must be provided together")
-
-            start_str = str(start_month).strip()
-            end_str = str(end_month).strip()
-            try:
-                start_dt = datetime.strptime(start_str, "%Y-%m")
-            except ValueError as exc:
-                raise ValueError(f"Invalid month format for start_month: {start_month}") from exc
-            try:
-                end_dt = datetime.strptime(end_str, "%Y-%m")
-            except ValueError as exc:
-                raise ValueError(f"Invalid month format for end_month: {end_month}") from exc
-
+            start_dt = _parse_month(start_month, "start_month")
+            end_dt = _parse_month(end_month, "end_month")
             if end_dt < start_dt:
                 raise ValueError("end_month must be on or after start_month")
 
@@ -103,8 +156,34 @@ class ProductionZonesRequest(_BaseAOIRequest):
                     cursor = cursor.replace(year=cursor.year + 1, month=1)
                 else:
                     cursor = cursor.replace(month=cursor.month + 1)
-            values["months"] = generated
 
+            values["months"] = generated
+            values["start_date"] = date(start_dt.year, start_dt.month, 1)
+            values["end_date"] = _month_end(end_dt)
+            return values
+
+        # Date range mode
+        if start_date_value is None or end_date_value is None:
+            raise ValueError("Both start_date and end_date must be provided together")
+
+        start_dt = _parse_date(start_date_value, "start_date")
+        end_dt = _parse_date(end_date_value, "end_date")
+        if end_dt < start_dt:
+            raise ValueError("end_date must be on or after start_date")
+
+        generated: List[str] = []
+        cursor = date(start_dt.year, start_dt.month, 1)
+        end_cursor = date(end_dt.year, end_dt.month, 1)
+        while cursor <= end_cursor:
+            generated.append(cursor.strftime("%Y-%m"))
+            if cursor.month == 12:
+                cursor = cursor.replace(year=cursor.year + 1, month=1)
+            else:
+                cursor = cursor.replace(month=cursor.month + 1)
+
+        values["months"] = generated
+        values["start_date"] = start_dt
+        values["end_date"] = end_dt
         return values
 
     @validator("months")
@@ -143,6 +222,8 @@ def create_production_zones(request: ProductionZonesRequest):
             request.aoi_geojson,
             request.aoi_name,
             request.months,
+            start_date=request.start_date,
+            end_date=request.end_date,
             cloud_prob_max=request.cloud_prob_max,
             n_classes=request.n_classes,
             cv_mask_threshold=request.cv_mask_threshold,

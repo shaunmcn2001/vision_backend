@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import pytest
@@ -69,7 +70,9 @@ def _run_prepare_with_counts(
 
     metadata = composite_metadata or {"composite_mode": "monthly"}
 
-    def _fake_build_series(_geometry, months, _cloud_prob_max):
+    def _fake_build_series(_geometry, months, start_date, end_date, _cloud_prob_max):
+        assert start_date == date(2024, 1, 1)
+        assert end_date == date(2024, 1, 31)
         return [(months[0], object())], [], metadata
 
     def _fake_compute_ndvi(_image):
@@ -105,6 +108,8 @@ def _run_prepare_with_counts(
         _sample_polygon(),
         geometry=object(),
         months=["2024-01"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 31),
         cloud_prob_max=20,
         n_classes=5,
         cv_mask_threshold=cv_threshold,
@@ -188,6 +193,8 @@ def test_production_zones_request_normalises_months():
     )
     assert request.months == ["2024-03", "2024-05"]
     assert request.aoi_name == "Demo Field"
+    assert request.start_date == date(2024, 3, 1)
+    assert request.end_date == date(2024, 5, 31)
 
 
 def test_production_zones_request_accepts_range():
@@ -199,6 +206,21 @@ def test_production_zones_request_accepts_range():
     )
 
     assert request.months == ["2024-01", "2024-02", "2024-03"]
+    assert request.start_date == date(2024, 1, 1)
+    assert request.end_date == date(2024, 3, 31)
+
+
+def test_production_zones_request_accepts_dates():
+    request = ProductionZonesRequest(
+        aoi_geojson=_sample_polygon(),
+        aoi_name="Dates",
+        start_date="2024-02-15",
+        end_date="2024-04-02",
+    )
+
+    assert request.start_date == date(2024, 2, 15)
+    assert request.end_date == date(2024, 4, 2)
+    assert request.months == ["2024-02", "2024-03", "2024-04"]
 
 
 def test_production_zones_request_rejects_conflicting_inputs():
@@ -210,11 +232,25 @@ def test_production_zones_request_rejects_conflicting_inputs():
             start_month="2024-01",
         )
 
-    assert "either months[] or start_month/end_month" in str(excinfo.value)
+    assert "Provide only one of months[]" in str(excinfo.value)
+
+
+def test_production_zones_request_rejects_inverted_dates():
+    with pytest.raises(ValueError) as excinfo:
+        ProductionZonesRequest(
+            aoi_geojson=_sample_polygon(),
+            aoi_name="Bad",
+            start_date="2024-05-01",
+            end_date="2024-04-01",
+        )
+
+    assert "end_date must be on or after start_date" in str(excinfo.value)
 
 
 def test_create_production_zones_endpoint(monkeypatch):
-    def _fake_export(_aoi, _name, months, **kwargs):
+    def _fake_export(_aoi, _name, months, *, start_date=None, end_date=None, **kwargs):
+        assert start_date == date(2024, 3, 1)
+        assert end_date == date(2024, 5, 31)
         return {
             "paths": {
                 "raster": "zones/PROD_202403_202405_demo_zones.tif",
@@ -324,8 +360,10 @@ def test_create_production_zones_requires_bucket_for_gcs(monkeypatch):
 def test_create_production_zones_with_range_request(monkeypatch):
     captured = {}
 
-    def _fake_export(_aoi, _name, months, **_kwargs):
+    def _fake_export(_aoi, _name, months, *, start_date=None, end_date=None, **_kwargs):
         captured["months"] = months
+        captured["start_date"] = start_date
+        captured["end_date"] = end_date
         return {
             "paths": {},
             "tasks": {},
@@ -345,7 +383,41 @@ def test_create_production_zones_with_range_request(monkeypatch):
     response = create_production_zones(request)
 
     assert captured["months"] == ["2024-01", "2024-02"]
+    assert captured["start_date"] == date(2024, 1, 1)
+    assert captured["end_date"] == date(2024, 2, 29)
     assert response["debug"]["requested_months"] == ["2024-01", "2024-02"]
+    assert response["debug"]["stability"] is None
+
+
+def test_create_production_zones_with_date_request(monkeypatch):
+    captured = {}
+
+    def _fake_export(_aoi, _name, months, *, start_date=None, end_date=None, **_kwargs):
+        captured["months"] = months
+        captured["start_date"] = start_date
+        captured["end_date"] = end_date
+        return {
+            "paths": {},
+            "tasks": {},
+            "metadata": {"used_months": months, "skipped_months": []},
+            "prefix": "zones/demo",
+        }
+
+    monkeypatch.setattr(zones, "export_selected_period_zones", _fake_export)
+
+    request = ProductionZonesRequest(
+        aoi_geojson=_sample_polygon(),
+        aoi_name="Date Demo",
+        start_date="2024-03-10",
+        end_date="2024-04-05",
+    )
+
+    response = create_production_zones(request)
+
+    assert captured["months"] == ["2024-03", "2024-04"]
+    assert captured["start_date"] == date(2024, 3, 10)
+    assert captured["end_date"] == date(2024, 4, 5)
+    assert response["debug"]["requested_months"] == ["2024-03", "2024-04"]
     assert response["debug"]["stability"] is None
 
 
