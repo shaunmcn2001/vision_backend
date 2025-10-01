@@ -17,26 +17,32 @@ from app.utils.geometry import area_ha
 DEFAULT_CLOUD_PROB_MAX = 40
 DEFAULT_N_CLASSES = 5
 DEFAULT_CV_THRESHOLD = 0.25
-DEFAULT_MIN_MAPPING_UNIT_HA = 0.5
-DEFAULT_SMOOTH_KERNEL_PX = 1
+DEFAULT_MIN_MAPPING_UNIT_HA = 0.08
+DEFAULT_SMOOTH_RADIUS_M = 15
+DEFAULT_OPEN_RADIUS_M = 10
+DEFAULT_CLOSE_RADIUS_M = 10
 DEFAULT_SIMPLIFY_TOL_M = 5
+DEFAULT_SIMPLIFY_BUFFER_M = 0
 DEFAULT_METHOD = "ndvi_percentiles"
 DEFAULT_SAMPLE_SIZE = 8000
 DEFAULT_SCALE = 10
 DEFAULT_CRS = "EPSG:4326"
 
 ZONE_PALETTE: tuple[str, ...] = (
-    "#00441b",
-    "#006d2c",
-    "#238b45",
-    "#41ae76",
-    "#66c2a4",
-    "#99d8c9",
-    "#ccece6",
+    "#112f1d",
+    "#1b4d2a",
+    "#2c6a39",
+    "#3f8749",
+    "#58a35d",
+    "#80bf7d",
+    "#b6dcb1",
 )
 
 STABILITY_THRESHOLD_SEQUENCE = [0.5, 1.0, 1.5, 2.0]
-MIN_STABILITY_SURVIVAL_RATIO = 0.2
+MIN_STABILITY_SURVIVAL_RATIO = 0.0
+
+NDVI_PERCENTILE_MIN = 0.0
+NDVI_PERCENTILE_MAX = 0.6
 
 STABILITY_MASK_EMPTY_ERROR = (
     "All pixels were masked out by the stability threshold when computing NDVI percentiles. "
@@ -107,56 +113,142 @@ def _resolve_geometry(aoi: Union[dict, ee.Geometry]) -> ee.Geometry:
     return gee.geometry_from_geojson(aoi)
 
 
-def _build_monthly_composites(
+def _attach_cloud_probability(
+    collection: ee.ImageCollection, probability: ee.ImageCollection
+) -> ee.ImageCollection:
+    join = ee.Join.saveFirst("cloud_prob")
+    matches = join.apply(
+        primary=collection,
+        secondary=probability,
+        condition=ee.Filter.equals(leftField="system:index", rightField="system:index"),
+    )
+
+    def _add_probability(image: ee.Image) -> ee.Image:
+        cloud_match = image.get("cloud_prob")
+        probability_band = ee.Image(
+            ee.Algorithms.If(
+                ee.Algorithms.IsEqual(cloud_match, None),
+                ee.Image.constant(0),
+                ee.Image(cloud_match).select("probability"),
+            )
+        ).rename("cloud_probability")
+        return image.addBands(probability_band)
+
+    return ee.ImageCollection(matches).map(_add_probability)
+
+
+def _mask_sentinel2_scene(image: ee.Image, cloud_prob_max: int) -> ee.Image:
+    qa = image.select("QA60")
+    cloud_bit_mask = 1 << 10
+    cirrus_bit_mask = 1 << 11
+    qa_mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
+
+    prob_mask = image.select("cloud_probability").lte(cloud_prob_max)
+
+    scl = image.select("SCL")
+    shadow_mask = scl.neq(3).And(scl.neq(11))
+
+    combined_mask = qa_mask.And(prob_mask).And(shadow_mask)
+    scaled = image.updateMask(combined_mask).divide(10_000)
+    selected = scaled.select(list(gee.S2_BANDS))
+    return selected.copyProperties(image, ["system:time_start"])
+
+
+def _build_composite_series(
     geometry: ee.Geometry, months: Sequence[str], cloud_prob_max: int
-) -> Tuple[List[tuple[str, ee.Image]], List[str]]:
+) -> Tuple[List[tuple[str, ee.Image]], List[str], Dict[str, object]]:
     composites: List[tuple[str, ee.Image]] = []
     skipped: List[str] = []
+    metadata: Dict[str, object] = {}
     ordered = _ordered_months(months)
-    for month in ordered:
-        collection, composite = gee.monthly_sentinel2_collection(
-            geometry, month, cloud_prob_max
-        )
-        try:
-            scene_count = int(ee.Number(collection.size()).getInfo() or 0)
-        except Exception as exc:  # pragma: no cover - server side failure
-            raise RuntimeError(f"Failed to evaluate Sentinel-2 collection for {month}: {exc}")
-        if scene_count == 0:
-            skipped.append(month)
-            continue
+    start_iso, _ = gee.month_date_range(ordered[0])
+    _, end_iso = gee.month_date_range(ordered[-1])
 
-        reproj = (
-            composite.resample("bilinear").reproject(DEFAULT_CRS, None, DEFAULT_SCALE)
-        )
-        ndvi = _compute_ndvi(reproj)
-        try:
-            valid_pixels = int(
-                ee.Number(
-                    ndvi.mask()
-                    .reduceRegion(
-                        reducer=ee.Reducer.count(),
-                        geometry=geometry,
-                        scale=DEFAULT_SCALE,
-                        bestEffort=True,
-                        tileScale=4,
-                        maxPixels=gee.MAX_PIXELS,
-                    )
-                    .get("NDVI")
-                ).getInfo()
-                or 0
+    month_span = len(ordered)
+    if month_span >= 3:
+        metadata["composite_mode"] = "monthly"
+        for month in ordered:
+            collection, composite = gee.monthly_sentinel2_collection(
+                geometry, month, cloud_prob_max
             )
+            try:
+                scene_count = int(ee.Number(collection.size()).getInfo() or 0)
+            except Exception as exc:  # pragma: no cover - server side failure
+                raise RuntimeError(
+                    f"Failed to evaluate Sentinel-2 collection for {month}: {exc}"
+                )
+            if scene_count == 0:
+                skipped.append(month)
+                continue
+
+            reproj = (
+                composite.resample("bilinear").reproject(DEFAULT_CRS, None, DEFAULT_SCALE)
+            )
+            ndvi = _compute_ndvi(reproj)
+            try:
+                valid_pixels = int(
+                    ee.Number(
+                        ndvi.mask()
+                        .reduceRegion(
+                            reducer=ee.Reducer.count(),
+                            geometry=geometry,
+                            scale=DEFAULT_SCALE,
+                            bestEffort=True,
+                            tileScale=4,
+                            maxPixels=gee.MAX_PIXELS,
+                        )
+                        .get("NDVI")
+                    ).getInfo()
+                    or 0
+                )
+            except Exception as exc:  # pragma: no cover - server side failure
+                raise RuntimeError(
+                    f"Failed to determine valid pixel count for {month}: {exc}"
+                ) from exc
+
+            if valid_pixels == 0:
+                skipped.append(month)
+                continue
+
+            composites.append((month, reproj.clip(geometry)))
+    else:
+        metadata["composite_mode"] = "scene"
+        metadata["start_date"] = start_iso
+        metadata["end_date"] = end_iso
+
+        base_collection = (
+            ee.ImageCollection(gee.S2_SR_COLLECTION)
+            .filterBounds(geometry)
+            .filterDate(start_iso, end_iso)
+        )
+        probability = (
+            ee.ImageCollection(gee.S2_CLOUD_PROB_COLLECTION)
+            .filterBounds(geometry)
+            .filterDate(start_iso, end_iso)
+        )
+
+        with_prob = _attach_cloud_probability(base_collection, probability)
+        masked = with_prob.map(lambda img: _mask_sentinel2_scene(img, cloud_prob_max))
+
+        try:
+            scene_count = int(ee.Number(masked.size()).getInfo() or 0)
         except Exception as exc:  # pragma: no cover - server side failure
             raise RuntimeError(
-                f"Failed to determine valid pixel count for {month}: {exc}"
+                f"Failed to evaluate Sentinel-2 scene collection for {start_iso} to {end_iso}: {exc}"
             ) from exc
 
-        if valid_pixels == 0:
-            skipped.append(month)
-            continue
+        metadata["scene_count"] = scene_count
+        if scene_count == 0:
+            return [], ordered, metadata
 
-        composites.append((month, reproj.clip(geometry)))
+        image_list = masked.toList(scene_count)
+        for idx in range(scene_count):
+            image = ee.Image(image_list.get(idx))
+            label = f"scene_{idx + 1:02d}"
+            reproj = image.resample("bilinear").reproject(DEFAULT_CRS, None, DEFAULT_SCALE)
+            composites.append((label, reproj.clip(geometry)))
 
-    return composites, skipped
+    return composites, skipped, metadata
 
 
 def _compute_ndvi(image: ee.Image) -> ee.Image:
@@ -309,42 +401,65 @@ def _apply_cleanup(
     geometry: ee.Geometry,
     *,
     n_classes: int,
-    smooth_kernel_px: int,
+    smooth_radius_m: float,
+    open_radius_m: float,
+    close_radius_m: float,
     min_mapping_unit_ha: float,
 ) -> ee.Image:
-    base_radius_m = max(1, int(smooth_kernel_px)) * DEFAULT_SCALE
+    smooth_radius = max(float(smooth_radius_m), 0.0)
+    open_radius = max(float(open_radius_m), 0.0)
+    close_radius = max(float(close_radius_m), 0.0)
 
-    smoothed = classified.focal_mode(radius=base_radius_m, units="meters", iterations=1)
-    opened = smoothed.focal_min(radius=base_radius_m, units="meters", iterations=1).focal_max(
-        radius=base_radius_m, units="meters", iterations=1
-    )
-    closed = opened.focal_max(radius=base_radius_m, units="meters", iterations=1).focal_min(
-        radius=base_radius_m, units="meters", iterations=1
-    )
+    smoothed = classified
+    if smooth_radius > 0:
+        smoothed = classified.focal_mode(radius=smooth_radius, units="meters", iterations=1)
+
+    opened = smoothed
+    if open_radius > 0:
+        opened = (
+            smoothed.focal_min(radius=open_radius, units="meters", iterations=1)
+            .focal_max(radius=open_radius, units="meters", iterations=1)
+        )
+
+    closed = opened
+    if close_radius > 0:
+        closed = (
+            opened.focal_max(radius=close_radius, units="meters", iterations=1)
+            .focal_min(radius=close_radius, units="meters", iterations=1)
+        )
 
     component_area = _connected_component_area(closed, n_classes)
     min_area_m2 = max(min_mapping_unit_ha, 0) * 10_000
-    majority_large = closed.focal_mode(radius=base_radius_m, units="meters", iterations=1)
+    majority_large = closed
+    if smooth_radius > 0:
+        majority_large = closed.focal_mode(radius=smooth_radius, units="meters", iterations=1)
     small_mask = component_area.lt(min_area_m2)
     cleaned = closed.where(small_mask, majority_large)
 
     mask = cleaned.mask()
-    closed_mask = mask.focal_max(radius=base_radius_m, units="meters", iterations=1).focal_min(
-        radius=base_radius_m, units="meters", iterations=1
-    )
-    filler = cleaned.focal_mode(radius=base_radius_m, units="meters", iterations=1)
+    closed_mask = mask
+    if close_radius > 0:
+        closed_mask = mask.focal_max(radius=close_radius, units="meters", iterations=1).focal_min(
+            radius=close_radius, units="meters", iterations=1
+        )
+    filler = cleaned
+    if smooth_radius > 0:
+        filler = cleaned.focal_mode(radius=smooth_radius, units="meters", iterations=1)
     cleaned = cleaned.where(mask.Not(), filler)
     cleaned = cleaned.updateMask(closed_mask)
     cleaned = cleaned.clip(geometry)
     return cleaned
 
 
-def _simplify_vectors(vectors: ee.FeatureCollection, tolerance_m: float) -> ee.FeatureCollection:
+def _simplify_vectors(
+    vectors: ee.FeatureCollection, tolerance_m: float, buffer_m: float
+) -> ee.FeatureCollection:
     def _simplify(feature: ee.Feature) -> ee.Feature:
         geom = feature.geometry()
         if tolerance_m > 0:
             geom = geom.simplify(maxError=tolerance_m)
-            geom = geom.buffer(0)
+        if buffer_m != 0:
+            geom = geom.buffer(buffer_m)
         zone_value = ee.Number(feature.get("zone")).toInt()
         area_m2 = geom.area(maxError=1)
         area_ha = area_m2.divide(10_000)
@@ -366,10 +481,11 @@ def _prepare_vectors(
     geometry: ee.Geometry,
     *,
     tolerance_m: float,
+    buffer_m: float,
 ) -> ee.FeatureCollection:
     vectors = zone_image.reduceToVectors(
         geometry=geometry,
-        scale=DEFAULT_SCALE,
+        scale=20,
         maxPixels=gee.MAX_PIXELS,
         geometryType="polygon",
         eightConnected=True,
@@ -383,7 +499,7 @@ def _prepare_vectors(
 
     vectors = vectors.map(_set_zone)
 
-    return _simplify_vectors(vectors, tolerance_m)
+    return _simplify_vectors(vectors, tolerance_m, buffer_m)
 
 
 def _collect_stats_images(
@@ -424,12 +540,15 @@ def _build_percentile_zones(
     ndvi_stats: Mapping[str, ee.Image],
     geometry: ee.Geometry,
     n_classes: int,
-    smooth_kernel_px: int,
+    smooth_radius_m: float,
+    open_radius_m: float,
+    close_radius_m: float,
     min_mapping_unit_ha: float,
 ) -> tuple[ee.Image, List[float]]:
+    percentile_source = ndvi_stats["mean"].clamp(NDVI_PERCENTILE_MIN, NDVI_PERCENTILE_MAX)
     try:
         ranked, thresholds = _classify_by_percentiles(
-            ndvi_stats["mean"].updateMask(ndvi_stats["stability"]), geometry, n_classes
+            percentile_source.updateMask(ndvi_stats["stability"]), geometry, n_classes
         )
     except ValueError as exc:
         raise ValueError(str(exc)) from exc
@@ -445,7 +564,9 @@ def _build_percentile_zones(
         ranked,
         geometry,
         n_classes=n_classes,
-        smooth_kernel_px=smooth_kernel_px,
+        smooth_radius_m=smooth_radius_m,
+        open_radius_m=open_radius_m,
+        close_radius_m=close_radius_m,
         min_mapping_unit_ha=min_mapping_unit_ha,
     )
     return cleaned.rename("zone"), percentile_thresholds
@@ -515,7 +636,9 @@ def _build_multiindex_zones(
     composites: Sequence[ee.Image],
     geometry: ee.Geometry,
     n_classes: int,
-    smooth_kernel_px: int,
+    smooth_radius_m: float,
+    open_radius_m: float,
+    close_radius_m: float,
     min_mapping_unit_ha: float,
     sample_size: int,
 ) -> tuple[ee.Image, Dict[str, ee.Image]]:
@@ -567,7 +690,9 @@ def _build_multiindex_zones(
         ranked,
         geometry,
         n_classes=n_classes,
-        smooth_kernel_px=smooth_kernel_px,
+        smooth_radius_m=smooth_radius_m,
+        open_radius_m=open_radius_m,
+        close_radius_m=close_radius_m,
         min_mapping_unit_ha=min_mapping_unit_ha,
     )
 
@@ -580,7 +705,9 @@ def _build_multiindex_zones_with_features(
     feature_images: Mapping[str, ee.Image],
     geometry: ee.Geometry,
     n_classes: int,
-    smooth_kernel_px: int,
+    smooth_radius_m: float,
+    open_radius_m: float,
+    close_radius_m: float,
     min_mapping_unit_ha: float,
     sample_size: int,
 ) -> tuple[ee.Image, Dict[str, ee.Image]]:
@@ -610,7 +737,9 @@ def _build_multiindex_zones_with_features(
         ranked,
         geometry,
         n_classes=n_classes,
-        smooth_kernel_px=smooth_kernel_px,
+        smooth_radius_m=smooth_radius_m,
+        open_radius_m=open_radius_m,
+        close_radius_m=close_radius_m,
         min_mapping_unit_ha=min_mapping_unit_ha,
     )
 
@@ -626,19 +755,22 @@ def _prepare_selected_period_artifacts(
     n_classes: int,
     cv_mask_threshold: float,
     min_mapping_unit_ha: float,
-    smooth_kernel_px: int,
+    smooth_radius_m: float,
+    open_radius_m: float,
+    close_radius_m: float,
     simplify_tol_m: float,
+    simplify_buffer_m: float,
     method: str,
     sample_size: int,
     include_stats: bool,
 ) -> tuple[ZoneArtifacts, Dict[str, object]]:
-    composites, skipped_months = _build_monthly_composites(
+    ordered_months = _ordered_months(months)
+    composites, skipped_months, composite_metadata = _build_composite_series(
         geometry, months, cloud_prob_max
     )
     if not composites:
         raise ValueError("No valid Sentinel-2 scenes were found for the selected months")
 
-    ordered_months = [month for month, _ in composites]
     ndvi_images = [_compute_ndvi(image) for _, image in composites]
     stats = _ndvi_temporal_stats(ndvi_images)
     cv_image = _ndvi_cv(stats["mean"], stats["std"])
@@ -707,7 +839,9 @@ def _prepare_selected_period_artifacts(
                 ndvi_stats=stats,
                 geometry=geometry,
                 n_classes=n_classes,
-                smooth_kernel_px=smooth_kernel_px,
+                smooth_radius_m=smooth_radius_m,
+                open_radius_m=open_radius_m,
+                close_radius_m=close_radius_m,
                 min_mapping_unit_ha=mmu_value,
             )
         except ValueError as exc:
@@ -718,7 +852,9 @@ def _prepare_selected_period_artifacts(
             composites=[image for _, image in composites],
             geometry=geometry,
             n_classes=n_classes,
-            smooth_kernel_px=smooth_kernel_px,
+            smooth_radius_m=smooth_radius_m,
+            open_radius_m=open_radius_m,
+            close_radius_m=close_radius_m,
             min_mapping_unit_ha=mmu_value,
             sample_size=sample_size,
         )
@@ -730,7 +866,12 @@ def _prepare_selected_period_artifacts(
     zone_image = zone_image.updateMask(zone_image.neq(0)).toInt16()
     zone_image = zone_image.rename("zone").reproject(DEFAULT_CRS, None, DEFAULT_SCALE)
 
-    vectors = _prepare_vectors(zone_image, geometry, tolerance_m=simplify_tol_m)
+    vectors = _prepare_vectors(
+        zone_image,
+        geometry,
+        tolerance_m=simplify_tol_m,
+        buffer_m=simplify_buffer_m,
+    )
 
     stats_collection = None
     stats_images = _collect_stats_images(stats, extra_means)
@@ -751,6 +892,8 @@ def _prepare_selected_period_artifacts(
         "skipped_months": skipped_months,
         "mmu_applied": mmu_value > 0 and mmu_applied,
     }
+
+    metadata.update(composite_metadata)
 
     if percentile_thresholds:
         metadata["percentile_thresholds"] = percentile_thresholds
@@ -794,8 +937,11 @@ def build_zone_artifacts(
     n_classes: int = DEFAULT_N_CLASSES,
     cv_mask_threshold: float = DEFAULT_CV_THRESHOLD,
     min_mapping_unit_ha: float = DEFAULT_MIN_MAPPING_UNIT_HA,
-    smooth_kernel_px: int = DEFAULT_SMOOTH_KERNEL_PX,
+    smooth_radius_m: float = DEFAULT_SMOOTH_RADIUS_M,
+    open_radius_m: float = DEFAULT_OPEN_RADIUS_M,
+    close_radius_m: float = DEFAULT_CLOSE_RADIUS_M,
     simplify_tolerance_m: float = DEFAULT_SIMPLIFY_TOL_M,
+    simplify_buffer_m: float = DEFAULT_SIMPLIFY_BUFFER_M,
     method: str = DEFAULT_METHOD,
     sample_size: int = DEFAULT_SAMPLE_SIZE,
     include_stats: bool = True,
@@ -804,8 +950,8 @@ def build_zone_artifacts(
         raise ValueError("n_classes must be between 3 and 7")
     if min_mapping_unit_ha <= 0:
         raise ValueError("min_mapping_unit_ha must be positive")
-    if smooth_kernel_px < 0:
-        raise ValueError("smooth_kernel_px must be non-negative")
+    if smooth_radius_m < 0 or open_radius_m < 0 or close_radius_m < 0:
+        raise ValueError("Smoothing radii must be non-negative")
     if not months:
         raise ValueError("At least one month must be supplied")
 
@@ -824,8 +970,11 @@ def build_zone_artifacts(
         n_classes=n_classes,
         cv_mask_threshold=cv_mask_threshold,
         min_mapping_unit_ha=min_mapping_unit_ha,
-        smooth_kernel_px=smooth_kernel_px,
+        smooth_radius_m=smooth_radius_m,
+        open_radius_m=open_radius_m,
+        close_radius_m=close_radius_m,
         simplify_tol_m=simplify_tolerance_m,
+        simplify_buffer_m=simplify_buffer_m,
         method=method_key,
         sample_size=sample_size,
         include_stats=include_stats,
@@ -963,8 +1112,11 @@ def export_selected_period_zones(
     n_classes: int = DEFAULT_N_CLASSES,
     cv_mask_threshold: float = DEFAULT_CV_THRESHOLD,
     mmu_ha: float = DEFAULT_MIN_MAPPING_UNIT_HA,
-    smooth_kernel_px: int = DEFAULT_SMOOTH_KERNEL_PX,
+    smooth_radius_m: float = DEFAULT_SMOOTH_RADIUS_M,
+    open_radius_m: float = DEFAULT_OPEN_RADIUS_M,
+    close_radius_m: float = DEFAULT_CLOSE_RADIUS_M,
     simplify_tol_m: float = DEFAULT_SIMPLIFY_TOL_M,
+    simplify_buffer_m: float = DEFAULT_SIMPLIFY_BUFFER_M,
     export_target: str = "zip",
     gcs_bucket: str | None = None,
     gcs_prefix: str | None = None,
@@ -975,8 +1127,8 @@ def export_selected_period_zones(
     ordered_months = _ordered_months(months)
     if n_classes < 3 or n_classes > 7:
         raise ValueError("n_classes must be between 3 and 7")
-    if smooth_kernel_px < 0:
-        raise ValueError("smooth_kernel_px must be non-negative")
+    if smooth_radius_m < 0 or open_radius_m < 0 or close_radius_m < 0:
+        raise ValueError("Smoothing radii must be non-negative")
     if mmu_ha < 0:
         raise ValueError("mmu_ha must be non-negative")
 
@@ -991,8 +1143,11 @@ def export_selected_period_zones(
         n_classes=n_classes,
         cv_mask_threshold=cv_mask_threshold,
         min_mapping_unit_ha=mmu_ha,
-        smooth_kernel_px=smooth_kernel_px,
+        smooth_radius_m=smooth_radius_m,
+        open_radius_m=open_radius_m,
+        close_radius_m=close_radius_m,
         simplify_tol_m=simplify_tol_m,
+        simplify_buffer_m=simplify_buffer_m,
         method=DEFAULT_METHOD,
         sample_size=DEFAULT_SAMPLE_SIZE,
         include_stats=include_zonal_stats,

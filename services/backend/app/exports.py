@@ -69,8 +69,11 @@ class ZoneExportConfig:
     n_classes: int
     cv_mask_threshold: float
     min_mapping_unit_ha: float
-    smooth_kernel_px: int
+    smooth_radius_m: float
+    open_radius_m: float
+    close_radius_m: float
     simplify_tolerance_m: float
+    simplify_buffer_m: float
     include_stats: bool = True
 
 
@@ -594,8 +597,11 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
             n_classes=job.zone_config.n_classes,
             cv_mask_threshold=job.zone_config.cv_mask_threshold,
             mmu_ha=job.zone_config.min_mapping_unit_ha,
-            smooth_kernel_px=job.zone_config.smooth_kernel_px,
+            smooth_radius_m=job.zone_config.smooth_radius_m,
+            open_radius_m=job.zone_config.open_radius_m,
+            close_radius_m=job.zone_config.close_radius_m,
             simplify_tol_m=job.zone_config.simplify_tolerance_m,
+            simplify_buffer_m=job.zone_config.simplify_buffer_m,
             export_target="zip",
             include_zonal_stats=job.zone_config.include_stats,
         )
