@@ -593,7 +593,6 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
             job.aoi_geojson,
             job.aoi_name,
             job.months,
-            geometry=job.geometry,
             cloud_prob_max=job.cloud_prob_max,
             n_classes=job.zone_config.n_classes,
             cv_mask_threshold=job.zone_config.cv_mask_threshold,
