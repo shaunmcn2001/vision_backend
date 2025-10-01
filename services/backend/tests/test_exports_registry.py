@@ -442,6 +442,8 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
     assert job.state == "completed"
     assert job.zone_state.paths["vectors"].endswith(".shp")
     assert job.zone_state.paths["zonal_stats"].endswith("_zonal_stats.csv")
+    assert job.zone_state.paths["geojson"] == "zones.geojson"
+    assert job.zone_state.paths["vectors_zip"] == "zones_shp.zip"
     vector_components = job.zone_state.paths["vector_components"]
     assert vector_components["dbf"].endswith(".dbf")
     assert vector_components["shx"].endswith(".shx")
@@ -458,6 +460,15 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
     for relative in shapefile_components:
         assert (tmp_path / relative).exists()
 
+    geojson_file = tmp_path / "zones.geojson"
+    shapefile_zip = tmp_path / "zones_shp.zip"
+    assert geojson_file.exists()
+    assert shapefile_zip.exists()
+    with zipfile.ZipFile(shapefile_zip) as shp_archive:
+        assert set(shp_archive.namelist()) == {
+            Path(component).name for component in shapefile_components
+        }
+
     assert job.zip_path is not None and job.zip_path.exists()
     assert job.zip_path.parent == output_dir
     with zipfile.ZipFile(job.zip_path) as archive:
@@ -466,10 +477,13 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
             f"{prefix}.tif",
             *shapefile_components,
             f"{prefix}_zonal_stats.csv",
+            "zones.geojson",
+            "zones_shp.zip",
         }
         for entry in expected_entries:
             assert entry in names
-            assert entry.startswith("zones/")
+            if entry not in {"zones.geojson", "zones_shp.zip"}:
+                assert entry.startswith("zones/")
         assert f"{prefix}.tif" in names
         assert f"{prefix}_zonal_stats.csv" in names
 
@@ -483,6 +497,8 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
         f"{prefix}.tif",
         *shapefile_components,
         f"{prefix}_zonal_stats.csv",
+        "zones.geojson",
+        "zones_shp.zip",
     }
     for entry in archive_metadata:
         if not isinstance(entry, dict):
@@ -619,6 +635,8 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
     assert job.zone_state.paths["raster"].endswith(".tif")
     assert job.zone_state.paths["vectors"].endswith(".shp")
     assert job.zone_state.paths["zonal_stats"].endswith("_zonal_stats.csv")
+    assert job.zone_state.paths["geojson"] == "zones.geojson"
+    assert job.zone_state.paths["vectors_zip"] == "zones_shp.zip"
 
     assert job.zip_path is not None and job.zip_path.exists()
     with zipfile.ZipFile(job.zip_path) as archive:
@@ -626,6 +644,8 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
         assert "zones/PROD_202401_202401_tiny_field_zones.tif" in names
         assert "zones/PROD_202401_202401_tiny_field_zones.shp" in names
         assert "zones/PROD_202401_202401_tiny_field_zones_zonal_stats.csv" in names
+        assert "zones.geojson" in names
+        assert "zones_shp.zip" in names
 
     archive_entries = job.zone_state.metadata.get(exports.ZONE_ARCHIVE_METADATA_KEY)
     assert archive_entries

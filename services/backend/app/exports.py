@@ -655,10 +655,34 @@ def _download_zone_artifacts(
     vector_url = artifacts.zone_vectors.getDownloadURL({"fileFormat": "SHP"})
     vector_files, vector_main = _extract_shapefile_archive(vector_url, temp_dir, prefix)
     vector_components: Dict[str, str] = {}
-    for _, arcname in vector_files:
+    shapefile_members: Dict[str, Path] = {}
+    for path, arcname in vector_files:
         suffix = Path(arcname).suffix.lower().lstrip(".")
         if suffix:
             vector_components[suffix] = arcname
+            if suffix in {"shp", "dbf", "shx", "prj"}:
+                shapefile_members[suffix] = path
+
+    geojson_name = "zones.geojson"
+    geojson_path = temp_dir / geojson_name
+    geojson_path.parent.mkdir(parents=True, exist_ok=True)
+    geojson_url = artifacts.zone_vectors.getDownloadURL({"fileFormat": "GeoJSON"})
+    geojson_payload, _ = _download_bytes(geojson_url)
+    geojson_path.write_bytes(geojson_payload)
+
+    shapefile_zip_name = "zones_shp.zip"
+    shapefile_zip_path = temp_dir / shapefile_zip_name
+    shapefile_zip_created = False
+    if {"shp", "dbf", "shx", "prj"}.issubset(shapefile_members):
+        shapefile_zip_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(
+            shapefile_zip_path, "w", compression=zipfile.ZIP_DEFLATED
+        ) as shp_archive:
+            for suffix in ("shp", "dbf", "shx", "prj"):
+                member_path = shapefile_members[suffix]
+                arcname = Path(member_path.name)
+                shp_archive.write(member_path, arcname=arcname.name)
+        shapefile_zip_created = True
 
     stats_name: Optional[str] = None
     stats_path: Optional[Path] = None
@@ -672,6 +696,9 @@ def _download_zone_artifacts(
 
     files: List[tuple[Path, str]] = [(raster_path, raster_name)]
     files.extend(vector_files)
+    files.append((geojson_path, geojson_name))
+    if shapefile_zip_created:
+        files.append((shapefile_zip_path, shapefile_zip_name))
     if stats_name and stats_path:
         files.append((stats_path, stats_name))
 
@@ -680,6 +707,8 @@ def _download_zone_artifacts(
         "vectors": vector_main,
         "vector_components": vector_components,
         "zonal_stats": stats_name,
+        "geojson": geojson_name,
+        "vectors_zip": shapefile_zip_name if shapefile_zip_created else None,
     }
     return files, paths
 
@@ -925,7 +954,14 @@ def _process_zip_exports(job: ExportJob) -> None:
                         entry["included_in_zip"] = True
 
     if job.zone_state is not None and job.zone_state.paths:
-        keep_keys = ("raster", "vectors", "zonal_stats", "vector_components")
+        keep_keys = (
+            "raster",
+            "vectors",
+            "zonal_stats",
+            "vector_components",
+            "geojson",
+            "vectors_zip",
+        )
         job.zone_state.paths = {
             key: zone_paths.get(key) for key in keep_keys if key in zone_paths
         }
