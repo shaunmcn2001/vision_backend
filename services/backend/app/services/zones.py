@@ -351,22 +351,24 @@ def _compute_bsi(image: ee.Image) -> ee.Image:
 def _ndvi_temporal_stats(images: Sequence[ee.Image]) -> Mapping[str, ee.Image]:
     collection = ee.ImageCollection([img.rename("NDVI") for img in images])
     raw_mean = collection.mean()
-    mean = raw_mean.rename("NDVI_mean")
-    median = collection.median().rename("NDVI_median")
+    raw_median = collection.median()
     raw_std = collection.reduce(ee.Reducer.stdDev())
-    std = raw_std.rename("NDVI_stdDev")
+    count = collection.reduce(ee.Reducer.count())
 
-    positive_mask = raw_mean.gt(0)
-    cv_raw = raw_std.divide(raw_mean)
+    valid_mask = count.gt(0)
+    # Avoid divide-by-zero when the seasonal mean hovers around zero.
+    safe_mean = raw_mean.where(raw_mean.abs().lt(1e-6), 1e-6)
+
+    mean = raw_mean.rename("NDVI_mean").updateMask(valid_mask)
+    median = raw_median.rename("NDVI_median").updateMask(valid_mask)
+    std = raw_std.rename("NDVI_stdDev").updateMask(valid_mask)
+
+    cv_raw = raw_std.divide(safe_mean)
     cv = (
         cv_raw.where(raw_mean.lte(0), 0)
-        .updateMask(positive_mask)
+        .updateMask(valid_mask)
         .rename("NDVI_cv")
     )
-
-    mean = mean.updateMask(positive_mask)
-    median = median.updateMask(positive_mask)
-    std = std.updateMask(positive_mask)
 
     return {"mean": mean, "median": median, "std": std, "cv": cv}
 
