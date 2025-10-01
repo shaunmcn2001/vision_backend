@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
+import calendar
 import os
 import math
 from typing import Dict, List, Mapping, Sequence, Tuple, Union
@@ -73,6 +74,33 @@ def _ordered_months(months: Sequence[str]) -> List[str]:
 
     ordered = sorted(unique.items(), key=lambda item: item[1])
     return [month for month, _ in ordered]
+
+
+def _month_range_dates(months: Sequence[str]) -> tuple[date, date]:
+    ordered = _ordered_months(months)
+    if not ordered:
+        raise ValueError("At least one month must be supplied")
+    start_dt = datetime.strptime(ordered[0], "%Y-%m")
+    end_dt = datetime.strptime(ordered[-1], "%Y-%m")
+    start_day = date(start_dt.year, start_dt.month, 1)
+    end_last_day = calendar.monthrange(end_dt.year, end_dt.month)[1]
+    end_day = date(end_dt.year, end_dt.month, end_last_day)
+    return start_day, end_day
+
+
+def _months_from_dates(start_date: date, end_date: date) -> List[str]:
+    if end_date < start_date:
+        raise ValueError("end_date must be on or after start_date")
+    months: List[str] = []
+    cursor = date(start_date.year, start_date.month, 1)
+    end_cursor = date(end_date.year, end_date.month, 1)
+    while cursor <= end_cursor:
+        months.append(cursor.strftime("%Y-%m"))
+        if cursor.month == 12:
+            cursor = cursor.replace(year=cursor.year + 1, month=1)
+        else:
+            cursor = cursor.replace(month=cursor.month + 1)
+    return months
 
 
 def _month_bounds(months: Sequence[str]) -> tuple[str, str]:
@@ -155,16 +183,21 @@ def _mask_sentinel2_scene(image: ee.Image, cloud_prob_max: int) -> ee.Image:
 
 
 def _build_composite_series(
-    geometry: ee.Geometry, months: Sequence[str], cloud_prob_max: int
+    geometry: ee.Geometry,
+    months: Sequence[str],
+    start_date: date,
+    end_date: date,
+    cloud_prob_max: int,
 ) -> Tuple[List[tuple[str, ee.Image]], List[str], Dict[str, object]]:
     composites: List[tuple[str, ee.Image]] = []
     skipped: List[str] = []
     metadata: Dict[str, object] = {}
     ordered = _ordered_months(months)
-    start_iso, _ = gee.month_date_range(ordered[0])
-    _, end_iso = gee.month_date_range(ordered[-1])
-
     month_span = len(ordered)
+
+    start_iso = start_date.isoformat()
+    end_exclusive_iso = (end_date + timedelta(days=1)).isoformat()
+
     if month_span >= 3:
         metadata["composite_mode"] = "monthly"
         for month in ordered:
@@ -214,17 +247,18 @@ def _build_composite_series(
     else:
         metadata["composite_mode"] = "scene"
         metadata["start_date"] = start_iso
-        metadata["end_date"] = end_iso
+        metadata["end_date"] = end_exclusive_iso
+        metadata["end_date_inclusive"] = end_date.isoformat()
 
         base_collection = (
             ee.ImageCollection(gee.S2_SR_COLLECTION)
             .filterBounds(geometry)
-            .filterDate(start_iso, end_iso)
+            .filterDate(start_iso, end_exclusive_iso)
         )
         probability = (
             ee.ImageCollection(gee.S2_CLOUD_PROB_COLLECTION)
             .filterBounds(geometry)
-            .filterDate(start_iso, end_iso)
+            .filterDate(start_iso, end_exclusive_iso)
         )
 
         with_prob = _attach_cloud_probability(base_collection, probability)
@@ -234,7 +268,7 @@ def _build_composite_series(
             scene_count = int(ee.Number(masked.size()).getInfo() or 0)
         except Exception as exc:  # pragma: no cover - server side failure
             raise RuntimeError(
-                f"Failed to evaluate Sentinel-2 scene collection for {start_iso} to {end_iso}: {exc}"
+                f"Failed to evaluate Sentinel-2 scene collection for {start_iso} to {end_exclusive_iso}: {exc}"
             ) from exc
 
         metadata["scene_count"] = scene_count
@@ -751,6 +785,8 @@ def _prepare_selected_period_artifacts(
     *,
     geometry: ee.Geometry,
     months: Sequence[str],
+    start_date: date,
+    end_date: date,
     cloud_prob_max: int,
     n_classes: int,
     cv_mask_threshold: float,
@@ -766,7 +802,11 @@ def _prepare_selected_period_artifacts(
 ) -> tuple[ZoneArtifacts, Dict[str, object]]:
     ordered_months = _ordered_months(months)
     composites, skipped_months, composite_metadata = _build_composite_series(
-        geometry, months, cloud_prob_max
+        geometry,
+        ordered_months,
+        start_date,
+        end_date,
+        cloud_prob_max,
     )
     if not composites:
         raise ValueError("No valid Sentinel-2 scenes were found for the selected months")
@@ -961,11 +1001,14 @@ def build_zone_artifacts(
 
     gee.initialize()
     geometry = _resolve_geometry(aoi_geojson)
+    start_date, end_date = _month_range_dates(months)
 
     artifacts, _metadata = _prepare_selected_period_artifacts(
         aoi_geojson,
         geometry=geometry,
         months=months,
+        start_date=start_date,
+        end_date=end_date,
         cloud_prob_max=cloud_prob_max,
         n_classes=n_classes,
         cv_mask_threshold=cv_mask_threshold,
@@ -1105,8 +1148,10 @@ def _task_payload(task: ee.batch.Task | None) -> Dict[str, object]:
 def export_selected_period_zones(
     aoi_geojson: Union[dict, ee.Geometry],
     aoi_name: str,
-    months: Sequence[str],
+    months: Sequence[str] | None,
     *,
+    start_date: date | None = None,
+    end_date: date | None = None,
     geometry: ee.Geometry | None = None,
     cloud_prob_max: int = DEFAULT_CLOUD_PROB_MAX,
     n_classes: int = DEFAULT_N_CLASSES,
@@ -1122,9 +1167,20 @@ def export_selected_period_zones(
     gcs_prefix: str | None = None,
     include_zonal_stats: bool = True,
 ) -> Dict[str, object]:
+    if start_date is not None and end_date is not None and end_date < start_date:
+        raise ValueError("end_date must be on or after start_date")
+
+    if months and not isinstance(months, Sequence):
+        months = list(months)
+
     if not months:
-        raise ValueError("months must contain at least one YYYY-MM value")
+        if start_date is None or end_date is None:
+            raise ValueError("Either months or start/end dates must be supplied")
+        months = _months_from_dates(start_date, end_date)
+
     ordered_months = _ordered_months(months)
+    if start_date is None or end_date is None:
+        start_date, end_date = _month_range_dates(ordered_months)
     if n_classes < 3 or n_classes > 7:
         raise ValueError("n_classes must be between 3 and 7")
     if smooth_radius_m < 0 or open_radius_m < 0 or close_radius_m < 0:
@@ -1139,6 +1195,8 @@ def export_selected_period_zones(
         aoi_geojson,
         geometry=geometry,
         months=ordered_months,
+        start_date=start_date,
+        end_date=end_date,
         cloud_prob_max=cloud_prob_max,
         n_classes=n_classes,
         cv_mask_threshold=cv_mask_threshold,
