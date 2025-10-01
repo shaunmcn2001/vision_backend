@@ -396,9 +396,10 @@ def _stability_mask(
 
     def _mask_for_threshold(value):
         t = ee.Number(value)
-        mask = cv_image.lte(t)
+        raw_mask = cv_image.lte(t)
+        masked = ee.Image(raw_mask).selfMask()
         surviving = ee.Number(
-            mask.reduceRegion(
+            masked.reduceRegion(
                 reducer=ee.Reducer.count(),
                 geometry=geometry,
                 scale=scale,
@@ -411,14 +412,19 @@ def _stability_mask(
         )
         ratio = surviving.divide(total.max(1))
         return ee.Image(
-            ee.Algorithms.If(ratio.gte(min_ratio), mask, ee.Image(0))
+            ee.Algorithms.If(
+                ratio.gte(min_ratio),
+                masked,
+                ee.Image(0).selfMask(),
+            )
         )
 
     masks = threshold_list.map(_mask_for_threshold)
     combined = ee.ImageCollection.fromImages(masks).max()
 
+    combined_masked = ee.Image(combined).selfMask()
     combined_count = ee.Number(
-        combined.reduceRegion(
+        combined_masked.reduceRegion(
             reducer=ee.Reducer.count(),
             geometry=geometry,
             scale=scale,
@@ -432,7 +438,7 @@ def _stability_mask(
 
     pass_through = ee.Image(1)
     return ee.Image(
-        ee.Algorithms.If(combined_count.lte(0), pass_through, combined)
+        ee.Algorithms.If(combined_count.lte(0), pass_through, combined_masked)
     ).selfMask()
 
 
