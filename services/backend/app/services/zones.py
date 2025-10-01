@@ -34,6 +34,24 @@ DEFAULT_EXPORT_CRS = "EPSG:3857"
 DEFAULT_CRS = DEFAULT_EXPORT_CRS
 
 
+def _to_ee_geometry(geojson: dict) -> ee.Geometry:
+    """
+    Accepts GeoJSON Geometry, Feature, or FeatureCollection and returns ee.Geometry.
+    Raises ValueError on invalid input.
+    """
+    try:
+        t = (geojson or {}).get("type", "")
+        if t == "Feature":
+            return ee.Feature(geojson).geometry()
+        if t == "FeatureCollection":
+            fc = ee.FeatureCollection(geojson)
+            # union all geometries to one AOI (or use .geometry() for bbox)
+            return fc.geometry()
+        # assume raw Geometry
+        return ee.Geometry(geojson)
+    except Exception as e:
+        raise ValueError(f"Invalid AOI GeoJSON: {e}")
+
 def _parse_bool_env(value: str | None, default: bool) -> bool:
     if value is None:
         return default
@@ -530,22 +548,55 @@ def _percentile_thresholds(reducer_dict: Dict[str, float], n_classes: int, label
     
 def _classify_by_percentiles(
     image: ee.Image, geometry: ee.Geometry, n_classes: int
-) -> tuple[ee.Image, ee.List]:
+) -> tuple[ee.Image, List[float]]:
+    """
+    Classify an NDVI image into percentile-based zones.
+
+    Steps:
+    - ReduceRegion computes percentile thresholds (n_classes - 1 cuts).
+    - _percentile_thresholds interprets both bare 'cut_XX' and band-prefixed keys.
+    - Classify pixels by counting how many thresholds their value exceeds.
+    """
+
+    # Ensure image has a known band name
     band_name = ee.String(image.bandNames().get(0))
     image = image.rename(band_name)
-    thresholds = _percentile_thresholds(image, geometry, n_classes)
+
+    # Percentile cuts to request
+    step = 100 / n_classes
+    pct_breaks = ee.List.sequence(step, 100 - step, step)
+
+    # Compute percentiles for this band
+    reducer_dict = image.reduceRegion(
+        reducer=ee.Reducer.percentile(pct_breaks),
+        geometry=geometry,
+        scale=DEFAULT_SCALE,
+        bestEffort=True,
+        tileScale=4,
+        maxPixels=gee.MAX_PIXELS,
+    )
+
+    # Convert reducer result into Python dict (safe)
+    reducer_info = reducer_dict.getInfo() or {}
+
+    # Extract thresholds with robust handling of bare/prefixed keys
+    thresholds: List[float] = _percentile_thresholds(
+        reducer_info, n_classes, band_name.getInfo()
+    )
+
+    # Now classify pixels relative to thresholds
     zero = image.multiply(0)
 
-    def _accumulate(current: ee.Image, threshold: ee.Number) -> ee.Image:
-        current_image = ee.Image(current)
-        threshold_value = ee.Number(threshold)
-        gt_band = image.gt(threshold_value)
-        return current_image.add(gt_band)
+    def _accumulate(current, threshold):
+        current_img = ee.Image(current)
+        t = ee.Number(threshold)
+        gt_band = image.gt(t)
+        return current_img.add(gt_band)
 
-    summed = ee.Image(thresholds.iterate(_accumulate, zero))
-    classified = summed.add(1).toInt()
+    summed = ee.Image(thresholds).iterate(_accumulate, zero)
+    classified = ee.Image(summed).add(1).toInt()
+
     return classified.rename("zone"), thresholds
-
 
 def _connected_component_area(classified: ee.Image, n_classes: int) -> ee.Image:
     pixel_area = ee.Image.pixelArea()
@@ -1342,28 +1393,29 @@ def _task_payload(task: ee.batch.Task | None) -> Dict[str, object]:
 
 
 def export_selected_period_zones(
-    aoi_geojson: Union[dict, ee.Geometry],
+    aoi_geojson: dict,
     aoi_name: str,
-    months: Sequence[str] | None,
+    months: list[str],
     *,
-    start_date: date | None = None,
-    end_date: date | None = None,
-    geometry: ee.Geometry | None = None,
-    cloud_prob_max: int = DEFAULT_CLOUD_PROB_MAX,
-    n_classes: int = DEFAULT_N_CLASSES,
-    cv_mask_threshold: float = DEFAULT_CV_THRESHOLD,
-    mmu_ha: float = DEFAULT_MIN_MAPPING_UNIT_HA,
-    smooth_radius_m: float = DEFAULT_SMOOTH_RADIUS_M,
-    open_radius_m: float = DEFAULT_OPEN_RADIUS_M,
-    close_radius_m: float = DEFAULT_CLOSE_RADIUS_M,
-    simplify_tol_m: float = DEFAULT_SIMPLIFY_TOL_M,
-    simplify_buffer_m: float = DEFAULT_SIMPLIFY_BUFFER_M,
-    export_target: str = "zip",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    cloud_prob_max: int = 40,
+    n_classes: int = 5,
+    cv_mask_threshold: float | None = None,
+    mmu_ha: float = 2.0,
+    smooth_radius_m: int = 30,
+    open_radius_m: int = 10,
+    close_radius_m: int = 10,
+    simplify_tol_m: int = 5,
+    simplify_buffer_m: int = 3,
+    export_target: str = "local",
     gcs_bucket: str | None = None,
     gcs_prefix: str | None = None,
     include_zonal_stats: bool = True,
-    apply_stability_mask: bool | None = None,
-) -> Dict[str, object]:
+    apply_stability_mask: bool = True,
+):
+    # ✅ Normalize AOI FIRST so all downstream EE ops see an ee.Geometry, not a dict
+    aoi = _to_ee_geometry(aoi_geojson)
     if start_date is not None and end_date is not None and end_date < start_date:
         raise ValueError("end_date must be on or after start_date")
 
