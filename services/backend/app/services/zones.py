@@ -1397,6 +1397,7 @@ def export_selected_period_zones(
     aoi_name: str,
     months: list[str],
     *,
+    geometry: ee.Geometry | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     cloud_prob_max: int = 40,
@@ -1416,6 +1417,7 @@ def export_selected_period_zones(
 ):
     # ✅ Normalize AOI FIRST so all downstream EE ops see an ee.Geometry, not a dict
     aoi = _to_ee_geometry(aoi_geojson)
+    geometry = geometry or aoi
     if start_date is not None and end_date is not None and end_date < start_date:
         raise ValueError("end_date must be on or after start_date")
 

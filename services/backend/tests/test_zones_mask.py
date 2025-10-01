@@ -241,6 +241,7 @@ def test_stability_mask_fallback_prevents_empty_error(monkeypatch):
         List=lambda values: _FakeList(values),
         Image=_make_image,
         ImageCollection=SimpleNamespace(fromImages=lambda images: _FakeImageCollection(images)),
+        Geometry=lambda geojson: geojson,
         Reducer=SimpleNamespace(count=lambda: object()),
         Algorithms=SimpleNamespace(
             If=lambda condition, truthy, falsey: truthy if bool(condition) else falsey
