@@ -46,7 +46,7 @@ def _parse_bool_env(value: str | None, default: bool) -> bool:
     return default
 
 
-APPLY_STABILITY = _parse_bool_env(os.getenv("APPLY_STABILITY"), True)
+APPLY_STABILITY =false
 
 
 def set_apply_stability(enabled: bool | None) -> None:
