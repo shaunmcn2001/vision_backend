@@ -788,6 +788,20 @@ def test_apply_cleanup_uses_meter_operations(monkeypatch):
     assert fake_image.mask_obj.calls[0][1][1] == "meters"
     assert fake_area.lt_calls[0][0] == pytest.approx(10_000.0)
 
+def test_percentile_thresholds_accepts_band_prefixed_keys():
+    # 5 classes -> need 4 thresholds (01..04)
+    reducer_dict = {
+        "ndvi_mean_cut_01": 0.12,
+        "ndvi_mean_cut_02": 0.21,
+        "ndvi_mean_cut_03": 0.33,
+        "ndvi_mean_cut_04": 0.47,
+        # noise keys should be ignored:
+        "foo": 1.0,
+        "some_other_key": 2.0,
+    }
+    from app.services.zones import _percentile_thresholds
+    th = _percentile_thresholds(reducer_dict, n_classes=5)
+    assert th == [0.12, 0.21, 0.33, 0.47]
 
 def test_simplify_vectors_sets_area_and_buffer(monkeypatch):
     class _FakeNumber:
