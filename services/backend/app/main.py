@@ -567,34 +567,34 @@ def export_ui():
              <label for="zonesToggle">Enable productivity zones for the selected period</label>
            </div>
            <div class="help-text">Compute stable NDVI-based production zones and export a raster, shapefile, and optional zonal statistics table.</div>
-           <div id="zonesOptions" class="nested-panel hidden" aria-hidden="true">
-             <div class="grid">
-               <div class="subfield">
-                 <label class="label" for="zonesClasses">Number of classes</label>
-                 <select class="select-field" id="zonesClasses">
-                   <option value="3" selected>3 classes</option>
-                   <option value="5">5 classes</option>
-                 </select>
-               </div>
-               <div class="subfield">
-                 <label class="label" for="zonesCv">Stability (CV) threshold</label>
-                 <input type="number" class="input-field" id="zonesCv" step="0.01" min="0" value="0.25" />
-               </div>
-               <div class="subfield">
-                 <label class="label" for="zonesMmu">Minimum mapping unit (ha)</label>
-                 <input type="number" class="input-field" id="zonesMmu" step="0.01" min="0" value="0.08" />
-               </div>
-               <div class="subfield">
+          <div id="zonesOptions" class="nested-panel hidden" aria-hidden="true">
+            <div class="grid">
+              <div class="subfield">
+                <label class="label" for="zonesClasses">Number of classes</label>
+                <select class="select-field" id="zonesClasses">
+                  <option value="3">3 classes</option>
+                  <option value="5" selected>5 classes</option>
+                </select>
+              </div>
+              <div class="subfield">
+                <label class="label" for="zonesCv">Stability (CV) threshold</label>
+                <input type="number" class="input-field" id="zonesCv" step="0.01" min="0" value="0.5" />
+              </div>
+              <div class="subfield">
+                <label class="label" for="zonesMmu">Minimum mapping unit (ha)</label>
+                <input type="number" class="input-field" id="zonesMmu" step="0.01" min="0" value="1.5" />
+              </div>
+              <div class="subfield">
                 <label class="label" for="zonesSmooth">Smooth radius (m)</label>
-                <input type="number" class="input-field" id="zonesSmooth" step="1" min="0" value="15" />
-               </div>
-               <div class="subfield">
-                 <label class="label" for="zonesSimplify">Simplify tolerance (m)</label>
-                 <input type="number" class="input-field" id="zonesSimplify" step="1" min="0" value="5" />
-               </div>
-             </div>
-           </div>
-         </div>
+                <input type="number" class="input-field" id="zonesSmooth" step="1" min="0" value="30" />
+              </div>
+              <div class="subfield">
+                <label class="label" for="zonesSimplify">Simplify tolerance (m)</label>
+                <input type="number" class="input-field" id="zonesSimplify" step="1" min="0" value="3" />
+              </div>
+            </div>
+          </div>
+        </div>
 
          <div class="form-group">
            <label class="label" for="apiKey">API key (optional)</label>
@@ -654,7 +654,7 @@ def export_ui():
       const zonesSimplifyInput = document.getElementById('zonesSimplify');
       const ZONE_OPEN_RADIUS_M = 10;
       const ZONE_CLOSE_RADIUS_M = 10;
-      const ZONE_SIMPLIFY_BUFFER_M = 0;
+      const ZONE_SIMPLIFY_BUFFER_M = 3;
        const zonesPanel = document.getElementById('zonesPanel');
        const zonesInfo = document.getElementById('zonesInfo');
        const zoneArtifactElements = {
