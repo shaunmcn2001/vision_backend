@@ -30,6 +30,7 @@ DEFAULT_SCALE = 10
 # IMPORTANT: processing uses the native S2 projection (meters).
 # Exports use a metric CRS so scale=10 means 10 meters.
 DEFAULT_EXPORT_CRS = "EPSG:3857"
+DEFAULT_CRS = DEFAULT_EXPORT_CRS
 
 
 def _parse_bool_env(value: str | None, default: bool) -> bool:
