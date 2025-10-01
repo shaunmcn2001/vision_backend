@@ -491,40 +491,41 @@ def _pixel_count(
     return int(max(numeric, 0))
 
 
-def _percentile_thresholds(reducer_dict: Dict[str, float], n_classes: int) -> List[float]:
+def _percentile_thresholds(reducer_dict: Dict[str, float], n_classes: int, label: str) -> List[float]:
     """
     Build the list of percentile thresholds for NDVI zoning.
 
     Accepts reducer outputs where percentile keys are either:
       - 'cut_01', 'cut_02', ... (bare keys)
-      - '<band>_cut_01', '<band>_cut_02', ... (EE band-prefixed keys, e.g. 'ndvi_mean_cut_01')
+      - '<label>_cut_01', '<label>_cut_02', ... (band-prefixed keys from EE)
 
-    We detect any key that ends with 'cut_XX' and sort by XX.
-    Raises ValueError if any required percentile is missing.
+    Args:
+        reducer_dict: dictionary returned by EE reduceRegion with percentiles
+        n_classes: number of classes (needs n_classes - 1 thresholds)
+        label: band name prefix (e.g. 'ndvi_mean')
+
+    Returns:
+        A list of thresholds in ascending order
     """
     if n_classes < 2:
         raise ValueError("n_classes must be >= 2")
 
-    # we expect (n_classes - 1) percentile cuts, e.g. 5 classes -> 4 thresholds
     expected_idx = [f"{i:02d}" for i in range(1, n_classes)]
-    # match both 'cut_01' and 'anything_cut_01'
-    pat = re.compile(r"(?:.*_)?cut_(\d{2})$")
 
     found: Dict[str, float] = {}
-    for k, v in reducer_dict.items():
-        m = pat.search(k)
-        if m:
-            idx = m.group(1)
-            # only keep the first seen for a given index (or last—both fine)
-            if idx not in found:
-                found[idx] = float(v)
+    for idx in expected_idx:
+        bare_key = f"cut_{idx}"
+        prefixed_key = f"{label}_cut_{idx}"
+
+        if bare_key in reducer_dict:
+            found[idx] = float(reducer_dict[bare_key])
+        elif prefixed_key in reducer_dict:
+            found[idx] = float(reducer_dict[prefixed_key])
 
     missing = [ix for ix in expected_idx if ix not in found]
     if missing:
-        # keep the original semantics: signal "empty/masked" condition to caller
         raise ValueError(f"Missing percentile keys for indices: {', '.join(missing)}")
 
-    # Return thresholds ordered by the percentile index (01, 02, ...)
     return [found[ix] for ix in expected_idx]
     
 def _classify_by_percentiles(
