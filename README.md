@@ -102,6 +102,11 @@ curl -X POST http://localhost:8000/api/zones/production \
         "n_classes": 5,
         "cv_mask_threshold": 0.25,
         "mmu_ha": 3,
+        "smooth_radius_m": 15,
+        "open_radius_m": 10,
+        "close_radius_m": 10,
+        "simplify_tol_m": 5,
+        "simplify_buffer_m": 0,
         "export_target": "zip"
       }'
 ```
@@ -116,8 +121,11 @@ curl -X POST http://localhost:8000/api/zones/production \
         "aoi_name": "Lot1_RP12345",
         "start_month": "2024-01",
         "end_month": "2024-04",
-        "smooth_kernel_px": 1,
+        "smooth_radius_m": 15,
+        "open_radius_m": 10,
+        "close_radius_m": 10,
         "simplify_tol_m": 5,
+        "simplify_buffer_m": 0,
         "export_target": "gcs",
         "gcs_bucket": "zones-bucket",
         "gcs_prefix": "clients/demo"

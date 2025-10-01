@@ -52,8 +52,11 @@ class ProductionZonesRequest(_BaseAOIRequest):
     n_classes: int = Field(zone_service.DEFAULT_N_CLASSES, ge=3, le=7)
     cv_mask_threshold: float = Field(zone_service.DEFAULT_CV_THRESHOLD, ge=0)
     mmu_ha: float = Field(zone_service.DEFAULT_MIN_MAPPING_UNIT_HA, gt=0)
-    smooth_kernel_px: int = Field(zone_service.DEFAULT_SMOOTH_KERNEL_PX, ge=0)
+    smooth_radius_m: float = Field(zone_service.DEFAULT_SMOOTH_RADIUS_M, ge=0)
+    open_radius_m: float = Field(zone_service.DEFAULT_OPEN_RADIUS_M, ge=0)
+    close_radius_m: float = Field(zone_service.DEFAULT_CLOSE_RADIUS_M, ge=0)
     simplify_tol_m: float = Field(zone_service.DEFAULT_SIMPLIFY_TOL_M, ge=0)
+    simplify_buffer_m: float = Field(zone_service.DEFAULT_SIMPLIFY_BUFFER_M)
     export_target: Literal["zip", "gcs", "drive"] = Field(
         "zip", description="Destination for exports"
     )
@@ -144,8 +147,11 @@ def create_production_zones(request: ProductionZonesRequest):
             n_classes=request.n_classes,
             cv_mask_threshold=request.cv_mask_threshold,
             mmu_ha=request.mmu_ha,
-            smooth_kernel_px=request.smooth_kernel_px,
+            smooth_radius_m=request.smooth_radius_m,
+            open_radius_m=request.open_radius_m,
+            close_radius_m=request.close_radius_m,
             simplify_tol_m=request.simplify_tol_m,
+            simplify_buffer_m=request.simplify_buffer_m,
             export_target=request.export_target,
             gcs_bucket=resolved_bucket,
             gcs_prefix=request.gcs_prefix,
