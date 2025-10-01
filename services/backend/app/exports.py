@@ -75,7 +75,7 @@ class ZoneExportConfig:
     simplify_tolerance_m: float
     simplify_buffer_m: float
     include_stats: bool = True
-    apply_stability_mask: bool = True
+    apply_stability_mask: Optional[bool] = None
 
 
 @dataclass
