@@ -138,6 +138,7 @@ def _run_prepare_with_counts(
         cloud_prob_max=20,
         n_classes=5,
         cv_mask_threshold=cv_threshold,
+        apply_stability_mask=True,
         min_mapping_unit_ha=0.5,
         smooth_radius_m=15,
         open_radius_m=10,
