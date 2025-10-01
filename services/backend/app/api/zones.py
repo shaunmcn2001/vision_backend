@@ -72,11 +72,12 @@ class ProductionZonesRequest(_BaseAOIRequest):
         None, description="Optional prefix before zones/ when exporting to GCS"
     )
     include_zonal_stats: bool = Field(True, description="Export per-zone statistics CSV")
-    apply_stability_mask: bool = Field(
-        True,
+    apply_stability_mask: Optional[bool] = Field(
+        None,
         description=(
             "When false, skip the stability mask used to drop high-variance pixels before "
-            "classifying zones."
+            "classifying zones.  When not provided, the service honours the APPLY_STABILITY "
+            "environment variable."
         ),
     )
 
