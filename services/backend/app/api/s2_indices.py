@@ -90,6 +90,12 @@ class ProductionZoneOptions(BaseModel):
     )
     n_classes: int = Field(zone_service.DEFAULT_N_CLASSES, ge=3, le=7)
     cv_mask_threshold: float = Field(zone_service.DEFAULT_CV_THRESHOLD, ge=0)
+    apply_stability_mask: bool = Field(
+        True,
+        description=(
+            "Disable to skip the coefficient-of-variation stability mask when building zones"
+        ),
+    )
     mmu_ha: float = Field(zone_service.DEFAULT_MIN_MAPPING_UNIT_HA, gt=0)
     smooth_radius_m: float = Field(zone_service.DEFAULT_SMOOTH_RADIUS_M, ge=0)
     open_radius_m: float = Field(zone_service.DEFAULT_OPEN_RADIUS_M, ge=0)
@@ -195,6 +201,7 @@ def start_export(request: Sentinel2ExportRequest):
             zone_config = exports.ZoneExportConfig(
                 n_classes=request.production_zones.n_classes,
                 cv_mask_threshold=request.production_zones.cv_mask_threshold,
+                apply_stability_mask=request.production_zones.apply_stability_mask,
                 min_mapping_unit_ha=request.production_zones.mmu_ha,
                 smooth_radius_m=request.production_zones.smooth_radius_m,
                 open_radius_m=request.production_zones.open_radius_m,
