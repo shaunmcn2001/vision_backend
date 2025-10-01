@@ -30,6 +30,7 @@ DEFAULT_SCALE = 10
 # IMPORTANT: processing uses the native S2 projection (meters).
 # Exports use a metric CRS so scale=10 means 10 meters.
 DEFAULT_EXPORT_CRS = "EPSG:3857"
+DEFAULT_CRS = DEFAULT_EXPORT_CRS
 
 
 def _parse_bool_env(value: str | None, default: bool) -> bool:
@@ -908,6 +909,7 @@ def _prepare_selected_period_artifacts(
     cloud_prob_max: int,
     n_classes: int,
     cv_mask_threshold: float,
+    apply_stability_mask: bool | None,
     min_mapping_unit_ha: float,
     smooth_radius_m: float,
     open_radius_m: float,
@@ -919,6 +921,7 @@ def _prepare_selected_period_artifacts(
     include_stats: bool,
 ) -> tuple[ZoneArtifacts, Dict[str, object]]:
     ordered_months = _ordered_months(months)
+    stability_enabled = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
     composites, skipped_months, composite_metadata = _build_composite_series(
         geometry,
         ordered_months,
@@ -994,13 +997,13 @@ def _prepare_selected_period_artifacts(
         DEFAULT_SCALE,
     )
 
-    if APPLY_STABILITY:
+    if stability_enabled:
         tmp_mask = guarded_mask
     else:
         tmp_mask = ee.Image(1)
 
     mask_count_image = (
-        tmp_mask if APPLY_STABILITY else tmp_mask.updateMask(cv_image.mask())
+        tmp_mask if stability_enabled else tmp_mask.updateMask(cv_image.mask())
     )
     mask_pixel_count = _pixel_count(
         mask_count_image,
@@ -1010,7 +1013,7 @@ def _prepare_selected_period_artifacts(
     )
     print("Stability mask pixel count:", mask_pixel_count)
 
-    if APPLY_STABILITY:
+    if stability_enabled:
         stability = guarded_mask
     else:
         stability = tmp_mask
@@ -1117,7 +1120,7 @@ def _prepare_selected_period_artifacts(
         "target_ratio": MIN_STABILITY_SURVIVAL_RATIO,
         "mean_pixel_count": mean_pixel_count,
         "mask_pixel_count": mask_pixel_count,
-        "apply_stability": APPLY_STABILITY,
+        "apply_stability": stability_enabled,
     }
 
     metadata["stability"] = stability_metadata
@@ -1136,7 +1139,7 @@ def _prepare_selected_period_artifacts(
         "low_confidence": low_confidence,
         "mean_pixel_count": mean_pixel_count,
         "mask_pixel_count": mask_pixel_count,
-        "apply_stability": APPLY_STABILITY,
+        "apply_stability": stability_enabled,
     }
 
     return artifacts, metadata
@@ -1149,6 +1152,7 @@ def build_zone_artifacts(
     cloud_prob_max: int = DEFAULT_CLOUD_PROB_MAX,
     n_classes: int = DEFAULT_N_CLASSES,
     cv_mask_threshold: float = DEFAULT_CV_THRESHOLD,
+    apply_stability_mask: bool | None = None,
     min_mapping_unit_ha: float = DEFAULT_MIN_MAPPING_UNIT_HA,
     smooth_radius_m: float = DEFAULT_SMOOTH_RADIUS_M,
     open_radius_m: float = DEFAULT_OPEN_RADIUS_M,
@@ -1185,6 +1189,7 @@ def build_zone_artifacts(
         cloud_prob_max=cloud_prob_max,
         n_classes=n_classes,
         cv_mask_threshold=cv_mask_threshold,
+        apply_stability_mask=apply_stability_mask,
         min_mapping_unit_ha=min_mapping_unit_ha,
         smooth_radius_m=smooth_radius_m,
         open_radius_m=open_radius_m,
@@ -1339,6 +1344,7 @@ def export_selected_period_zones(
     gcs_bucket: str | None = None,
     gcs_prefix: str | None = None,
     include_zonal_stats: bool = True,
+    apply_stability_mask: bool | None = None,
 ) -> Dict[str, object]:
     if start_date is not None and end_date is not None and end_date < start_date:
         raise ValueError("end_date must be on or after start_date")
@@ -1373,6 +1379,7 @@ def export_selected_period_zones(
         cloud_prob_max=cloud_prob_max,
         n_classes=n_classes,
         cv_mask_threshold=cv_mask_threshold,
+        apply_stability_mask=apply_stability_mask,
         min_mapping_unit_ha=mmu_ha,
         smooth_radius_m=smooth_radius_m,
         open_radius_m=open_radius_m,

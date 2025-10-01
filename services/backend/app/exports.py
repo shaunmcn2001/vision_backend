@@ -75,6 +75,7 @@ class ZoneExportConfig:
     simplify_tolerance_m: float
     simplify_buffer_m: float
     include_stats: bool = True
+    apply_stability_mask: bool = True
 
 
 @dataclass
@@ -596,6 +597,7 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
             cloud_prob_max=job.cloud_prob_max,
             n_classes=job.zone_config.n_classes,
             cv_mask_threshold=job.zone_config.cv_mask_threshold,
+            apply_stability_mask=job.zone_config.apply_stability_mask,
             mmu_ha=job.zone_config.min_mapping_unit_ha,
             smooth_radius_m=job.zone_config.smooth_radius_m,
             open_radius_m=job.zone_config.open_radius_m,

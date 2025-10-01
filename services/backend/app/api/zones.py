@@ -72,6 +72,13 @@ class ProductionZonesRequest(_BaseAOIRequest):
         None, description="Optional prefix before zones/ when exporting to GCS"
     )
     include_zonal_stats: bool = Field(True, description="Export per-zone statistics CSV")
+    apply_stability_mask: bool = Field(
+        True,
+        description=(
+            "When false, skip the stability mask used to drop high-variance pixels before "
+            "classifying zones."
+        ),
+    )
 
     @root_validator(pre=True)
     def _coerce_months(cls, values: dict) -> dict:
@@ -237,6 +244,7 @@ def create_production_zones(request: ProductionZonesRequest):
             gcs_bucket=resolved_bucket,
             gcs_prefix=request.gcs_prefix,
             include_zonal_stats=request.include_zonal_stats,
+            apply_stability_mask=request.apply_stability_mask,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
