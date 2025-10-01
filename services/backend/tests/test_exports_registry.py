@@ -580,6 +580,8 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
         aoi_name,
         months,
         *,
+        start_date=None,
+        end_date=None,
         geometry=None,
         **kwargs,
     ):
