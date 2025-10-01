@@ -29,6 +29,35 @@ DEFAULT_SAMPLE_SIZE = 8000
 DEFAULT_SCALE = 10
 DEFAULT_CRS = "EPSG:4326"
 
+
+def _parse_bool_env(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    trimmed = value.strip().lower()
+    if trimmed in {"", "none"}:
+        return default
+    if trimmed in {"0", "false", "no", "off"}:
+        return False
+    if trimmed in {"1", "true", "yes", "on"}:
+        return True
+    return default
+
+
+APPLY_STABILITY = _parse_bool_env(os.getenv("APPLY_STABILITY"), True)
+
+
+def set_apply_stability(enabled: bool | None) -> None:
+    """Temporarily override the APPLY_STABILITY flag.
+
+    Passing ``None`` re-evaluates the environment variable.
+    """
+
+    global APPLY_STABILITY
+    if enabled is None:
+        APPLY_STABILITY = _parse_bool_env(os.getenv("APPLY_STABILITY"), True)
+    else:
+        APPLY_STABILITY = bool(enabled)
+
 ZONE_PALETTE: tuple[str, ...] = (
     "#112f1d",
     "#1b4d2a",
@@ -311,30 +340,104 @@ def _compute_bsi(image: ee.Image) -> ee.Image:
 
 def _ndvi_temporal_stats(images: Sequence[ee.Image]) -> Mapping[str, ee.Image]:
     collection = ee.ImageCollection([img.rename("NDVI") for img in images])
-    mean = collection.mean().rename("NDVI_mean")
+    raw_mean = collection.mean()
+    mean = raw_mean.rename("NDVI_mean")
     median = collection.median().rename("NDVI_median")
-    std = collection.reduce(ee.Reducer.stdDev()).rename("NDVI_stdDev")
-    return {"mean": mean, "median": median, "std": std}
+    raw_std = collection.reduce(ee.Reducer.stdDev())
+    std = raw_std.rename("NDVI_stdDev")
+
+    positive_mask = raw_mean.gt(0)
+    cv_raw = raw_std.divide(raw_mean)
+    cv = (
+        cv_raw.where(raw_mean.lte(0), 0)
+        .updateMask(positive_mask)
+        .rename("NDVI_cv")
+    )
+
+    mean = mean.updateMask(positive_mask)
+    median = median.updateMask(positive_mask)
+    std = std.updateMask(positive_mask)
+
+    return {"mean": mean, "median": median, "std": std, "cv": cv}
 
 
-def _ndvi_cv(mean_image: ee.Image, std_image: ee.Image) -> ee.Image:
-    mean_abs = mean_image.abs()
-    safe_mean = mean_abs.where(mean_abs.gte(1e-6), ee.Image.constant(1))
-    cv = std_image.divide(safe_mean)
-    cv = cv.where(mean_abs.lt(1e-6), 1)
-    return cv.rename("NDVI_cv")
+def _stability_mask(
+    cv_image: ee.Image,
+    geometry: ee.Geometry,
+    thresholds: Sequence[float],
+    min_survival_ratio: float,
+    scale: int,
+) -> ee.Image:
+    total = ee.Number(
+        cv_image.reduceRegion(
+            reducer=ee.Reducer.count(),
+            geometry=geometry,
+            scale=scale,
+            bestEffort=True,
+            tileScale=4,
+            maxPixels=gee.MAX_PIXELS,
+        )
+        .values()
+        .get(0)
+    )
+
+    threshold_list = ee.List([float(t) for t in thresholds])
+    min_ratio = ee.Number(min_survival_ratio)
+
+    def _mask_for_threshold(value):
+        t = ee.Number(value)
+        mask = cv_image.lte(t)
+        surviving = ee.Number(
+            mask.reduceRegion(
+                reducer=ee.Reducer.count(),
+                geometry=geometry,
+                scale=scale,
+                bestEffort=True,
+                tileScale=4,
+                maxPixels=gee.MAX_PIXELS,
+            )
+            .values()
+            .get(0)
+        )
+        ratio = surviving.divide(total.max(1))
+        return ee.Image(
+            ee.Algorithms.If(ratio.gte(min_ratio), mask, ee.Image(0))
+        )
+
+    masks = threshold_list.map(_mask_for_threshold)
+    combined = ee.ImageCollection.fromImages(masks).max()
+
+    combined_count = ee.Number(
+        combined.reduceRegion(
+            reducer=ee.Reducer.count(),
+            geometry=geometry,
+            scale=scale,
+            bestEffort=True,
+            tileScale=4,
+            maxPixels=gee.MAX_PIXELS,
+        )
+        .values()
+        .get(0)
+    )
+
+    pass_through = ee.Image(1)
+    return ee.Image(
+        ee.Algorithms.If(combined_count.lte(0), pass_through, combined)
+    ).selfMask()
 
 
-def _stability_mask(cv_image: ee.Image, threshold: float) -> ee.Image:
-    return cv_image.lte(threshold)
-
-
-def _pixel_count(image: ee.Image, geometry: ee.Geometry, *, context: str) -> int:
+def _pixel_count(
+    image: ee.Image,
+    geometry: ee.Geometry,
+    *,
+    context: str,
+    scale: int = DEFAULT_SCALE,
+) -> int:
     try:
         reduced = image.reduceRegion(
             reducer=ee.Reducer.count(),
             geometry=geometry,
-            scale=DEFAULT_SCALE,
+            scale=scale,
             bestEffort=True,
             tileScale=4,
             maxPixels=gee.MAX_PIXELS,
@@ -813,7 +916,15 @@ def _prepare_selected_period_artifacts(
 
     ndvi_images = [_compute_ndvi(image) for _, image in composites]
     stats = _ndvi_temporal_stats(ndvi_images)
-    cv_image = _ndvi_cv(stats["mean"], stats["std"])
+    cv_image = stats["cv"]
+
+    mean_pixel_count = _pixel_count(
+        stats["mean"],
+        geometry,
+        context="NDVI mean pixel count",
+        scale=DEFAULT_SCALE,
+    )
+    print("NDVI mean pixel count:", mean_pixel_count)
 
     initial_threshold = float(cv_mask_threshold)
     thresholds_to_try: List[float] = [initial_threshold]
@@ -822,40 +933,79 @@ def _prepare_selected_period_artifacts(
             thresholds_to_try.append(fallback)
 
     total_pixels = _pixel_count(
-        cv_image, geometry, context="stability baseline pixel count"
+        cv_image,
+        geometry,
+        context="stability baseline pixel count",
+        scale=DEFAULT_SCALE,
     )
-    if total_pixels <= 0:
-        raise ValueError(STABILITY_MASK_EMPTY_ERROR)
 
-    stability = None
+    stability: ee.Image | None = None
     final_threshold = initial_threshold
     survival_ratio = 0.0
     surviving_pixels = 0
     thresholds_tested: List[float] = []
     ratio_history: List[float] = []
 
-    for idx, threshold in enumerate(thresholds_to_try):
-        thresholds_tested.append(float(threshold))
-        candidate = _stability_mask(cv_image, threshold)
-        surviving_pixels = _pixel_count(
-            candidate.updateMask(candidate),
-            geometry,
-            context="stability surviving pixel count",
-        )
-        ratio = (surviving_pixels / total_pixels) if total_pixels else 0.0
-        ratio_history.append(ratio)
-        stability = candidate
-        final_threshold = float(threshold)
-        survival_ratio = ratio
-        if ratio >= MIN_STABILITY_SURVIVAL_RATIO or idx == len(thresholds_to_try) - 1:
-            break
+    if total_pixels > 0:
+        for idx, threshold in enumerate(thresholds_to_try):
+            thresholds_tested.append(float(threshold))
+            candidate = cv_image.lte(threshold).selfMask()
+            surviving_pixels = _pixel_count(
+                candidate,
+                geometry,
+                context="stability surviving pixel count",
+                scale=DEFAULT_SCALE,
+            )
+            ratio = (surviving_pixels / total_pixels) if total_pixels else 0.0
+            ratio_history.append(ratio)
+            stability = candidate
+            final_threshold = float(threshold)
+            survival_ratio = ratio
+            if ratio >= MIN_STABILITY_SURVIVAL_RATIO or idx == len(thresholds_to_try) - 1:
+                break
+    else:
+        thresholds_tested.append(float(initial_threshold))
+        ratio_history.append(0.0)
+        stability = ee.Image(1)
+        surviving_pixels = 0
+        survival_ratio = 0.0
 
-    if stability is None:
-        raise ValueError(STABILITY_MASK_EMPTY_ERROR)
+    thresholds_for_mask = thresholds_tested or [initial_threshold]
+    guarded_mask = _stability_mask(
+        cv_image,
+        geometry,
+        thresholds_for_mask,
+        MIN_STABILITY_SURVIVAL_RATIO,
+        DEFAULT_SCALE,
+    )
+
+    if APPLY_STABILITY:
+        tmp_mask = guarded_mask
+    else:
+        tmp_mask = ee.Image(1)
+
+    mask_count_image = (
+        tmp_mask if APPLY_STABILITY else tmp_mask.updateMask(cv_image.mask())
+    )
+    mask_pixel_count = _pixel_count(
+        mask_count_image,
+        geometry,
+        context="stability mask pixel count",
+        scale=DEFAULT_SCALE,
+    )
+    print("Stability mask pixel count:", mask_pixel_count)
+
+    if APPLY_STABILITY:
+        stability = guarded_mask
+    else:
+        stability = tmp_mask
+        surviving_pixels = mask_pixel_count
+        survival_ratio = 1.0 if total_pixels > 0 else 0.0
+        final_threshold = initial_threshold
 
     low_confidence = final_threshold > initial_threshold + 1e-9
 
-    stats = {**stats, "cv": cv_image, "stability": stability}
+    stats = {**stats, "stability": stability}
 
     mmu_value = max(min_mapping_unit_ha, 0)
     mmu_applied = True
@@ -948,6 +1098,9 @@ def _prepare_selected_period_artifacts(
         "thresholds_tested": thresholds_tested,
         "low_confidence": low_confidence,
         "target_ratio": MIN_STABILITY_SURVIVAL_RATIO,
+        "mean_pixel_count": mean_pixel_count,
+        "mask_pixel_count": mask_pixel_count,
+        "apply_stability": APPLY_STABILITY,
     }
 
     metadata["stability"] = stability_metadata
@@ -964,6 +1117,9 @@ def _prepare_selected_period_artifacts(
         "total_pixels": total_pixels,
         "target_ratio": MIN_STABILITY_SURVIVAL_RATIO,
         "low_confidence": low_confidence,
+        "mean_pixel_count": mean_pixel_count,
+        "mask_pixel_count": mask_pixel_count,
+        "apply_stability": APPLY_STABILITY,
     }
 
     return artifacts, metadata

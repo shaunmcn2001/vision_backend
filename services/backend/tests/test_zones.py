@@ -44,6 +44,30 @@ def _run_prepare_with_counts(
     class _FakeVectors:
         pass
 
+    class _FakeMeanImage:
+        def __init__(self, total: int):
+            self._total = total
+
+        def reduceRegion(self, **_kwargs):
+            return {"NDVI_mean": self._total}
+
+        def updateMask(self, *_args, **_kwargs):  # pragma: no cover - passthrough
+            return self
+
+    class _FakeMask:
+        def __init__(self, threshold: float, count: int):
+            self.threshold = threshold
+            self._count = count
+
+        def selfMask(self):
+            return self
+
+        def updateMask(self, *_args, **_kwargs):
+            return self
+
+        def reduceRegion(self, **_kwargs):
+            return {"mask": self._count}
+
     class _FakeCVImage:
         def __init__(self, total: int):
             self._total = total
@@ -51,16 +75,14 @@ def _run_prepare_with_counts(
         def reduceRegion(self, **_kwargs):
             return {"NDVI_cv": self._total}
 
-    class _FakeMask:
-        def __init__(self, threshold: float, count: int):
-            self.threshold = threshold
-            self._count = count
+        def lte(self, threshold):
+            key = round(float(threshold), 3)
+            if key not in survival_counts:
+                raise AssertionError(f"Unexpected threshold {threshold}")
+            return _FakeMask(key, survival_counts[key])
 
-        def updateMask(self, *_args, **_kwargs):
+        def mask(self):  # pragma: no cover - passthrough helper
             return self
-
-        def reduceRegion(self, **_kwargs):
-            return {"NDVI_cv": self._count}
 
     class _FakeEE:
         class Reducer:
@@ -79,22 +101,25 @@ def _run_prepare_with_counts(
         return object()
 
     def _fake_temporal_stats(_images):
-        return {"mean": object(), "median": object(), "std": object()}
+        return {
+            "mean": _FakeMeanImage(total_pixels),
+            "median": object(),
+            "std": object(),
+            "cv": _FakeCVImage(total_pixels),
+        }
 
-    def _fake_cv(_mean, _std):
-        return _FakeCVImage(total_pixels)
-
-    def _fake_stability_mask(_image, threshold):
-        key = round(float(threshold), 3)
-        if key not in survival_counts:
-            raise AssertionError(f"Unexpected threshold {threshold}")
-        return _FakeMask(key, survival_counts[key])
+    def _fake_stability_mask(_image, _geometry, thresholds, _min_ratio, _scale):
+        if not thresholds:
+            raise AssertionError("thresholds should not be empty")
+        last = round(float(list(thresholds)[-1]), 3)
+        if last not in survival_counts:
+            raise AssertionError(f"Unexpected threshold {last}")
+        return _FakeMask(last, survival_counts[last])
 
     monkeypatch.setattr(zones, "ee", _FakeEE())
     monkeypatch.setattr(zones, "_build_composite_series", _fake_build_series)
     monkeypatch.setattr(zones, "_compute_ndvi", _fake_compute_ndvi)
     monkeypatch.setattr(zones, "_ndvi_temporal_stats", _fake_temporal_stats)
-    monkeypatch.setattr(zones, "_ndvi_cv", _fake_cv)
     monkeypatch.setattr(zones, "_stability_mask", _fake_stability_mask)
     monkeypatch.setattr(
         zones,
@@ -283,11 +308,17 @@ def test_create_production_zones_endpoint(monkeypatch):
                     "total_pixels": 100,
                     "target_ratio": zones.MIN_STABILITY_SURVIVAL_RATIO,
                     "low_confidence": True,
+                    "mean_pixel_count": 100,
+                    "mask_pixel_count": 35,
+                    "apply_stability": True,
                 },
                 "debug": {
                     "stability": {
                         "survival_ratios": [0.2, 0.3, 0.35],
                         "thresholds_tested": [0.5, 1.0, 1.5],
+                        "mean_pixel_count": 100,
+                        "mask_pixel_count": 35,
+                        "apply_stability": True,
                     }
                 },
             },
@@ -328,6 +359,9 @@ def test_create_production_zones_endpoint(monkeypatch):
     assert stability["final_threshold"] == 1.5
     assert stability["survival_ratio"] == 0.35
     assert stability["survival_ratios"] == [0.2, 0.3, 0.35]
+    assert stability["mean_pixel_count"] == 100
+    assert stability["mask_pixel_count"] == 35
+    assert stability["apply_stability"] is True
     assert response["palette"] == list(zones.ZONE_PALETTE[:5])
     assert response["thresholds"] == [0.1, 0.2, 0.3, 0.4]
 
@@ -450,12 +484,18 @@ def test_prepare_selected_period_artifacts_reports_stability(monkeypatch):
     assert stability["final_threshold"] == pytest.approx(0.25)
     assert stability["survival_ratio"] == pytest.approx(0.05)
     assert stability["low_confidence"] is False
+    assert stability["mean_pixel_count"] == 100
+    assert stability["mask_pixel_count"] == 5
+    assert stability["apply_stability"] is True
     assert metadata["low_confidence"] is False
 
     debug = metadata["debug"]["stability"]
     assert debug["thresholds_tested"] == [0.25]
     assert debug["low_confidence"] is False
     assert debug["survival_ratios"] == pytest.approx([0.05])
+    assert debug["mean_pixel_count"] == 100
+    assert debug["mask_pixel_count"] == 5
+    assert debug["apply_stability"] is True
 
 
 def test_prepare_selected_period_artifacts_retains_initial_threshold(monkeypatch):
@@ -469,11 +509,17 @@ def test_prepare_selected_period_artifacts_retains_initial_threshold(monkeypatch
     assert stability["final_threshold"] == pytest.approx(0.5)
     assert stability["survival_ratio"] == pytest.approx(0.3)
     assert stability["low_confidence"] is False
+    assert stability["mean_pixel_count"] == 100
+    assert stability["mask_pixel_count"] == 30
+    assert stability["apply_stability"] is True
     assert metadata["low_confidence"] is False
 
     debug = metadata["debug"]["stability"]
     assert debug["thresholds_tested"] == [0.5]
     assert debug["survival_ratios"] == pytest.approx([0.3])
+    assert debug["mean_pixel_count"] == 100
+    assert debug["mask_pixel_count"] == 30
+    assert debug["apply_stability"] is True
 
 
 def test_prepare_selected_period_artifacts_records_scene_mode(monkeypatch):
