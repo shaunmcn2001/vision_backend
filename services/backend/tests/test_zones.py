@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -194,6 +195,120 @@ def test_percentile_thresholds_raise_when_mask_removes_all_pixels(monkeypatch):
         zones._percentile_thresholds(_FakeImage(), geometry=object(), n_classes=5)
 
     assert str(excinfo.value) == zones.STABILITY_MASK_EMPTY_ERROR
+
+
+def test_build_percentile_zones_includes_all_requested_classes(monkeypatch):
+    class _FakeNumber:
+        def __init__(self, value):
+            self.value = float(value)
+
+    class _FakeMask:
+        def __init__(self, values):
+            self.values = [bool(v) for v in values]
+
+    class _FakeList(list):
+        def map(self, func):
+            return _FakeList([func(item) for item in self])
+
+        def iterate(self, func, initial):
+            result = initial
+            for item in self:
+                result = func(result, item)
+            return result
+
+        def get(self, index):
+            return super().__getitem__(index)
+
+        def getInfo(self):
+            return list(self)
+
+    class _FakeImage:
+        def __init__(self, values, *, mask=None, name="ndvi"):
+            self.values = list(values)
+            self.mask_values = list(mask) if mask is not None else [True] * len(self.values)
+            self.name = name
+
+        def bandNames(self):
+            return _FakeList([self.name])
+
+        def rename(self, name):
+            self.name = str(name)
+            return self
+
+        def clamp(self, low, high):
+            clamped = [min(max(value, low), high) for value in self.values]
+            return _FakeImage(clamped, mask=self.mask_values, name=self.name)
+
+        def mask(self):
+            return _FakeMask(self.mask_values)
+
+        def updateMask(self, mask):
+            if isinstance(mask, _FakeMask):
+                combined = [current and other for current, other in zip(self.mask_values, mask.values)]
+            elif isinstance(mask, _FakeImage):
+                combined = [current and bool(other) for current, other in zip(self.mask_values, mask.values)]
+            else:  # pragma: no cover - defensive fallback
+                combined = list(self.mask_values)
+            return _FakeImage(self.values, mask=combined, name=self.name)
+
+        def gt(self, threshold):
+            limit = threshold.value if isinstance(threshold, _FakeNumber) else float(threshold)
+            return _FakeImage([1 if value > limit else 0 for value in self.values], mask=self.mask_values, name=self.name)
+
+        def add(self, other):
+            if isinstance(other, _FakeImage):
+                combined = [left + right for left, right in zip(self.values, other.values)]
+            else:
+                value = other.value if isinstance(other, _FakeNumber) else float(other)
+                combined = [left + value for left in self.values]
+            return _FakeImage(combined, mask=self.mask_values, name=self.name)
+
+        def multiply(self, other):
+            factor = other.value if isinstance(other, _FakeNumber) else float(other)
+            return _FakeImage([value * factor for value in self.values], mask=self.mask_values, name=self.name)
+
+        def toInt(self):
+            return _FakeImage([int(value) for value in self.values], mask=self.mask_values, name=self.name)
+
+        def clip(self, _geometry):
+            return self
+
+    fake_thresholds = _FakeList([0.2, 0.4, 0.5])
+    mean_image = _FakeImage([0.1, 0.3, 0.5, 0.6])
+    stability_mask = _FakeImage([1, 1, 1, 1])
+    ndvi_stats = {"mean": mean_image, "stability": stability_mask}
+
+    fake_ee = SimpleNamespace(
+        List=lambda values: _FakeList(list(values)),
+        Number=lambda value: _FakeNumber(value),
+        String=lambda value: str(value),
+        Image=lambda image: image,
+    )
+
+    monkeypatch.setattr(zones, "ee", fake_ee)
+    monkeypatch.setattr(
+        zones,
+        "_percentile_thresholds",
+        lambda _image, _geometry, _n_classes: fake_thresholds,
+    )
+    monkeypatch.setattr(
+        zones,
+        "_apply_cleanup",
+        lambda classified, _geometry, **_kwargs: classified,
+    )
+
+    zone_image, thresholds = zones._build_percentile_zones(
+        ndvi_stats=ndvi_stats,
+        geometry=object(),
+        n_classes=4,
+        smooth_radius_m=0,
+        open_radius_m=0,
+        close_radius_m=0,
+        min_mapping_unit_ha=0,
+    )
+
+    assert zone_image.values == [1, 2, 3, 4]
+    assert thresholds == [0.2, 0.4, 0.5]
 
 
 def test_export_prefix_formats_months_and_name():
