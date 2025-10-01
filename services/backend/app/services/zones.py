@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 import calendar
 import os
 import math
+import re
 from typing import Dict, List, Mapping, Sequence, Tuple, Union
 
 import ee
@@ -490,40 +491,42 @@ def _pixel_count(
     return int(max(numeric, 0))
 
 
-def _percentile_thresholds(
-    image: ee.Image, geometry: ee.Geometry, n_classes: int
-) -> ee.List:
-    percent_steps = list(range(1, n_classes))
-    percentiles = ee.List([step * 100 / n_classes for step in percent_steps])
-    output_names_py = [f"cut_{step:02d}" for step in percent_steps]
-    output_names = ee.List(output_names_py)
-    reducer = ee.Reducer.percentile(percentiles, output_names)
-    stats = image.reduceRegion(
-        reducer=reducer,
-        geometry=geometry,
-        scale=DEFAULT_SCALE,
-        bestEffort=True,
-        tileScale=4,
-        maxPixels=gee.MAX_PIXELS,
-    )
+def _percentile_thresholds(reducer_dict: Dict[str, float], n_classes: int) -> List[float]:
+    """
+    Build the list of percentile thresholds for NDVI zoning.
 
-    try:
-        keys_object = stats.keys() if hasattr(stats, "keys") else []
-        if hasattr(keys_object, "getInfo"):
-            keys_info = keys_object.getInfo()
-        else:
-            keys_info = list(keys_object)
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError(f"Failed to evaluate NDVI percentile keys: {exc}") from exc
+    Accepts reducer outputs where percentile keys are either:
+      - 'cut_01', 'cut_02', ... (bare keys)
+      - '<band>_cut_01', '<band>_cut_02', ... (EE band-prefixed keys, e.g. 'ndvi_mean_cut_01')
 
-    present_keys = set(keys_info or [])
-    missing_names = [name for name in output_names_py if name not in present_keys]
-    if missing_names:
-        raise ValueError(STABILITY_MASK_EMPTY_ERROR)
+    We detect any key that ends with 'cut_XX' and sort by XX.
+    Raises ValueError if any required percentile is missing.
+    """
+    if n_classes < 2:
+        raise ValueError("n_classes must be >= 2")
 
-    return output_names.map(lambda name: ee.Number(stats.get(name)))
+    # we expect (n_classes - 1) percentile cuts, e.g. 5 classes -> 4 thresholds
+    expected_idx = [f"{i:02d}" for i in range(1, n_classes)]
+    # match both 'cut_01' and 'anything_cut_01'
+    pat = re.compile(r"(?:.*_)?cut_(\d{2})$")
 
+    found: Dict[str, float] = {}
+    for k, v in reducer_dict.items():
+        m = pat.search(k)
+        if m:
+            idx = m.group(1)
+            # only keep the first seen for a given index (or last—both fine)
+            if idx not in found:
+                found[idx] = float(v)
 
+    missing = [ix for ix in expected_idx if ix not in found]
+    if missing:
+        # keep the original semantics: signal "empty/masked" condition to caller
+        raise ValueError(f"Missing percentile keys for indices: {', '.join(missing)}")
+
+    # Return thresholds ordered by the percentile index (01, 02, ...)
+    return [found[ix] for ix in expected_idx]
+    
 def _classify_by_percentiles(
     image: ee.Image, geometry: ee.Geometry, n_classes: int
 ) -> tuple[ee.Image, ee.List]:
