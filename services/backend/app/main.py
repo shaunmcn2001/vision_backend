@@ -582,11 +582,11 @@ def export_ui():
                </div>
                <div class="subfield">
                  <label class="label" for="zonesMmu">Minimum mapping unit (ha)</label>
-                 <input type="number" class="input-field" id="zonesMmu" step="0.1" min="0" value="0.5" />
+                 <input type="number" class="input-field" id="zonesMmu" step="0.01" min="0" value="0.08" />
                </div>
                <div class="subfield">
-                 <label class="label" for="zonesSmooth">Smooth kernel (px)</label>
-                 <input type="number" class="input-field" id="zonesSmooth" step="1" min="0" value="1" />
+                <label class="label" for="zonesSmooth">Smooth radius (m)</label>
+                <input type="number" class="input-field" id="zonesSmooth" step="1" min="0" value="15" />
                </div>
                <div class="subfield">
                  <label class="label" for="zonesSimplify">Simplify tolerance (m)</label>
@@ -648,10 +648,13 @@ def export_ui():
        const zonesToggle = document.getElementById('zonesToggle');
        const zonesOptions = document.getElementById('zonesOptions');
        const zonesClasses = document.getElementById('zonesClasses');
-       const zonesCvInput = document.getElementById('zonesCv');
-       const zonesMmuInput = document.getElementById('zonesMmu');
-       const zonesSmoothInput = document.getElementById('zonesSmooth');
-       const zonesSimplifyInput = document.getElementById('zonesSimplify');
+      const zonesCvInput = document.getElementById('zonesCv');
+      const zonesMmuInput = document.getElementById('zonesMmu');
+      const zonesSmoothInput = document.getElementById('zonesSmooth');
+      const zonesSimplifyInput = document.getElementById('zonesSimplify');
+      const ZONE_OPEN_RADIUS_M = 10;
+      const ZONE_CLOSE_RADIUS_M = 10;
+      const ZONE_SIMPLIFY_BUFFER_M = 0;
        const zonesPanel = document.getElementById('zonesPanel');
        const zonesInfo = document.getElementById('zonesInfo');
        const zoneArtifactElements = {
@@ -1045,14 +1048,17 @@ def export_ui():
              aoi_name: aoiName,
              months,
              cloud_prob_max: 40,
-             n_classes: zoneParams.n_classes,
-             cv_mask_threshold: zoneParams.cv_mask_threshold,
-             mmu_ha: zoneParams.mmu_ha,
-             smooth_kernel_px: zoneParams.smooth_kernel_px,
-             simplify_tol_m: zoneParams.simplify_tol_m,
-             export_target: exportTarget,
-             include_zonal_stats: zoneParams.include_zonal_stats,
-           }),
+            n_classes: zoneParams.n_classes,
+            cv_mask_threshold: zoneParams.cv_mask_threshold,
+            mmu_ha: zoneParams.mmu_ha,
+            smooth_radius_m: zoneParams.smooth_radius_m,
+            open_radius_m: zoneParams.open_radius_m,
+            close_radius_m: zoneParams.close_radius_m,
+            simplify_tol_m: zoneParams.simplify_tol_m,
+            simplify_buffer_m: zoneParams.simplify_buffer_m,
+            export_target: exportTarget,
+            include_zonal_stats: zoneParams.include_zonal_stats,
+          }),
          });
          if (!response.ok) {
            throw new Error(await readError(response));
@@ -1165,13 +1171,17 @@ def export_ui():
           const nClasses = parseInt(zonesClasses.value, 10);
           const cvThreshold = parseFloat(zonesCvInput.value);
           const mmu = parseFloat(zonesMmuInput.value);
-          const smooth = parseInt(zonesSmoothInput.value, 10);
+          const smoothRadius = parseFloat(zonesSmoothInput.value);
           const simplify = parseFloat(zonesSimplifyInput.value);
           if (!Number.isInteger(nClasses) || ![3, 5].includes(nClasses)) {
             setStatus('Choose either 3 or 5 production classes.', 'error');
             return;
           }
-          if ([cvThreshold, mmu, smooth, simplify].some((value) => Number.isNaN(value) || value < 0)) {
+          const invalid =
+            [cvThreshold, smoothRadius, simplify].some((value) => Number.isNaN(value) || value < 0) ||
+            Number.isNaN(mmu) ||
+            mmu <= 0;
+          if (invalid) {
             setStatus('Production zone parameters must be non-negative numbers.', 'error');
             return;
           }
@@ -1179,8 +1189,11 @@ def export_ui():
             n_classes: nClasses,
             cv_mask_threshold: cvThreshold,
             mmu_ha: mmu,
-            smooth_kernel_px: smooth,
+            smooth_radius_m: smoothRadius,
+            open_radius_m: ZONE_OPEN_RADIUS_M,
+            close_radius_m: ZONE_CLOSE_RADIUS_M,
             simplify_tol_m: simplify,
+            simplify_buffer_m: ZONE_SIMPLIFY_BUFFER_M,
             include_zonal_stats: true,
           };
         }
@@ -1245,8 +1258,11 @@ def export_ui():
                     n_classes: zoneParams.n_classes,
                     cv_mask_threshold: zoneParams.cv_mask_threshold,
                     mmu_ha: zoneParams.mmu_ha,
-                    smooth_kernel_px: zoneParams.smooth_kernel_px,
+                    smooth_radius_m: zoneParams.smooth_radius_m,
+                    open_radius_m: zoneParams.open_radius_m,
+                    close_radius_m: zoneParams.close_radius_m,
                     simplify_tol_m: zoneParams.simplify_tol_m,
+                    simplify_buffer_m: zoneParams.simplify_buffer_m,
                   }
                 : { enabled: false },
             }),
