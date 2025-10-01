@@ -25,7 +25,17 @@ DEFAULT_SAMPLE_SIZE = 8000
 DEFAULT_SCALE = 10
 DEFAULT_CRS = "EPSG:4326"
 
-STABILITY_THRESHOLD_SEQUENCE = [0.5, 0.6, 0.8, 1.0]
+ZONE_PALETTE: tuple[str, ...] = (
+    "#00441b",
+    "#006d2c",
+    "#238b45",
+    "#41ae76",
+    "#66c2a4",
+    "#99d8c9",
+    "#ccece6",
+)
+
+STABILITY_THRESHOLD_SEQUENCE = [0.5, 1.0, 1.5, 2.0]
 MIN_STABILITY_SURVIVAL_RATIO = 0.2
 
 STABILITY_MASK_EMPTY_ERROR = (
@@ -264,7 +274,7 @@ def _percentile_thresholds(
 
 def _classify_by_percentiles(
     image: ee.Image, geometry: ee.Geometry, n_classes: int
-) -> ee.Image:
+) -> tuple[ee.Image, ee.List]:
     band_name = ee.String(image.bandNames().get(0))
     image = image.rename(band_name)
     thresholds = _percentile_thresholds(image, geometry, n_classes)
@@ -280,7 +290,7 @@ def _classify_by_percentiles(
 
     pairs = ee.List.sequence(0, thresholds.size().subtract(1)).zip(thresholds)
     classified = ee.Image(pairs.iterate(_assign, initial))
-    return classified.rename("zone")
+    return classified.rename("zone"), thresholds
 
 
 def _connected_component_area(classified: ee.Image, n_classes: int) -> ee.Image:
@@ -302,34 +312,51 @@ def _apply_cleanup(
     smooth_kernel_px: int,
     min_mapping_unit_ha: float,
 ) -> ee.Image:
-    smooth_radius = max(1, int(smooth_kernel_px))
-    smoothed = classified.focal_mode(radius=smooth_radius, units="pixels", iterations=1)
-    component_area = _connected_component_area(smoothed, n_classes)
+    base_radius_m = max(1, int(smooth_kernel_px)) * DEFAULT_SCALE
+
+    smoothed = classified.focal_mode(radius=base_radius_m, units="meters", iterations=1)
+    opened = smoothed.focal_min(radius=base_radius_m, units="meters", iterations=1).focal_max(
+        radius=base_radius_m, units="meters", iterations=1
+    )
+    closed = opened.focal_max(radius=base_radius_m, units="meters", iterations=1).focal_min(
+        radius=base_radius_m, units="meters", iterations=1
+    )
+
+    component_area = _connected_component_area(closed, n_classes)
     min_area_m2 = max(min_mapping_unit_ha, 0) * 10_000
-    majority_large = smoothed.focal_mode(radius=smooth_radius + 1, units="pixels", iterations=1)
+    majority_large = closed.focal_mode(radius=base_radius_m, units="meters", iterations=1)
     small_mask = component_area.lt(min_area_m2)
-    cleaned = smoothed.where(small_mask, majority_large)
-    cleaned = cleaned.clip(geometry)
+    cleaned = closed.where(small_mask, majority_large)
 
     mask = cleaned.mask()
-    closed_mask = mask.focal_max(radius=1, units="pixels", iterations=1).focal_min(
-        radius=1, units="pixels", iterations=1
+    closed_mask = mask.focal_max(radius=base_radius_m, units="meters", iterations=1).focal_min(
+        radius=base_radius_m, units="meters", iterations=1
     )
-    gap_mask = closed_mask.And(mask.Not())
-    filler = cleaned.focal_mode(radius=1, units="pixels", iterations=1)
-    cleaned = cleaned.where(gap_mask, filler)
+    filler = cleaned.focal_mode(radius=base_radius_m, units="meters", iterations=1)
+    cleaned = cleaned.where(mask.Not(), filler)
     cleaned = cleaned.updateMask(closed_mask)
+    cleaned = cleaned.clip(geometry)
     return cleaned
 
 
 def _simplify_vectors(vectors: ee.FeatureCollection, tolerance_m: float) -> ee.FeatureCollection:
-    if tolerance_m <= 0:
-        return vectors
-
     def _simplify(feature: ee.Feature) -> ee.Feature:
-        geom = feature.geometry().simplify(maxError=tolerance_m)
+        geom = feature.geometry()
+        if tolerance_m > 0:
+            geom = geom.simplify(maxError=tolerance_m)
+            geom = geom.buffer(0)
         zone_value = ee.Number(feature.get("zone")).toInt()
-        return feature.setGeometry(geom).set({"zone": zone_value, "zone_id": zone_value})
+        area_m2 = geom.area(maxError=1)
+        area_ha = area_m2.divide(10_000)
+        return (
+            feature.setGeometry(geom)
+            .set({
+                "zone": zone_value,
+                "zone_id": zone_value,
+                "area_m2": area_m2,
+                "area_ha": area_ha,
+            })
+        )
 
     return ee.FeatureCollection(vectors.map(_simplify))
 
@@ -399,14 +426,21 @@ def _build_percentile_zones(
     n_classes: int,
     smooth_kernel_px: int,
     min_mapping_unit_ha: float,
-) -> ee.Image:
+) -> tuple[ee.Image, List[float]]:
     try:
-        ranked = _classify_by_percentiles(
+        ranked, thresholds = _classify_by_percentiles(
             ndvi_stats["mean"].updateMask(ndvi_stats["stability"]), geometry, n_classes
         )
     except ValueError as exc:
         raise ValueError(str(exc)) from exc
     ranked = ranked.updateMask(ndvi_stats["stability"])
+
+    try:
+        percentile_thresholds: List[float] = [
+            float(value) for value in (thresholds.getInfo() or [])
+        ]
+    except Exception as exc:  # pragma: no cover - server side failure
+        raise RuntimeError(f"Failed to evaluate NDVI percentile thresholds: {exc}") from exc
     cleaned = _apply_cleanup(
         ranked,
         geometry,
@@ -414,7 +448,7 @@ def _build_percentile_zones(
         smooth_kernel_px=smooth_kernel_px,
         min_mapping_unit_ha=min_mapping_unit_ha,
     )
-    return cleaned.rename("zone")
+    return cleaned.rename("zone"), percentile_thresholds
 
 
 def _normalise_feature(mean_image: ee.Image, geometry: ee.Geometry, name: str) -> ee.Image:
@@ -665,9 +699,11 @@ def _prepare_selected_period_artifacts(
     method_key = method.strip().lower()
     extra_means: Dict[str, ee.Image] = {}
 
+    percentile_thresholds: List[float] = []
+
     if method_key == "ndvi_percentiles":
         try:
-            zone_image = _build_percentile_zones(
+            zone_image, percentile_thresholds = _build_percentile_zones(
                 ndvi_stats=stats,
                 geometry=geometry,
                 n_classes=n_classes,
@@ -715,6 +751,10 @@ def _prepare_selected_period_artifacts(
         "skipped_months": skipped_months,
         "mmu_applied": mmu_value > 0 and mmu_applied,
     }
+
+    if percentile_thresholds:
+        metadata["percentile_thresholds"] = percentile_thresholds
+    metadata["palette"] = list(ZONE_PALETTE[: max(1, min(n_classes, len(ZONE_PALETTE)))])
 
     stability_metadata = {
         "initial_threshold": initial_threshold,
@@ -986,6 +1026,9 @@ def export_selected_period_zones(
         }
     )
 
+    palette = metadata.get("palette") if isinstance(metadata, dict) else None
+    thresholds = metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
+
     result: Dict[str, object] = {
         "paths": {
             "raster": f"{prefix_base}.tif",
@@ -998,6 +1041,11 @@ def export_selected_period_zones(
         "metadata": metadata,
         "artifacts": artifacts,
     }
+
+    if palette:
+        result["palette"] = palette
+    if thresholds:
+        result["thresholds"] = thresholds
 
     debug_info = metadata.get("debug") if isinstance(metadata, dict) else None
     if debug_info:

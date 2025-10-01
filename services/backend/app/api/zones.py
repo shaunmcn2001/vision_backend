@@ -162,6 +162,11 @@ def create_production_zones(request: ProductionZonesRequest):
     ym_start = used_months[0]
     ym_end = used_months[-1]
 
+    palette = result.get("palette") or metadata.get("palette") if isinstance(metadata, dict) else None
+    thresholds = result.get("thresholds") or (
+        metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
+    )
+
     response = {
         "ok": True,
         "ym_start": ym_start,
@@ -170,6 +175,11 @@ def create_production_zones(request: ProductionZonesRequest):
         "tasks": result.get("tasks", {}),
         "metadata": metadata,
     }
+
+    if palette is not None:
+        response["palette"] = palette
+    if thresholds is not None:
+        response["thresholds"] = thresholds
 
     debug_info = result.get("debug") or metadata.get("debug")
     stability_meta = {}

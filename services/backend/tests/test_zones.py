@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from fastapi import HTTPException
 
@@ -82,7 +84,11 @@ def _run_prepare_with_counts(monkeypatch, survival_counts, *, cv_threshold, tota
     monkeypatch.setattr(zones, "_ndvi_temporal_stats", _fake_temporal_stats)
     monkeypatch.setattr(zones, "_ndvi_cv", _fake_cv)
     monkeypatch.setattr(zones, "_stability_mask", _fake_stability_mask)
-    monkeypatch.setattr(zones, "_build_percentile_zones", lambda **_kwargs: _FakeZoneImage())
+    monkeypatch.setattr(
+        zones,
+        "_build_percentile_zones",
+        lambda **_kwargs: (_FakeZoneImage(), [0.2, 0.4, 0.6, 0.8]),
+    )
     monkeypatch.setattr(zones, "_prepare_vectors", lambda *_args, **_kwargs: _FakeVectors())
     monkeypatch.setattr(zones, "area_ha", lambda *_args, **_kwargs: 10)
 
@@ -218,10 +224,12 @@ def test_create_production_zones_endpoint(monkeypatch):
                 "used_months": months,
                 "skipped_months": ["2024-04"],
                 "mmu_applied": True,
+                "palette": list(zones.ZONE_PALETTE[:5]),
+                "percentile_thresholds": [0.1, 0.2, 0.3, 0.4],
                 "stability": {
                     "initial_threshold": 0.25,
-                    "final_threshold": 0.6,
-                    "thresholds_tested": [0.25, 0.5, 0.6],
+                    "final_threshold": 1.0,
+                    "thresholds_tested": [0.25, 0.5, 1.0],
                     "survival_ratio": 0.32,
                     "surviving_pixels": 32,
                     "total_pixels": 100,
@@ -230,13 +238,15 @@ def test_create_production_zones_endpoint(monkeypatch):
                 },
                 "debug": {
                     "stability": {
-                        "survival_ratios": [0.1, 0.2, 0.32],
-                        "thresholds_tested": [0.25, 0.5, 0.6],
+                        "survival_ratios": [0.1, 0.22, 0.32],
+                        "thresholds_tested": [0.25, 0.5, 1.0],
                     }
                 },
             },
             "prefix": "zones/PROD_202403_202405_demo_zones",
             "bucket": "zones-bucket",
+            "palette": list(zones.ZONE_PALETTE[:5]),
+            "thresholds": [0.1, 0.2, 0.3, 0.4],
         }
 
     monkeypatch.setattr(zones, "export_selected_period_zones", _fake_export)
@@ -264,12 +274,14 @@ def test_create_production_zones_endpoint(monkeypatch):
     debug = response["debug"]
     assert debug["requested_months"] == ["2024-03", "2024-05"]
     assert debug["skipped_months"] == ["2024-04"]
-    assert debug["retry_thresholds"] == [0.25, 0.5, 0.6]
+    assert debug["retry_thresholds"] == [0.25, 0.5, 1.0]
     stability = debug["stability"]
     assert stability["initial_threshold"] == 0.25
-    assert stability["final_threshold"] == 0.6
+    assert stability["final_threshold"] == 1.0
     assert stability["survival_ratio"] == 0.32
-    assert stability["survival_ratios"] == [0.1, 0.2, 0.32]
+    assert stability["survival_ratios"] == [0.1, 0.22, 0.32]
+    assert response["palette"] == list(zones.ZONE_PALETTE[:5])
+    assert response["thresholds"] == [0.1, 0.2, 0.3, 0.4]
 
 
 def test_create_production_zones_requires_bucket_for_gcs(monkeypatch):
@@ -326,28 +338,30 @@ def test_create_production_zones_with_range_request(monkeypatch):
 
 
 def test_prepare_selected_period_artifacts_retries_thresholds(monkeypatch):
-    survival_counts = {0.25: 5, 0.5: 10, 0.6: 18, 0.8: 28, 1.0: 35}
+    survival_counts = {0.25: 5, 0.5: 10, 1.0: 18, 1.5: 28, 2.0: 35}
     artifacts, metadata = _run_prepare_with_counts(
         monkeypatch, survival_counts, cv_threshold=0.25
     )
 
     assert artifacts.zone_image.__class__.__name__ == "_FakeZoneImage"
+    assert metadata["percentile_thresholds"] == [0.2, 0.4, 0.6, 0.8]
+    assert metadata["palette"] == list(zones.ZONE_PALETTE[:5])
 
     stability = metadata["stability"]
-    assert stability["thresholds_tested"] == [0.25, 0.5, 0.6, 0.8]
-    assert stability["final_threshold"] == pytest.approx(0.8)
+    assert stability["thresholds_tested"] == [0.25, 0.5, 1.0, 1.5]
+    assert stability["final_threshold"] == pytest.approx(1.5)
     assert stability["survival_ratio"] == pytest.approx(0.28)
     assert stability["low_confidence"] is True
     assert metadata["low_confidence"] is True
 
     debug = metadata["debug"]["stability"]
-    assert debug["thresholds_tested"] == [0.25, 0.5, 0.6, 0.8]
+    assert debug["thresholds_tested"] == [0.25, 0.5, 1.0, 1.5]
     assert debug["low_confidence"] is True
     assert debug["survival_ratios"] == pytest.approx([0.05, 0.1, 0.18, 0.28])
 
 
 def test_prepare_selected_period_artifacts_retains_initial_threshold(monkeypatch):
-    survival_counts = {0.5: 30, 0.6: 60, 0.8: 80, 1.0: 90}
+    survival_counts = {0.5: 30, 1.0: 60, 1.5: 80, 2.0: 90}
     _artifacts, metadata = _run_prepare_with_counts(
         monkeypatch, survival_counts, cv_threshold=0.5
     )
@@ -362,4 +376,168 @@ def test_prepare_selected_period_artifacts_retains_initial_threshold(monkeypatch
     debug = metadata["debug"]["stability"]
     assert debug["thresholds_tested"] == [0.5]
     assert debug["survival_ratios"] == pytest.approx([0.3])
+
+
+def test_apply_cleanup_uses_meter_operations(monkeypatch):
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    class _FakeMask:
+        def __init__(self):
+            self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+        def focal_max(self, radius, units, iterations):
+            self.calls.append(("max", (radius, units, iterations)))
+            return self
+
+        def focal_min(self, radius, units, iterations):
+            self.calls.append(("min", (radius, units, iterations)))
+            return self
+
+        def Not(self):
+            self.calls.append(("not", ()))
+            return "mask_not"
+
+    class _FakeImage:
+        def __init__(self):
+            self.mask_obj = _FakeMask()
+
+        def focal_mode(self, radius, units, iterations):
+            calls.append(("mode", (radius, units, iterations)))
+            return self
+
+        def focal_min(self, radius, units, iterations):
+            calls.append(("min", (radius, units, iterations)))
+            return self
+
+        def focal_max(self, radius, units, iterations):
+            calls.append(("max", (radius, units, iterations)))
+            return self
+
+        def where(self, *_args):
+            calls.append(("where", _args))
+            return self
+
+        def mask(self):
+            return self.mask_obj
+
+        def updateMask(self, *_args):
+            calls.append(("updateMask", _args))
+            return self
+
+        def clip(self, geom):
+            calls.append(("clip", (geom,)))
+            return self
+
+    class _FakeAreaImage:
+        def __init__(self):
+            self.lt_calls: list[tuple[Any, ...]] = []
+
+        def lt(self, value):
+            self.lt_calls.append((value,))
+            return "lt_mask"
+
+    fake_area = _FakeAreaImage()
+
+    def _fake_connected_component_area(classified, n_classes):
+        assert n_classes == 5
+        return fake_area
+
+    fake_image = _FakeImage()
+    monkeypatch.setattr(zones, "_connected_component_area", _fake_connected_component_area)
+
+    result = zones._apply_cleanup(
+        fake_image,
+        geometry="geom",
+        n_classes=5,
+        smooth_kernel_px=2,
+        min_mapping_unit_ha=1.0,
+    )
+
+    assert result is fake_image
+    meter_calls = [entry for entry in calls if entry[0] in {"mode", "min", "max"}]
+    assert all(args[1] == "meters" for _, args in meter_calls)
+    assert any(args[0] == 20 for _, args in meter_calls)
+    assert fake_image.mask_obj.calls[0][1][1] == "meters"
+    assert fake_area.lt_calls[0][0] == pytest.approx(10_000.0)
+
+
+def test_simplify_vectors_sets_area_and_buffer(monkeypatch):
+    class _FakeNumber:
+        def __init__(self, value):
+            self.value = value
+
+        def divide(self, denom):
+            return self.value / denom
+
+    class _FakeGeometry:
+        def __init__(self):
+            self.simplify_args: list[float] = []
+            self.buffer_args: list[float] = []
+
+        def simplify(self, maxError):
+            self.simplify_args.append(maxError)
+            return self
+
+        def buffer(self, distance):
+            self.buffer_args.append(distance)
+            return self
+
+        def area(self, maxError):
+            assert maxError == 1
+            return _FakeNumber(12_000)
+
+    class _FakeFeature:
+        def __init__(self, geom):
+            self.geom = geom
+            self.props = {"zone": 3}
+
+        def geometry(self):
+            return self.geom
+
+        def setGeometry(self, geom):
+            self.geom = geom
+            return self
+
+        def set(self, values):
+            self.props.update(values)
+            return self
+
+        def get(self, key):
+            return self.props[key]
+
+    class _FakeCollection:
+        def __init__(self, features):
+            self.features = features
+
+        def map(self, func):
+            return _FakeCollection([func(feature) for feature in self.features])
+
+    geometry = _FakeGeometry()
+    collection = _FakeCollection([_FakeFeature(geometry)])
+
+    class _FakeNumberWrapper:
+        def __init__(self, value):
+            self.value = value
+
+        def toInt(self):
+            return int(self.value)
+
+    class _FakeEE:
+        @staticmethod
+        def Number(value):
+            return _FakeNumberWrapper(value)
+
+        @staticmethod
+        def FeatureCollection(features):
+            return features
+
+    monkeypatch.setattr(zones, "ee", _FakeEE())
+
+    simplified = zones._simplify_vectors(collection, tolerance_m=15)
+    feature = simplified.features[0]
+    assert geometry.simplify_args == [15]
+    assert geometry.buffer_args == [0]
+    assert feature.props["zone_id"].__class__.__name__ != "NoneType"
+    assert feature.props["area_m2"].value == 12_000
+    assert feature.props["area_ha"] == pytest.approx(1.2)
 
