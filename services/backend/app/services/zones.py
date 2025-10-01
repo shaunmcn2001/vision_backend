@@ -77,6 +77,11 @@ MIN_STABILITY_SURVIVAL_RATIO = 0.0
 NDVI_PERCENTILE_MIN = 0.0
 NDVI_PERCENTILE_MAX = 0.6
 
+NDVI_MASK_EMPTY_ERROR = (
+    "No NDVI pixels were available for the selected period. Try expanding the date range "
+    "or relaxing the cloud filtering threshold."
+)
+
 STABILITY_MASK_EMPTY_ERROR = (
     "All pixels were masked out by the stability threshold when computing NDVI percentiles. "
     "Try lowering the coefficient of variation threshold, expanding the selected months, "
@@ -949,6 +954,9 @@ def _prepare_selected_period_artifacts(
         scale=DEFAULT_SCALE,
     )
     print("NDVI mean pixel count:", mean_pixel_count)
+
+    if mean_pixel_count <= 0:
+        raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
     initial_threshold = float(cv_mask_threshold)
     thresholds_to_try: List[float] = [initial_threshold]
