@@ -154,7 +154,7 @@ def _run_prepare_with_counts(
     return artifacts, metadata
 
 
-def test_percentile_thresholds_raise_when_mask_removes_all_pixels(monkeypatch):
+def test_percentile_thresholds_raise_when_stability_removes_all_pixels(monkeypatch):
     class _FakeList(list):
         def map(self, func):
             return _FakeList([func(item) for item in self])
@@ -195,6 +195,54 @@ def test_percentile_thresholds_raise_when_mask_removes_all_pixels(monkeypatch):
         zones._percentile_thresholds(_FakeImage(), geometry=object(), n_classes=5)
 
     assert str(excinfo.value) == zones.STABILITY_MASK_EMPTY_ERROR
+
+
+def test_prepare_selected_period_artifacts_raises_when_ndvi_mask_empty(monkeypatch):
+    geometry = object()
+
+    monkeypatch.setattr(zones, "_ordered_months", lambda months: list(months))
+    monkeypatch.setattr(
+        zones,
+        "_build_composite_series",
+        lambda *_args, **_kwargs: ([("2024-01", object())], [], {}),
+    )
+    monkeypatch.setattr(zones, "_compute_ndvi", lambda image: object())
+    monkeypatch.setattr(
+        zones,
+        "_ndvi_temporal_stats",
+        lambda _images: {"mean": object(), "cv": object()},
+    )
+
+    def _fake_pixel_count(_image, _geometry, *, context, scale):  # pragma: no cover - simple stub
+        if context == "NDVI mean pixel count":
+            return 0
+        return 1
+
+    monkeypatch.setattr(zones, "_pixel_count", _fake_pixel_count)
+
+    with pytest.raises(ValueError) as excinfo:
+        zones._prepare_selected_period_artifacts(
+            {"type": "Feature", "geometry": {}},
+            geometry=geometry,
+            months=["2024-01"],
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            cloud_prob_max=40,
+            n_classes=5,
+            cv_mask_threshold=0.5,
+            apply_stability_mask=True,
+            min_mapping_unit_ha=1,
+            smooth_radius_m=0,
+            open_radius_m=0,
+            close_radius_m=0,
+            simplify_tol_m=0,
+            simplify_buffer_m=0,
+            method="ndvi_percentiles",
+            sample_size=100,
+            include_stats=False,
+        )
+
+    assert str(excinfo.value) == zones.NDVI_MASK_EMPTY_ERROR
 
 
 def test_build_percentile_zones_includes_all_requested_classes(monkeypatch):
