@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
 import shutil
@@ -20,6 +21,9 @@ import requests
 from google.cloud import storage
 
 from app import gee, index_visualization, indices
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.services.zones import ZoneArtifacts
@@ -611,6 +615,12 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
         metadata = result.get("metadata", {}) or {}
         prefix = result.get("prefix") or prefix
     except Exception as exc:
+        logger.exception(
+            "Failed to build zone artifacts for job %s (AOI %s): %s",
+            job.job_id,
+            job.aoi_name,
+            exc,
+        )
         with job.lock:
             job.zone_artifacts = None
             job.zone_state.status = "failed"
@@ -872,6 +882,13 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
                 job.error = job.zone_state.error
             job.touch()
     except Exception as exc:
+        logger.exception(
+            "Zone cloud export failed for job %s (AOI %s, target %s): %s",
+            job.job_id,
+            job.aoi_name,
+            job.export_target,
+            exc,
+        )
         job.zone_state.status = "failed"
         job.zone_state.error = str(exc)
         if not job.error:
@@ -922,6 +939,12 @@ def _process_zip_exports(job: ExportJob) -> None:
                 if zone_archive_entries:
                     job.zone_state.metadata[ZONE_ARCHIVE_METADATA_KEY] = zone_archive_entries
             except Exception as exc:
+                logger.exception(
+                    "Failed to download zone artifacts for job %s (AOI %s): %s",
+                    job.job_id,
+                    job.aoi_name,
+                    exc,
+                )
                 job.zone_state.status = "failed"
                 job.zone_state.error = str(exc)
                 if not job.error:
