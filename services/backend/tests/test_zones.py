@@ -154,45 +154,11 @@ def _run_prepare_with_counts(
     return artifacts, metadata
 
 
-def test_percentile_thresholds_raise_when_stability_removes_all_pixels(monkeypatch):
-    class _FakeList(list):
-        def map(self, func):
-            return _FakeList([func(item) for item in self])
-
-    class _FakeKeys:
-        def getInfo(self):
-            return []
-
-    class _FakeDictionary:
-        def keys(self):
-            return _FakeKeys()
-
-        def get(self, _name):  # pragma: no cover - not used when raising
-            return None
-
-    class _FakeImage:
-        def reduceRegion(self, **_kwargs):
-            return _FakeDictionary()
-
-    class _FakeEE:
-        class Reducer:
-            @staticmethod
-            def percentile(percentiles, names):  # pragma: no cover - passthrough stub
-                return {"percentiles": percentiles, "names": names}
-
-        @staticmethod
-        def List(values):
-            return _FakeList(list(values))
-
-        @staticmethod
-        def Number(value):  # pragma: no cover - not used when raising
-            return value
-
-    fake_ee = _FakeEE()
-    monkeypatch.setattr(zones, "ee", fake_ee)
+def test_percentile_thresholds_raise_when_stability_removes_all_pixels():
+    percentiles = [20, 40, 60, 80]
 
     with pytest.raises(ValueError) as excinfo:
-        zones._percentile_thresholds(_FakeImage(), geometry=object(), n_classes=5)
+        zones._percentile_thresholds({}, percentiles, "ndvi_mean")
 
     assert str(excinfo.value) == zones.STABILITY_MASK_EMPTY_ERROR
 
@@ -321,6 +287,14 @@ def test_build_percentile_zones_includes_all_requested_classes(monkeypatch):
         def clip(self, _geometry):
             return self
 
+        def reduceRegion(self, **_kwargs):
+            class _FakeResult:
+                @staticmethod
+                def getInfo():
+                    return {}
+
+            return _FakeResult()
+
     fake_thresholds = _FakeList([0.2, 0.4, 0.5])
     mean_image = _FakeImage([0.1, 0.3, 0.5, 0.6])
     stability_mask = _FakeImage([1, 1, 1, 1])
@@ -331,13 +305,19 @@ def test_build_percentile_zones_includes_all_requested_classes(monkeypatch):
         Number=lambda value: _FakeNumber(value),
         String=lambda value: str(value),
         Image=lambda image: image,
+        Reducer=SimpleNamespace(
+            percentile=lambda percentiles, outputNames=None: {
+                "percentiles": percentiles,
+                "outputNames": outputNames,
+            }
+        ),
     )
 
     monkeypatch.setattr(zones, "ee", fake_ee)
     monkeypatch.setattr(
         zones,
         "_percentile_thresholds",
-        lambda _image, _geometry, _n_classes: fake_thresholds,
+        lambda _reducer, _percentiles, _label: fake_thresholds,
     )
     monkeypatch.setattr(
         zones,
@@ -800,8 +780,25 @@ def test_percentile_thresholds_accepts_band_prefixed_keys():
         "some_other_key": 2.0,
     }
     from app.services.zones import _percentile_thresholds
-    th = _percentile_thresholds(reducer_dict, n_classes=5)
+    percentiles = [20, 40, 60, 80]
+    th = _percentile_thresholds(reducer_dict, percentiles, "ndvi_mean")
     assert th == [0.12, 0.21, 0.33, 0.47]
+
+
+def test_percentile_thresholds_accepts_default_percentile_keys():
+    reducer_dict = {
+        "p20": 0.11,
+        "ndvi_mean_p40": 0.22,
+        "p60": 0.36,
+        "ndvi_mean_p80": 0.49,
+    }
+
+    from app.services.zones import _percentile_thresholds
+
+    percentiles = [20, 40, 60, 80]
+    thresholds = _percentile_thresholds(reducer_dict, percentiles, "ndvi_mean")
+
+    assert thresholds == [0.11, 0.22, 0.36, 0.49]
 
 def test_simplify_vectors_sets_area_and_buffer(monkeypatch):
     class _FakeNumber:
