@@ -576,17 +576,23 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
     )
 
     def fake_export_selected_period_zones(
-        aoi_geojson,
-        aoi_name,
-        months,
+        aoi_geojson_or_geom,
         *,
-        start_date=None,
-        end_date=None,
+        months,
+        aoi_name,
+        destination,
         geometry=None,
+        min_mapping_unit_ha,
+        include_stats=True,
+        simplify_tolerance_m=5,
         **kwargs,
     ):
-        captured["aoi_geojson"] = aoi_geojson
+        captured["aoi_geojson"] = aoi_geojson_or_geom
         captured["geometry"] = geometry
+        captured["destination"] = destination
+        captured["min_mapping_unit_ha"] = min_mapping_unit_ha
+        captured["include_stats"] = include_stats
+        captured["simplify_tolerance_m"] = simplify_tolerance_m
         captured["kwargs"] = kwargs
         return {
             "artifacts": artifacts,
@@ -636,7 +642,8 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
     assert job.zone_state.metadata.get("mmu_applied") is False
     assert captured["aoi_geojson"] is job.aoi_geojson
     assert captured["geometry"] is geometry_sentinel
-    assert captured["kwargs"]["mmu_ha"] == job.zone_config.min_mapping_unit_ha
+    assert captured["destination"] == "zip"
+    assert captured["min_mapping_unit_ha"] == job.zone_config.min_mapping_unit_ha
 
     exports._process_zip_exports(job)
 
