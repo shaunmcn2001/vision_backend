@@ -154,6 +154,128 @@ def _run_prepare_with_counts(
     return artifacts, metadata
 
 
+def test_classify_by_percentiles_uses_list_iterate(monkeypatch):
+    thresholds = [0.2, 0.4, 0.6, 0.8]
+    context: dict[str, Any] = {}
+
+    class FakeString:
+        def __init__(self, value: str):
+            self.value = value
+
+        def getInfo(self):
+            return self.value
+
+        def __str__(self) -> str:  # pragma: no cover - debug aid
+            return self.value
+
+    class FakeNumber:
+        def __init__(self, value):
+            self.value = float(value)
+
+        def getInfo(self):  # pragma: no cover - parity with ee.Number
+            return self.value
+
+        def __float__(self):
+            return self.value
+
+    class FakeBandNames:
+        def __init__(self, names: list[str]):
+            self._names = names
+
+        def get(self, index: int):
+            return self._names[index]
+
+    class FakeImage:
+        def __init__(self, value: float):
+            self.value = float(value)
+            self.renamed_to: str | None = None
+
+        def bandNames(self):
+            return FakeBandNames(["ndvi"])
+
+        def rename(self, name):
+            self.renamed_to = str(name)
+            return self
+
+        def reduceRegion(self, reducer, **_kwargs):
+            context["reducer_percentiles"] = getattr(reducer, "percentiles", [])
+            values = {
+                name: thresholds[idx]
+                for idx, name in enumerate(getattr(reducer, "outputNames", []))
+            }
+            return SimpleNamespace(getInfo=lambda: values)
+
+        def multiply(self, factor):
+            other = factor.value if isinstance(factor, FakeImage) else float(factor)
+            return FakeImage(self.value * other)
+
+        def gt(self, threshold):
+            compare = threshold.value if isinstance(threshold, FakeNumber) else float(threshold)
+            return FakeImage(1.0 if self.value > compare else 0.0)
+
+        def add(self, other):
+            addend = other.value if isinstance(other, FakeImage) else float(other)
+            return FakeImage(self.value + addend)
+
+        def addBands(self, _band):  # pragma: no cover - not used in this test
+            return self
+
+        def toInt(self):
+            return self
+
+    class FakeReducer:
+        def __init__(self, percentiles, outputNames):
+            if isinstance(percentiles, FakeList):
+                percentiles = list(percentiles.values)
+            self.percentiles = percentiles
+            self.outputNames = outputNames
+
+    class FakeList:
+        def __init__(self, values):
+            self.values = list(values)
+            context["list_values"] = list(values)
+
+        def iterate(self, func, first):
+            context["list_iterate_called"] = True
+            result = first
+            for value in self.values:
+                result = func(result, value)
+            return result
+
+    class FakeEE:
+        class Reducer:
+            @staticmethod
+            def percentile(percentiles, outputNames=None):
+                return FakeReducer(percentiles, outputNames or [])
+
+        @staticmethod
+        def List(values):
+            return FakeList(values)
+
+        @staticmethod
+        def Number(value):
+            return FakeNumber(value)
+
+        @staticmethod
+        def String(value):
+            return FakeString(value)
+
+        @staticmethod
+        def Image(value):
+            if isinstance(value, FakeImage):
+                return value
+            return FakeImage(value)
+
+    image = FakeImage(0.5)
+    monkeypatch.setattr(zones, "ee", FakeEE)
+
+    classified, pct_thresholds = zones._classify_by_percentiles(image, geometry=object(), n_classes=5)
+
+    assert pct_thresholds == thresholds
+    assert context.get("list_iterate_called") is True
+    assert isinstance(classified, FakeImage)
+    assert classified.value == 3.0  # 2 thresholds exceeded -> zone id 3
+
 def test_percentile_thresholds_raise_when_stability_removes_all_pixels():
     percentiles = [20, 40, 60, 80]
 
