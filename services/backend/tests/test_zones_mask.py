@@ -275,6 +275,9 @@ def test_stability_mask_fallback_prevents_empty_error(monkeypatch):
     assert getattr(mask, "is_pass_through", False)
 
     class _FakeZoneImage:
+        def __init__(self, properties: dict[str, object]):
+            self._properties = properties
+
         def updateMask(self, *_args, **_kwargs):
             return self
 
@@ -287,35 +290,38 @@ def test_stability_mask_fallback_prevents_empty_error(monkeypatch):
         def rename(self, _name):
             return self
 
+        def get(self, name):
+            if name not in self._properties:
+                return None
+            value = self._properties[name]
+
+            class _InfoWrapper:
+                def __init__(self, info):
+                    self._info = info
+
+                def getInfo(self):  # pragma: no cover - trivial
+                    return self._info
+
+            return _InfoWrapper(value)
+
     class _FakeZoneVectors:
         pass
 
-    def _fake_prepare_selected_period_artifacts(
-        aoi_geojson,
+    def _fake_build_zone_artifacts(
+        aoi_geojson_or_geom,
         *,
-        geometry,
         months,
-        start_date,
-        end_date,
-        cloud_prob_max,
-        n_classes,
-        cv_mask_threshold,
-        apply_stability_mask,
-        min_mapping_unit_ha,
-        smooth_radius_m,
-        open_radius_m,
-        close_radius_m,
-        simplify_tol_m,
-        simplify_buffer_m,
-        method,
-        sample_size,
         include_stats,
+        **_kwargs,
     ):
-        thresholds_to_try = [cv_mask_threshold]
+        assert months == ["2024-01"]
+        assert include_stats is False
+
+        thresholds_to_try = [zones.DEFAULT_CV_THRESHOLD]
         thresholds_to_try.extend(
             fallback
             for fallback in zones.STABILITY_THRESHOLD_SEQUENCE
-            if fallback > cv_mask_threshold + 1e-9
+            if fallback > zones.DEFAULT_CV_THRESHOLD + 1e-9
         )
         stability = zones._stability_mask(
             _FakeCVImage(total_pixels, survivors_by_threshold),
@@ -335,25 +341,24 @@ def test_stability_mask_fallback_prevents_empty_error(monkeypatch):
         if stability_count <= 0:
             raise ValueError(zones.STABILITY_MASK_EMPTY_ERROR)
 
-        artifacts = zones.ZoneArtifacts(
-            zone_image=_FakeZoneImage(),
+        zone_image = _FakeZoneImage(
+            {
+                "months_used": months,
+                "months_skipped": [],
+                "thresholds": [0.2, 0.4, 0.6],
+                "palette": ["#123456", "#abcdef"],
+                "stability": {"thresholds_tested": thresholds_to_try},
+            }
+        )
+
+        return zones.ZoneArtifacts(
+            zone_image=zone_image,
             zone_vectors=_FakeZoneVectors(),
             zonal_stats=None,
             geometry=geometry,
         )
-        metadata = {
-            "used_months": list(months),
-            "skipped_months": [],
-            "mmu_applied": True,
-            "percentile_thresholds": [0.2, 0.4, 0.6],
-        }
-        return artifacts, metadata
 
-    monkeypatch.setattr(
-        zones,
-        "_prepare_selected_period_artifacts",
-        _fake_prepare_selected_period_artifacts,
-    )
+    monkeypatch.setattr(zones, "build_zone_artifacts", _fake_build_zone_artifacts)
 
     result = zones.export_selected_period_zones(
         aoi_geojson={"type": "Polygon", "coordinates": []},
