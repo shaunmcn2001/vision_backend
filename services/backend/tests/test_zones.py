@@ -923,6 +923,101 @@ def test_percentile_thresholds_accepts_default_percentile_keys():
 
     assert thresholds == [0.11, 0.22, 0.36, 0.49]
 
+
+def test_normalise_feature_uses_scalar_results(monkeypatch):
+    class _FakeNumber:
+        def __init__(self, value):
+            if isinstance(value, _FakeNumber):
+                value = value.value
+            self.value = float(value)
+
+        def max(self, other):
+            other_value = other.value if isinstance(other, _FakeNumber) else float(other)
+            return _FakeNumber(max(self.value, other_value))
+
+    class _FakeList:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def get(self, index, default=None):
+            try:
+                return self._items[index]
+            except IndexError:
+                return default
+
+    class _FakeDictionary:
+        def __init__(self, mapping):
+            self._mapping = dict(mapping)
+
+        def values(self):
+            return _FakeList(self._mapping.values())
+
+    class _FakeReducer:
+        def __init__(self, name):
+            self.name = name
+
+    class _FakeEE:
+        class Reducer:
+            @staticmethod
+            def mean():
+                return _FakeReducer("mean")
+
+            @staticmethod
+            def stdDev():
+                return _FakeReducer("stdDev")
+
+        class Image:
+            @staticmethod
+            def constant(_value):  # pragma: no cover - enforced by test
+                raise AssertionError("ee.Image.constant should not be called")
+
+        Number = staticmethod(_FakeNumber)
+
+    class _FakeBandNames:
+        def get(self, index):
+            assert index == 0
+            return "NDVI_mean"
+
+    class _FakeImage:
+        def __init__(self):
+            self.subtracted = None
+            self.divided_by = None
+            self.renamed_to = None
+
+        def bandNames(self):
+            return _FakeBandNames()
+
+        def reduceRegion(self, reducer, **_kwargs):
+            if reducer.name == "mean":
+                return _FakeDictionary({"NDVI_mean": 12})
+            if reducer.name == "stdDev":
+                return _FakeDictionary({"NDVI_mean": 3})
+            raise AssertionError(f"Unexpected reducer {reducer.name}")
+
+        def subtract(self, value):
+            self.subtracted = value
+            return self
+
+        def divide(self, value):
+            self.divided_by = value
+            return self
+
+        def rename(self, name):
+            self.renamed_to = name
+            return self
+
+    fake_image = _FakeImage()
+    monkeypatch.setattr(zones, "ee", _FakeEE())
+
+    result = zones._normalise_feature(fake_image, geometry=object(), name="NDVI_mean")
+
+    assert result is fake_image
+    assert isinstance(fake_image.subtracted, _FakeNumber)
+    assert fake_image.subtracted.value == pytest.approx(12.0)
+    assert isinstance(fake_image.divided_by, _FakeNumber)
+    assert fake_image.divided_by.value == pytest.approx(3.0)
+    assert fake_image.renamed_to == "norm_NDVI_mean"
+
 def test_simplify_vectors_sets_area_and_buffer(monkeypatch):
     class _FakeNumber:
         def __init__(self, value):

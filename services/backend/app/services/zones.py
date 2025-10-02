@@ -848,7 +848,19 @@ def _build_percentile_zones(
 
 
 def _normalise_feature(mean_image: ee.Image, geometry: ee.Geometry, name: str) -> ee.Image:
-    band_name = ee.String(mean_image.bandNames().get(0))
+    def _first_value(result: Mapping[str, object] | object) -> object:
+        if isinstance(result, Mapping):
+            for value in result.values():
+                return value
+            return 0
+        values = getattr(result, "values", lambda: [])()
+        if hasattr(values, "get"):
+            return values.get(0, 0)
+        try:
+            return values[0]
+        except (TypeError, KeyError, IndexError, AttributeError):  # pragma: no cover - defensive
+            return 0
+
     stats = mean_image.reduceRegion(
         reducer=ee.Reducer.mean(),
         geometry=geometry,
@@ -865,9 +877,9 @@ def _normalise_feature(mean_image: ee.Image, geometry: ee.Geometry, name: str) -
         tileScale=4,
         maxPixels=gee.MAX_PIXELS,
     )
-    mean_value = ee.Number(stats.get(band_name, 0))
-    std_value = ee.Number(std_stats.get(band_name, 0)).max(1e-6)
-    return mean_image.subtract(mean_value).divide(ee.Image.constant(std_value)).rename(f"norm_{name}")
+    mean_value = ee.Number(_first_value(stats))
+    std_value = ee.Number(_first_value(std_stats)).max(1e-6)
+    return mean_image.subtract(mean_value).divide(std_value).rename(f"norm_{name}")
 
 
 def _rank_zones(cluster_image: ee.Image, ndvi_mean: ee.Image, geometry: ee.Geometry) -> ee.Image:
