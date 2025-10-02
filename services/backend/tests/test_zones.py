@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import date
 from types import SimpleNamespace
 from typing import Any
@@ -8,6 +10,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.zones import ProductionZonesRequest, create_production_zones
+from app.main import app
 from app.services import zones
 
 
@@ -540,7 +543,34 @@ def test_production_zones_request_rejects_inverted_dates():
 
 
 def test_create_production_zones_endpoint(monkeypatch):
-    def _fake_export(_aoi, _name, months, *, start_date=None, end_date=None, **kwargs):
+    captured: dict[str, Any] = {}
+    artifacts = object()
+
+    def _fake_export(
+        aoi_geojson_or_geom,
+        *,
+        months,
+        aoi_name,
+        destination,
+        start_date=None,
+        end_date=None,
+        min_mapping_unit_ha,
+        include_stats,
+        simplify_tolerance_m,
+        gcs_bucket=None,
+        gcs_prefix=None,
+        **kwargs,
+    ):
+        captured["aoi_geojson"] = aoi_geojson_or_geom
+        captured["months"] = list(months)
+        captured["aoi_name"] = aoi_name
+        captured["destination"] = destination
+        captured["min_mapping_unit_ha"] = min_mapping_unit_ha
+        captured["include_stats"] = include_stats
+        captured["simplify_tolerance_m"] = simplify_tolerance_m
+        captured["gcs_bucket"] = gcs_bucket
+        captured["gcs_prefix"] = gcs_prefix
+        captured["extra"] = kwargs
         assert start_date == date(2024, 3, 1)
         assert end_date == date(2024, 5, 31)
         return {
@@ -555,15 +585,10 @@ def test_create_production_zones_endpoint(monkeypatch):
                 },
                 "zonal_stats": "zones/PROD_202403_202405_demo_zones_zonal_stats.csv",
             },
-            "tasks": {
-                "raster": {"id": "task_r", "state": "READY", "destination_uri": "gs://zones/demo.tif"},
-                "vectors": {"id": "task_v", "state": "READY", "destination_uri": "gs://zones/demo.shp"},
-                "zonal_stats": {"id": "task_s", "state": "READY", "destination_uri": "gs://zones/demo.csv"},
-            },
+            "tasks": {},
             "metadata": {
-                "used_months": months,
+                "used_months": list(months),
                 "skipped_months": ["2024-04"],
-                "mmu_applied": True,
                 "palette": list(zones.ZONE_PALETTE[:5]),
                 "percentile_thresholds": [0.1, 0.2, 0.3, 0.4],
                 "stability": {
@@ -590,9 +615,9 @@ def test_create_production_zones_endpoint(monkeypatch):
                 },
             },
             "prefix": "zones/PROD_202403_202405_demo_zones",
-            "bucket": "zones-bucket",
             "palette": list(zones.ZONE_PALETTE[:5]),
             "thresholds": [0.1, 0.2, 0.3, 0.4],
+            "artifacts": artifacts,
         }
 
     monkeypatch.setattr(zones, "export_selected_period_zones", _fake_export)
@@ -605,17 +630,30 @@ def test_create_production_zones_endpoint(monkeypatch):
     )
 
     response = create_production_zones(request)
+    assert captured["aoi_geojson"] == request.aoi_geojson
+    assert captured["months"] == ["2024-03", "2024-05"]
+    assert captured["aoi_name"] == "Demo"
+    assert captured["destination"] == "zip"
+    assert captured["min_mapping_unit_ha"] == request.mmu_ha
+    assert captured["include_stats"] is True
+    assert captured["simplify_tolerance_m"] == request.simplify_tol_m
+    assert captured["gcs_bucket"] is None
+    assert captured["gcs_prefix"] is None
+    assert captured["extra"]["cloud_prob_max"] == request.cloud_prob_max
+    assert captured["extra"]["n_classes"] == request.n_classes
+    assert captured["extra"]["cv_mask_threshold"] == request.cv_mask_threshold
+    assert captured["extra"]["smooth_radius_m"] == request.smooth_radius_m
+    assert captured["extra"]["open_radius_m"] == request.open_radius_m
+    assert captured["extra"]["close_radius_m"] == request.close_radius_m
+    assert captured["extra"]["simplify_buffer_m"] == request.simplify_buffer_m
+
     assert response["ok"] is True
     assert response["ym_start"] == "2024-03"
     assert response["ym_end"] == "2024-05"
     assert response["paths"]["raster"].endswith("demo_zones.tif")
     assert response["paths"]["vector_components"]["dbf"].endswith("demo_zones.dbf")
     assert response["prefix"].endswith("demo_zones")
-
-    raster_task = response["tasks"]["raster"]
-    assert raster_task["id"] == "task_r"
-    assert raster_task["state"] == "READY"
-    assert raster_task["destination_uri"].endswith("demo.tif")
+    assert response["tasks"] == {}
 
     debug = response["debug"]
     assert debug["requested_months"] == ["2024-03", "2024-05"]
@@ -674,10 +712,20 @@ def test_create_production_zones_requires_bucket_for_gcs(monkeypatch):
 def test_create_production_zones_with_range_request(monkeypatch):
     captured = {}
 
-    def _fake_export(_aoi, _name, months, *, start_date=None, end_date=None, **_kwargs):
-        captured["months"] = months
+    def _fake_export(
+        aoi_geojson_or_geom,
+        *,
+        months,
+        aoi_name,
+        destination,
+        start_date=None,
+        end_date=None,
+        **_kwargs,
+    ):
+        captured["months"] = list(months)
         captured["start_date"] = start_date
         captured["end_date"] = end_date
+        captured["destination"] = destination
         return {
             "paths": {},
             "tasks": {},
@@ -699,6 +747,7 @@ def test_create_production_zones_with_range_request(monkeypatch):
     assert captured["months"] == ["2024-01", "2024-02"]
     assert captured["start_date"] == date(2024, 1, 1)
     assert captured["end_date"] == date(2024, 2, 29)
+    assert captured["destination"] == "zip"
     assert response["debug"]["requested_months"] == ["2024-01", "2024-02"]
     assert response["debug"]["stability"] is None
 
@@ -706,10 +755,20 @@ def test_create_production_zones_with_range_request(monkeypatch):
 def test_create_production_zones_with_date_request(monkeypatch):
     captured = {}
 
-    def _fake_export(_aoi, _name, months, *, start_date=None, end_date=None, **_kwargs):
-        captured["months"] = months
+    def _fake_export(
+        aoi_geojson_or_geom,
+        *,
+        months,
+        aoi_name,
+        destination,
+        start_date=None,
+        end_date=None,
+        **_kwargs,
+    ):
+        captured["months"] = list(months)
         captured["start_date"] = start_date
         captured["end_date"] = end_date
+        captured["destination"] = destination
         return {
             "paths": {},
             "tasks": {},
@@ -731,8 +790,105 @@ def test_create_production_zones_with_date_request(monkeypatch):
     assert captured["months"] == ["2024-03", "2024-04"]
     assert captured["start_date"] == date(2024, 3, 10)
     assert captured["end_date"] == date(2024, 4, 5)
+    assert captured["destination"] == "zip"
     assert response["debug"]["requested_months"] == ["2024-03", "2024-04"]
     assert response["debug"]["stability"] is None
+
+
+def test_production_zones_endpoint_returns_200(monkeypatch):
+    artifacts = object()
+
+    def _fake_export(
+        aoi_geojson_or_geom,
+        *,
+        months,
+        aoi_name,
+        destination,
+        min_mapping_unit_ha,
+        include_stats,
+        simplify_tolerance_m,
+        **_kwargs,
+    ):
+        assert destination == "zip"
+        return {
+            "prefix": "Field_2024-01_zones",
+            "paths": {
+                "raster": "Field_2024-01_zones.tif",
+                "vectors": "Field_2024-01_zones.shp",
+                "vector_components": {},
+                "zonal_stats": None,
+            },
+            "tasks": {},
+            "metadata": {"used_months": list(months), "skipped_months": []},
+            "artifacts": artifacts,
+        }
+
+    monkeypatch.setattr(zones, "export_selected_period_zones", _fake_export)
+
+    payload = {
+        "aoi_geojson": _sample_polygon(),
+        "aoi_name": "Field",
+        "months": ["2024-01"],
+        "n_classes": 5,
+    }
+
+    async def _post_json(path: str, body: dict[str, object]) -> tuple[int, bytes]:
+        await app.router.startup()
+        messages: list[dict[str, object]] = []
+        try:
+            raw_body = json.dumps(body).encode("utf-8")
+            body_sent = False
+
+            async def receive() -> dict[str, object]:
+                nonlocal body_sent
+                if not body_sent:
+                    body_sent = True
+                    return {"type": "http.request", "body": raw_body, "more_body": False}
+                await asyncio.sleep(0)
+                return {"type": "http.disconnect"}
+
+            async def send(message: dict[str, object]) -> None:
+                messages.append(message)
+
+            scope = {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "POST",
+                "path": path,
+                "root_path": "",
+                "scheme": "http",
+                "client": ("testclient", 50000),
+                "server": ("testserver", 80),
+                "headers": [
+                    (b"host", b"testserver"),
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(raw_body)).encode("ascii")),
+                ],
+                "query_string": b"",
+                "asgi": {"version": "3.0", "spec_version": "2.3"},
+            }
+
+            await app(scope, receive, send)
+        finally:
+            await app.router.shutdown()
+
+        status = 500
+        body_bytes = b""
+        for message in messages:
+            if message.get("type") == "http.response.start":
+                status = int(message.get("status", 0))
+            elif message.get("type") == "http.response.body":
+                body_bytes += message.get("body", b"")
+        return status, body_bytes
+
+    status, body_bytes = asyncio.run(
+        _post_json("/api/zones/production", payload)
+    )
+
+    assert status == 200
+    body = json.loads(body_bytes.decode("utf-8"))
+    assert body["ok"] is True
+    assert body["paths"]["raster"].endswith(".tif")
 
 
 def test_prepare_selected_period_artifacts_reports_stability(monkeypatch):

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any, Dict, List, Mapping, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import ee
+
+from app import gee
+from app.services import zonesold as _legacy_zones
 
 CLOUD_PROB_MAX = 40
 N_CLASSES = 5
@@ -91,7 +94,10 @@ def _ensure_number(x: Any, context: str = "") -> ee.Number:
 def _to_geometry(aoi_geojson_or_geom: Union[dict, ee.Geometry]) -> ee.Geometry:
     """Normalise GeoJSON/feature inputs to :class:`ee.Geometry`."""
 
-    if isinstance(aoi_geojson_or_geom, ee.Geometry):
+    ee_geometry_type = getattr(ee, "Geometry", None)
+    if isinstance(ee_geometry_type, type) and isinstance(
+        aoi_geojson_or_geom, ee_geometry_type
+    ):
         return aoi_geojson_or_geom
 
     if not isinstance(aoi_geojson_or_geom, Mapping):
@@ -689,11 +695,7 @@ def _sanitize_name(name: str) -> str:
 
 
 def export_prefix(aoi_name: str, months: Sequence[str]) -> str:
-    month_list = sorted({m: None for m in months}.keys())
-    if not month_list:
-        raise ValueError("Months are required to build an export prefix.")
-    name = _sanitize_name(aoi_name)
-    return f"{name}_{'_'.join(month_list)}"
+    return _legacy_zones.export_prefix(aoi_name, months)
 
 
 def _export_image(
@@ -787,97 +789,318 @@ def _export_table(
 
 
 def export_selected_period_zones(
-    aoi_geojson_or_geom: Union[dict, ee.Geometry],
+    aoi_geojson_or_geom: Union[dict, ee.Geometry] | None = None,
     *,
     months: Sequence[str],
     aoi_name: str,
+    aoi_geojson: Union[dict, ee.Geometry] | None = None,
     destination: str = "drive",
     drive_folder: str | None = None,
     gcs_bucket: str | None = None,
+    gcs_prefix: str | None = None,
     raster_filename: str | None = None,
     vector_filename: str | None = None,
     stats_filename: str | None = None,
     include_stats: bool = True,
+    geometry: ee.Geometry | None = None,
     **build_kwargs: Any,
 ) -> Dict[str, Any]:
-    build_include_stats = bool(build_kwargs.get("include_stats", include_stats))
-    build_kwargs = {**build_kwargs, "include_stats": build_include_stats}
+    if aoi_geojson_or_geom is None:
+        if aoi_geojson is not None:
+            aoi_geojson_or_geom = aoi_geojson
+        elif "aoi_geojson" in build_kwargs:
+            aoi_geojson_or_geom = build_kwargs.pop("aoi_geojson")
+
+    legacy_destination = build_kwargs.pop("export_target", None)
+    destination_value = destination
+    if legacy_destination is not None and (
+        not destination_value or destination_value == "drive"
+    ):
+        destination_value = str(legacy_destination)
+
+    if "mmu_ha" in build_kwargs and "min_mapping_unit_ha" not in build_kwargs:
+        build_kwargs["min_mapping_unit_ha"] = build_kwargs.pop("mmu_ha")
+
+    if "include_zonal_stats" in build_kwargs:
+        include_stats = bool(build_kwargs.pop("include_zonal_stats"))
+
+    if "simplify_tol_m" in build_kwargs and "simplify_tolerance_m" not in build_kwargs:
+        build_kwargs["simplify_tolerance_m"] = build_kwargs.pop("simplify_tol_m")
+
+    if gcs_prefix is None and "gcs_prefix" in build_kwargs:
+        gcs_prefix = build_kwargs.pop("gcs_prefix")
+
+    if geometry is None and "geometry" in build_kwargs:
+        geometry = build_kwargs.pop("geometry")
+    else:
+        build_kwargs.pop("geometry", None)
+
+    build_kwargs.pop("start_date", None)
+    build_kwargs.pop("end_date", None)
+
+    build_include_stats = bool(build_kwargs.pop("include_stats", include_stats))
+    build_kwargs["include_stats"] = build_include_stats
+
+    destination = (destination_value or "drive").strip().lower()
+    if destination not in {"drive", "gcs", "zip"}:
+        raise ValueError("destination must be one of drive, gcs, or zip")
+
+    cleaned_prefix: Optional[str] = None
+    if gcs_prefix is not None:
+        trimmed = gcs_prefix.strip().strip("/")
+        cleaned_prefix = trimmed or None
+
+    if aoi_geojson_or_geom is None:
+        raise TypeError("aoi_geojson_or_geom must be provided")
+
+    aoi_input: Union[dict, ee.Geometry, None] = aoi_geojson_or_geom
+    if aoi_input is None:
+        aoi_input = geometry
 
     artifacts = build_zone_artifacts(
-        aoi_geojson_or_geom,
+        aoi_input,
         months=months,
         **build_kwargs,
     )
 
-    prefix = export_prefix(aoi_name, months)
-    raster_name = raster_filename or f"{prefix}_zones"
-    vector_name = vector_filename or f"{prefix}_zones"
-    stats_name = stats_filename or f"{prefix}_stats"
+    export_geometry = geometry or artifacts.geometry
+    prefix_root = export_prefix(aoi_name, months)
+    raster_base = raster_filename or f"{prefix_root}_zones"
+    vector_base = vector_filename or f"{prefix_root}_zones"
+    stats_base = stats_filename or f"{prefix_root}_stats"
 
-    image_task = _export_image(
-        artifacts.zone_image,
-        artifacts.geometry,
-        destination=destination,
-        prefix=prefix,
-        filename=raster_name,
-        drive_folder=drive_folder,
-        gcs_bucket=gcs_bucket,
-    )
+    def _apply_gcs_prefix(name: str) -> str:
+        if not cleaned_prefix:
+            return name
+        return f"{cleaned_prefix}/{name}"
 
-    vector_task = _export_table(
-        artifacts.zone_vectors,
-        destination=destination,
-        prefix=prefix,
-        filename=vector_name,
-        drive_folder=drive_folder,
-        gcs_bucket=gcs_bucket,
-        file_format="SHP",
-        selectors=["zone", "zone_id", "area_m2", "area_ha"],
-    )
+    tasks: Dict[str, Any] = {}
+    paths: Dict[str, Any] = {}
 
-    stats_task = None
-    if build_include_stats and artifacts.zonal_stats is not None:
-        stats_task = _export_table(
-            artifacts.zonal_stats,
+    if destination == "zip":
+        vector_components = {
+            "shp": f"{vector_base}.shp",
+            "dbf": f"{vector_base}.dbf",
+            "shx": f"{vector_base}.shx",
+            "prj": f"{vector_base}.prj",
+        }
+        paths = {
+            "raster": f"{raster_base}.tif",
+            "vectors": vector_components["shp"],
+            "vector_components": vector_components,
+            "zonal_stats": (
+                f"{stats_base}.csv"
+                if build_include_stats and artifacts.zonal_stats is not None
+                else None
+            ),
+        }
+    else:
+        raster_target = raster_base
+        vector_target = vector_base
+        stats_target = stats_base
+        if destination == "gcs":
+            if not gcs_bucket:
+                raise ValueError(
+                    "gcs_bucket must be provided for Cloud Storage exports."
+                )
+            raster_target = _apply_gcs_prefix(raster_base)
+            vector_target = _apply_gcs_prefix(vector_base)
+            stats_target = _apply_gcs_prefix(stats_base)
+
+        image_task = _export_image(
+            artifacts.zone_image,
+            export_geometry,
             destination=destination,
-            prefix=prefix,
-            filename=stats_name,
+            prefix=prefix_root,
+            filename=raster_target,
             drive_folder=drive_folder,
             gcs_bucket=gcs_bucket,
-            file_format="CSV",
-            selectors=[
-                "zone",
-                "zone_id",
-                "area_m2",
-                "area_ha",
-                "NDVI_mean",
-                "NDVI_median",
-                "NDVI_stdDev",
-                "NDVI_cv",
-            ],
         )
 
-    def _get_property(name: str, default: Any = None) -> Any:
-        value = artifacts.zone_image.get(name)
-        return value.getInfo() if value is not None else default
+        vector_task = _export_table(
+            artifacts.zone_vectors,
+            destination=destination,
+            prefix=prefix_root,
+            filename=vector_target,
+            drive_folder=drive_folder,
+            gcs_bucket=gcs_bucket,
+            file_format="SHP",
+            selectors=["zone", "zone_id", "area_m2", "area_ha"],
+        )
 
-    metadata = {
-        "months_used": _get_property("months_used", []),
-        "months_skipped": _get_property("months_skipped", []),
-        "thresholds": _get_property("thresholds", []),
-        "palette": _get_property("palette", []),
-        "stability": _get_property("stability", {}),
-    }
+        stats_task = None
+        if build_include_stats and artifacts.zonal_stats is not None:
+            stats_task = _export_table(
+                artifacts.zonal_stats,
+                destination=destination,
+                prefix=prefix_root,
+                filename=stats_target,
+                drive_folder=drive_folder,
+                gcs_bucket=gcs_bucket,
+                file_format="CSV",
+                selectors=[
+                    "zone",
+                    "zone_id",
+                    "area_m2",
+                    "area_ha",
+                    "NDVI_mean",
+                    "NDVI_median",
+                    "NDVI_stdDev",
+                    "NDVI_cv",
+                ],
+            )
 
-    return {
-        "prefix": prefix,
-        "destination": destination,
-        "tasks": {
+        tasks = {
             "raster": image_task,
             "vector": vector_task,
             "stats": stats_task,
-        },
-        "metadata": metadata,
+        }
+
+        if destination == "gcs":
+            vector_components = {
+                "shp": f"gs://{gcs_bucket}/{vector_target}.shp",
+                "dbf": f"gs://{gcs_bucket}/{vector_target}.dbf",
+                "shx": f"gs://{gcs_bucket}/{vector_target}.shx",
+                "prj": f"gs://{gcs_bucket}/{vector_target}.prj",
+            }
+            paths = {
+                "raster": f"gs://{gcs_bucket}/{raster_target}.tif",
+                "vectors": vector_components["shp"],
+                "vector_components": vector_components,
+                "zonal_stats": (
+                    f"gs://{gcs_bucket}/{stats_target}.csv"
+                    if build_include_stats and artifacts.zonal_stats is not None
+                    else None
+                ),
+            }
+        else:
+            paths = {
+                "raster": image_task["path"],
+                "vectors": vector_task["path"],
+                "vector_components": None,
+                "zonal_stats": stats_task["path"] if stats_task else None,
+            }
+
+    def _get_property(name: str, default: Any = None) -> Any:
+        value = artifacts.zone_image.get(name)
+        if value is None:
+            return default
+        info = value.getInfo()
+        return default if info is None else info
+
+    used_months = list(_get_property("months_used", list(months)))
+    skipped_months = list(_get_property("months_skipped", []))
+    thresholds = list(_get_property("thresholds", []))
+    palette = list(_get_property("palette", []))
+    stability = _get_property("stability", {}) or {}
+
+    metadata = {
+        "months_used": used_months,
+        "used_months": used_months,
+        "months_skipped": skipped_months,
+        "skipped_months": skipped_months,
+        "thresholds": thresholds,
+        "percentile_thresholds": thresholds,
+        "palette": palette,
+        "stability": stability,
     }
+
+    prefix_value = (
+        _apply_gcs_prefix(raster_base) if destination == "gcs" else raster_base
+    )
+
+    result: Dict[str, Any] = {
+        "prefix": prefix_value,
+        "destination": destination,
+        "paths": paths,
+        "tasks": tasks,
+        "metadata": metadata,
+        "artifacts": artifacts,
+    }
+
+    if palette:
+        result["palette"] = palette
+    if thresholds:
+        result["thresholds"] = thresholds
+
+    if destination == "gcs":
+        result["bucket"] = gcs_bucket
+        if cleaned_prefix:
+            result["gcs_prefix"] = cleaned_prefix
+    elif destination == "drive" and drive_folder:
+        result["folder"] = drive_folder
+
+    return result
+
+
+_SYNC_NAMES = [
+    "_percentile_thresholds",
+    "_classify_by_percentiles",
+    "_build_percentile_zones",
+    "_build_composite_series",
+    "_compute_ndvi",
+    "_ndvi_temporal_stats",
+    "_stability_mask",
+    "_prepare_vectors",
+    "_apply_cleanup",
+    "_simplify_vectors",
+    "_normalise_feature",
+    "area_ha",
+    "_ordered_months",
+    "_connected_component_area",
+    "_pixel_count",
+    "_months_from_dates",
+]
+
+
+def _legacy_wrapper(name: str):
+    func = getattr(_legacy_zones, name)
+
+    def _wrapped(*args, **kwargs):
+        _legacy_zones.ee = ee
+        _legacy_zones.gee = gee
+        for attr in _SYNC_NAMES:
+            if attr in globals():
+                setattr(_legacy_zones, attr, globals()[attr])
+        return func(*args, **kwargs)
+
+    return _wrapped
+
+
+_percentile_thresholds = _legacy_wrapper("_percentile_thresholds")
+_classify_by_percentiles = _legacy_wrapper("_classify_by_percentiles")
+_build_percentile_zones = _legacy_wrapper("_build_percentile_zones")
+_build_composite_series = _legacy_wrapper("_build_composite_series")
+_compute_ndvi = _legacy_wrapper("_compute_ndvi")
+_ndvi_temporal_stats = _legacy_wrapper("_ndvi_temporal_stats")
+_stability_mask = _legacy_wrapper("_stability_mask")
+_prepare_vectors = _legacy_wrapper("_prepare_vectors")
+_apply_cleanup = _legacy_wrapper("_apply_cleanup")
+_normalise_feature = _legacy_wrapper("_normalise_feature")
+_simplify_vectors = _legacy_wrapper("_simplify_vectors")
+area_ha = _legacy_wrapper("area_ha")
+_ordered_months = _legacy_wrapper("_ordered_months")
+_connected_component_area = _legacy_wrapper("_connected_component_area")
+_pixel_count = _legacy_wrapper("_pixel_count")
+_months_from_dates = _legacy_wrapper("_months_from_dates")
+
+
+def _prepare_selected_period_artifacts(*args, **kwargs):
+    _legacy_zones.ee = ee
+    _legacy_zones.gee = gee
+    for attr in _SYNC_NAMES:
+        if attr in globals():
+            setattr(_legacy_zones, attr, globals()[attr])
+    artifacts, metadata = _legacy_zones._prepare_selected_period_artifacts(*args, **kwargs)
+    if isinstance(metadata, dict):
+        palette = metadata.get("palette")
+        if palette:
+            count = max(1, len(palette))
+            metadata["palette"] = list(ZONE_PALETTE[:count])
+    return artifacts, metadata
+resolve_export_bucket = _legacy_zones.resolve_export_bucket
+STABILITY_THRESHOLD_SEQUENCE = _legacy_zones.STABILITY_THRESHOLD_SEQUENCE
+STABILITY_MASK_EMPTY_ERROR = _legacy_zones.STABILITY_MASK_EMPTY_ERROR
+NDVI_MASK_EMPTY_ERROR = _legacy_zones.NDVI_MASK_EMPTY_ERROR
 
 

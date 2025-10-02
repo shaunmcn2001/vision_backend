@@ -229,26 +229,28 @@ def create_production_zones(request: ProductionZonesRequest):
                 detail="A GCS bucket must be provided when export_target is 'gcs'.",
             )
 
+    destination = request.export_target
+
     try:
         result = zone_service.export_selected_period_zones(
             request.aoi_geojson,
-            request.aoi_name,
-            request.months,
+            months=request.months,
+            aoi_name=request.aoi_name,
+            destination=destination,
             start_date=request.start_date,
             end_date=request.end_date,
             cloud_prob_max=request.cloud_prob_max,
             n_classes=request.n_classes,
             cv_mask_threshold=request.cv_mask_threshold,
-            mmu_ha=request.mmu_ha,
+            min_mapping_unit_ha=request.mmu_ha,
             smooth_radius_m=request.smooth_radius_m,
             open_radius_m=request.open_radius_m,
             close_radius_m=request.close_radius_m,
-            simplify_tol_m=request.simplify_tol_m,
+            simplify_tolerance_m=request.simplify_tol_m,
             simplify_buffer_m=request.simplify_buffer_m,
-            export_target=request.export_target,
             gcs_bucket=resolved_bucket,
             gcs_prefix=request.gcs_prefix,
-            include_zonal_stats=request.include_zonal_stats,
+            include_stats=request.include_zonal_stats,
             apply_stability_mask=request.apply_stability_mask,
         )
     except ValueError as exc:
