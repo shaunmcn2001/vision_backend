@@ -417,7 +417,7 @@ def test_build_percentile_zones_includes_all_requested_classes(monkeypatch):
 
             return _FakeResult()
 
-    fake_thresholds = _FakeList([0.2, 0.4, 0.5])
+    fake_thresholds = [0.2, 0.4, 0.5]
     mean_image = _FakeImage([0.1, 0.3, 0.5, 0.6])
     stability_mask = _FakeImage([1, 1, 1, 1])
     ndvi_stats = {"mean": mean_image, "stability": stability_mask}
@@ -459,6 +459,7 @@ def test_build_percentile_zones_includes_all_requested_classes(monkeypatch):
 
     assert zone_image.values == [1, 2, 3, 4]
     assert thresholds == [0.2, 0.4, 0.5]
+    assert all(isinstance(value, float) for value in thresholds)
 
 
 def test_export_prefix_formats_months_and_name():
