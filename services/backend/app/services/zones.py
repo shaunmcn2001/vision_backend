@@ -831,10 +831,8 @@ def _build_percentile_zones(
     ranked = ranked_full.updateMask(ndvi_stats["stability"])
 
     try:
-        percentile_thresholds: List[float] = [
-            float(value) for value in (thresholds.getInfo() or [])
-        ]
-    except Exception as exc:  # pragma: no cover
+        percentile_thresholds = [float(value) for value in thresholds]
+    except (TypeError, ValueError) as exc:  # pragma: no cover
         raise RuntimeError(f"Failed to evaluate NDVI percentile thresholds: {exc}") from exc
 
     cleaned = _apply_cleanup(
