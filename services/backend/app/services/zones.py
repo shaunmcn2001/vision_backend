@@ -651,7 +651,7 @@ def _classify_by_percentiles(
         gt_band = image.gt(t)
         return current_img.add(gt_band)
 
-    summed = ee.Image(thresholds).iterate(_accumulate, zero)
+    summed = ee.List(thresholds).iterate(_accumulate, zero)
     classified = ee.Image(summed).add(1).toInt()
 
     return classified.rename("zone"), thresholds
