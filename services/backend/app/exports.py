@@ -595,21 +595,21 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
     try:
         result = zone_service.export_selected_period_zones(
             job.aoi_geojson,
-            job.aoi_name,
-            job.months,
+            months=job.months,
+            aoi_name=job.aoi_name,
             geometry=job.geometry,
             cloud_prob_max=job.cloud_prob_max,
             n_classes=job.zone_config.n_classes,
             cv_mask_threshold=job.zone_config.cv_mask_threshold,
             apply_stability_mask=job.zone_config.apply_stability_mask,
-            mmu_ha=job.zone_config.min_mapping_unit_ha,
+            min_mapping_unit_ha=job.zone_config.min_mapping_unit_ha,
             smooth_radius_m=job.zone_config.smooth_radius_m,
             open_radius_m=job.zone_config.open_radius_m,
             close_radius_m=job.zone_config.close_radius_m,
-            simplify_tol_m=job.zone_config.simplify_tolerance_m,
+            simplify_tolerance_m=job.zone_config.simplify_tolerance_m,
             simplify_buffer_m=job.zone_config.simplify_buffer_m,
-            export_target="zip",
-            include_zonal_stats=job.zone_config.include_stats,
+            destination="zip",
+            include_stats=job.zone_config.include_stats,
         )
         artifacts = result.get("artifacts")
         metadata = result.get("metadata", {}) or {}
