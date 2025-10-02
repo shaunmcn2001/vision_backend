@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import ee
+from ee.ee_exception import EEException
 
 from app import gee
 from app.services import zonesold as _legacy_zones
@@ -77,18 +78,34 @@ def _force_ndvi_mean_band(image: ee.Image) -> ee.Image:
 def _ensure_number(x: Any, context: str = "") -> ee.Number:
     """Ensure a plain ``ee.Number`` is supplied, not an ``ee.Image``."""
 
-    t = ee.String(ee.Algorithms.ObjectType(x))
-    return ee.Number(
-        ee.Algorithms.If(
-            t.compareTo("Image").eq(0),
-            ee.Error(
-                ee.String("Expected Number for ")
-                .cat(context)
-                .cat("; got Image. Never use ee.Image.constant(...) with an Image."),
-            ),
-            x,
-        )
+    message = (
+        "Expected Number for "
+        f"{context}"
+        "; got Image. Never use ee.Image.constant(...) with an Image."
     )
+    ee_error_cls = getattr(ee, "Error", None)
+
+    if ee_error_cls is not None:
+        t = ee.String(ee.Algorithms.ObjectType(x))
+        return ee.Number(
+            ee.Algorithms.If(
+                t.compareTo("Image").eq(0),
+                ee_error_cls(message),
+                x,
+            )
+        )
+
+    ee_image_type = getattr(ee, "Image", None)
+    if isinstance(ee_image_type, type) and isinstance(x, ee_image_type):
+        raise EEException(message)
+
+    if hasattr(x, "updateMask") and hasattr(x, "reduceRegion"):
+        raise EEException(message)
+
+    try:
+        return ee.Number(x)
+    except Exception as exc:  # pragma: no cover - defensive guard for fakes
+        raise EEException(message) from exc
 
 
 def _to_geometry(aoi_geojson_or_geom: Union[dict, ee.Geometry]) -> ee.Geometry:
