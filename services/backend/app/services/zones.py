@@ -658,11 +658,12 @@ def _classify_by_percentiles(
 
 def _connected_component_area(classified: ee.Image, n_classes: int) -> ee.Image:
     pixel_area = ee.Image.pixelArea()
-    area_image = ee.Image.constant(0)
+    band_names = classified.bandNames()
+    area_image = ee.Image.constant(0).rename(band_names)
     for class_id in range(1, n_classes + 1):
         mask = classified.eq(class_id)
         counts = mask.connectedPixelCount(maxSize=1_000_000, eightConnected=True)
-        area = counts.multiply(pixel_area)
+        area = counts.multiply(pixel_area).rename(band_names)
         area_image = area_image.where(mask, area)
     return area_image.rename("component_area")
 
@@ -705,6 +706,8 @@ def _apply_cleanup(
     if smooth_radius > 0:
         majority_large = closed.focal_mode(radius=smooth_radius, units="meters", iterations=1)
     small_mask = component_area.lt(min_area_m2)
+    if hasattr(small_mask, "rename"):
+        small_mask = small_mask.rename(classified.bandNames())
     cleaned = closed.where(small_mask, majority_large)
 
     mask = cleaned.mask()
