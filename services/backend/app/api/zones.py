@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import calendar
+import logging
 from datetime import date, datetime
 from typing import List, Literal, Optional
 
@@ -13,6 +14,9 @@ from app.services import zones as zone_service
 
 
 router = APIRouter(prefix="/zones", tags=["zones"])
+
+
+logger = logging.getLogger(__name__)
 
 
 class _BaseAOIRequest(BaseModel):
@@ -248,8 +252,21 @@ def create_production_zones(request: ProductionZonesRequest):
             apply_stability_mask=request.apply_stability_mask,
         )
     except ValueError as exc:
+        logger.warning(
+            "Zone production request validation failed for AOI %s (target %s): %s",
+            request.aoi_name,
+            request.export_target,
+            exc,
+            exc_info=True,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
+        logger.exception(
+            "Zone production runtime failure for AOI %s (target %s): %s",
+            request.aoi_name,
+            request.export_target,
+            exc,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     result.pop("artifacts", None)
