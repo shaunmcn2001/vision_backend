@@ -509,42 +509,90 @@ def _pixel_count(
     return int(max(numeric, 0))
 
 
-def _percentile_thresholds(reducer_dict: Dict[str, float], n_classes: int, label: str) -> List[float]:
+def _percentile_thresholds(
+    reducer_dict: Mapping[str, float], percentiles: Sequence[float], label: str
+) -> List[float]:
     """
     Build the list of percentile thresholds for NDVI zoning.
 
     Accepts reducer outputs where percentile keys are either:
       - 'cut_01', 'cut_02', ... (bare keys)
       - '<label>_cut_01', '<label>_cut_02', ... (band-prefixed keys from EE)
+      - 'p20', 'p40', ... (Earth Engine defaults)
+      - '<label>_p20', ... (Earth Engine defaults with band prefix)
 
     Args:
         reducer_dict: dictionary returned by EE reduceRegion with percentiles
-        n_classes: number of classes (needs n_classes - 1 thresholds)
+        percentiles: ordered list of requested percentile values (0..100)
         label: band name prefix (e.g. 'ndvi_mean')
 
     Returns:
         A list of thresholds in ascending order
     """
-    if n_classes < 2:
-        raise ValueError("n_classes must be >= 2")
+    if not percentiles:
+        raise ValueError("percentiles must be a non-empty sequence")
 
-    expected_idx = [f"{i:02d}" for i in range(1, n_classes)]
+    label_prefix = f"{label}_" if label else ""
+    cut_lookup: Dict[int, float] = {}
+    percentile_lookup: List[tuple[float, float]] = []
 
-    found: Dict[str, float] = {}
-    for idx in expected_idx:
-        bare_key = f"cut_{idx}"
-        prefixed_key = f"{label}_cut_{idx}"
+    cut_pattern = re.compile(r"^cut_(\d+)$")
+    pct_pattern = re.compile(r"^p(\d+(?:_\d+)*)$")
 
-        if bare_key in reducer_dict:
-            found[idx] = float(reducer_dict[bare_key])
-        elif prefixed_key in reducer_dict:
-            found[idx] = float(reducer_dict[prefixed_key])
+    for raw_key, raw_value in reducer_dict.items():
+        key = str(raw_key)
+        if label_prefix and key.startswith(label_prefix):
+            key = key[len(label_prefix) :]
 
-    missing = [ix for ix in expected_idx if ix not in found]
-    if missing:
-        raise ValueError(f"Missing percentile keys for indices: {', '.join(missing)}")
+        cut_match = cut_pattern.match(key)
+        if cut_match:
+            try:
+                ordinal = int(cut_match.group(1))
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                cut_lookup[ordinal] = value
+            continue
 
-    return [found[ix] for ix in expected_idx]
+        pct_match = pct_pattern.match(key)
+        if pct_match:
+            suffix = pct_match.group(1).replace("_", ".")
+            try:
+                pct_value = float(suffix)
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(pct_value) and math.isfinite(value):
+                percentile_lookup.append((pct_value, value))
+
+    percentile_lookup.sort(key=lambda item: item[0])
+
+    thresholds: List[float] = []
+    remaining_pct = percentile_lookup
+    for ordinal, pct in enumerate(percentiles, start=1):
+        try:
+            target = float(pct)
+        except (TypeError, ValueError):
+            raise ValueError("percentiles must be numeric") from None
+
+        if ordinal in cut_lookup:
+            thresholds.append(cut_lookup[ordinal])
+            continue
+
+        match_index = None
+        for idx, (pct_value, value) in enumerate(remaining_pct):
+            if math.isclose(pct_value, target, rel_tol=1e-6, abs_tol=0.5):
+                match_index = idx
+                break
+
+        if match_index is None:
+            raise ValueError(STABILITY_MASK_EMPTY_ERROR)
+
+        _, value = remaining_pct.pop(match_index)
+        thresholds.append(value)
+
+    return thresholds
     
 def _classify_by_percentiles(
     image: ee.Image, geometry: ee.Geometry, n_classes: int
@@ -559,16 +607,22 @@ def _classify_by_percentiles(
     """
 
     # Ensure image has a known band name
-    band_name = ee.String(image.bandNames().get(0))
-    image = image.rename(band_name)
+    band_name_obj = ee.String(image.bandNames().get(0))
+    image = image.rename(band_name_obj)
+    if hasattr(band_name_obj, "getInfo"):
+        band_label = band_name_obj.getInfo()
+    else:
+        band_label = str(band_name_obj)
 
     # Percentile cuts to request
     step = 100 / n_classes
-    pct_breaks = ee.List.sequence(step, 100 - step, step)
+    percentile_sequence = [step * i for i in range(1, n_classes)]
+    pct_breaks = ee.List(percentile_sequence)
+    output_names = [f"cut_{i:02d}" for i in range(1, n_classes)]
 
     # Compute percentiles for this band
     reducer_dict = image.reduceRegion(
-        reducer=ee.Reducer.percentile(pct_breaks),
+        reducer=ee.Reducer.percentile(pct_breaks, outputNames=output_names),
         geometry=geometry,
         scale=DEFAULT_SCALE,
         bestEffort=True,
@@ -580,9 +634,13 @@ def _classify_by_percentiles(
     reducer_info = reducer_dict.getInfo() or {}
 
     # Extract thresholds with robust handling of bare/prefixed keys
-    thresholds: List[float] = _percentile_thresholds(
-        reducer_info, n_classes, band_name.getInfo()
-    )
+    thresholds: List[float]
+    try:
+        thresholds = _percentile_thresholds(
+            reducer_info, percentile_sequence, band_label
+        )
+    except ValueError as exc:
+        raise ValueError(STABILITY_MASK_EMPTY_ERROR) from exc
 
     # Now classify pixels relative to thresholds
     zero = image.multiply(0)
