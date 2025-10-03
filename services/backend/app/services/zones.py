@@ -463,38 +463,44 @@ def _clean_zones(
     close_radius_m: float,
     min_mapping_unit_ha: float,
 ) -> ee.Image:
-    cleaned = zones
+    cleaned = ee.Image(zones)
 
     if smooth_radius_m > 0:
-        cleaned = cleaned.focal_mode(
-            radius=smooth_radius_m,
-            kernelType="circle",
-            units="meters",
+        cleaned = ee.Image(
+            cleaned.focal_mode(
+                radius=smooth_radius_m,
+                kernelType="circle",
+                units="meters",
+            )
         )
 
     if open_radius_m > 0:
-        cleaned = cleaned.focal_min(
-            radius=open_radius_m,
-            kernelType="circle",
-            units="meters",
-        ).focal_max(
-            radius=open_radius_m,
-            kernelType="circle",
-            units="meters",
+        cleaned = ee.Image(
+            cleaned.focal_min(
+                radius=open_radius_m,
+                kernelType="circle",
+                units="meters",
+            ).focal_max(
+                radius=open_radius_m,
+                kernelType="circle",
+                units="meters",
+            )
         )
 
     if close_radius_m > 0:
-        cleaned = cleaned.focal_max(
-            radius=close_radius_m,
-            kernelType="circle",
-            units="meters",
-        ).focal_min(
-            radius=close_radius_m,
-            kernelType="circle",
-            units="meters",
+        cleaned = ee.Image(
+            cleaned.focal_max(
+                radius=close_radius_m,
+                kernelType="circle",
+                units="meters",
+            ).focal_min(
+                radius=close_radius_m,
+                kernelType="circle",
+                units="meters",
+            )
         )
 
-    cleaned = cleaned.updateMask(cleaned.gt(0)).rename("zone")
+    cleaned = ee.Image(cleaned.updateMask(cleaned.gt(0)).rename("zone"))
 
     pixel_area = ee.Image.pixelArea()
     min_area_m2 = float(min_mapping_unit_ha) * 10_000.0
@@ -508,15 +514,17 @@ def _clean_zones(
     small_components = connected_area.lt(min_area_m2)
 
     fill_radius = max(smooth_radius_m, open_radius_m, close_radius_m, 1)
-    majority = cleaned.focal_mode(
-        radius=fill_radius,
-        kernelType="circle",
-        units="meters",
+    majority = ee.Image(
+        cleaned.focal_mode(
+            radius=fill_radius,
+            kernelType="circle",
+            units="meters",
+        )
     )
 
-    filled = cleaned.where(small_components, majority)
-    filled = filled.updateMask(filled.gt(0)).rename("zone")
-    return filled.clip(geometry).toInt16()
+    filled = ee.Image(cleaned.where(small_components, majority))
+    filled = ee.Image(filled.updateMask(filled.gt(0)).rename("zone"))
+    return ee.Image(filled).clip(geometry).toInt16()
 
 
 def _vectorize_zones(
@@ -693,7 +701,7 @@ def build_zone_artifacts(
         "palette": palette,
     }
 
-    zone_clean = zone_clean.setMulti(zone_metadata)
+    zone_clean = ee.Image(zone_clean).setMulti(zone_metadata)
 
     return ZoneArtifacts(
         zone_image=zone_clean,
