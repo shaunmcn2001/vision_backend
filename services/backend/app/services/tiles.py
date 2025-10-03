@@ -46,12 +46,17 @@ def _s2_index_collection(
 ) -> ee.ImageCollection:
     """Return a Sentinel-2 image collection with the requested index band mapped."""
 
+    def _map_index_band(img):
+        image = ee.Image(img)
+        index_band = ee.Image(definition.compute(image, parameters))
+        return image.addBands(index_band)
+
     coll = (
         ee.ImageCollection(collection)
         .filterBounds(geom)
         .filterDate(start, end)
         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", _CLOUD_COVER_THRESHOLD))
-        .map(lambda img: img.addBands(definition.compute(img, parameters)))
+        .map(_map_index_band)
     )
     return coll
 
@@ -66,6 +71,7 @@ def _index_image_for_range(
     collection: str = DEFAULT_COLLECTION,
 ) -> ee.Image:
     geom = ee.Geometry(geometry_geojson)
+
     coll = _s2_index_collection(
         geom,
         start,
@@ -74,7 +80,8 @@ def _index_image_for_range(
         parameters=parameters,
         collection=collection,
     )
-    img = ee.Image(coll.select(definition.band_name).mean()).clip(geom)
+    mean_img = ee.Image(coll.select(definition.band_name).mean())
+    img = mean_img.clip(geom)
     if definition.valid_range is not None:
         low, high = definition.valid_range
         img = img.clamp(low, high)
