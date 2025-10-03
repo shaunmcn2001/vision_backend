@@ -1419,6 +1419,131 @@ def test_simplify_vectors_sets_area_and_buffer(monkeypatch):
     assert feature.props["area_ha"] == pytest.approx(1.2)
 
 
+def test_add_zonal_stats_converts_reduce_region_results(monkeypatch):
+    calls = {"constant": 0}
+
+    class FakeList(list):
+        def map(self, func):
+            return FakeList([func(item) for item in self])
+
+    class FakeDictionary:
+        def __init__(self, data):
+            self.data = dict(data)
+
+        def keys(self):
+            return FakeList(list(self.data.keys()))
+
+        def get(self, key):
+            return self.data[key]
+
+        @staticmethod
+        def fromLists(keys, values):
+            return FakeDictionary({key: value for key, value in zip(list(keys), list(values))})
+
+    class FakeNumber:
+        def __init__(self, value):
+            self.value = float(value)
+
+        def toInt(self):
+            return int(self.value)
+
+    def fake_number(value):
+        if isinstance(value, FakeNumber):
+            return value
+        if value is None:
+            raise AssertionError("ee.Number should not receive None")
+        return FakeNumber(value)
+
+    class FakeBandImage:
+        def __init__(self, value):
+            self.value = value
+            self.band_name: str | None = None
+
+        def rename(self, name):
+            self.band_name = name
+            return self
+
+    class FakeStatsImage:
+        def __init__(self, images):
+            self.images = images
+
+        def reduceRegion(self, **_kwargs):
+            return {img.band_name: img.value for img in self.images}
+
+    class FakeImageModule:
+        @staticmethod
+        def cat(images):
+            return FakeStatsImage(list(images))
+
+        @staticmethod
+        def constant(_value):
+            calls["constant"] += 1
+            raise AssertionError("ee.Image.constant must not be called")
+
+    class FakeReducer:
+        @staticmethod
+        def mean():
+            return "mean"
+
+    class FakeArea:
+        def __init__(self, value):
+            self.value = value
+
+        def divide(self, denom):
+            return self.value / denom
+
+    class FakeGeometry:
+        def area(self, maxError):
+            assert maxError == 1
+            return FakeArea(25_000)
+
+    class FakeFeature:
+        def __init__(self):
+            self.props = {"zone": 4}
+
+        def geometry(self):
+            return FakeGeometry()
+
+        def set(self, values):
+            if isinstance(values, FakeDictionary):
+                values = values.data
+            for key, value in values.items():
+                if isinstance(value, FakeNumber):
+                    value = value.value
+                self.props[key] = value
+            return self
+
+        def get(self, key):
+            return self.props[key]
+
+    fake_ee = SimpleNamespace(
+        Dictionary=FakeDictionary,
+        List=FakeList,
+        Number=fake_number,
+        Image=FakeImageModule,
+        Reducer=FakeReducer,
+    )
+
+    monkeypatch.setattr(zones, "ee", fake_ee)
+
+    stats_images = {
+        "NDVI_cv": FakeBandImage(None),
+        "NDVI_mean": FakeBandImage(1.5),
+    }
+
+    feature = FakeFeature()
+
+    result = zones._add_zonal_stats(feature, stats_images)
+
+    assert result is feature
+    assert calls["constant"] == 0
+    assert result.props["NDVI_mean"] == pytest.approx(1.5)
+    assert result.props["NDVI_cv"] is None
+    assert result.props["area_ha"] == pytest.approx(2.5)
+    assert result.props["zone"] == 4
+    assert result.props["zone_id"] == 4
+
+
 def test_clean_zones_coerces_clipless_images(monkeypatch):
     class CliplessImage:
         def __init__(self, label: str = "base"):
