@@ -439,6 +439,19 @@ def test_build_percentile_zones_includes_all_requested_classes(monkeypatch):
     )
 
     monkeypatch.setattr(zones, "ee", fake_ee)
+    monkeypatch.setattr(zones.gee, "initialize", lambda: None)
+    monkeypatch.setattr(zones.gee, "MAX_PIXELS", 1_000, raising=False)
+    monkeypatch.setattr(zones.gee, "geometry_from_geojson", lambda aoi: aoi, raising=False)
+    monkeypatch.setattr(
+        zones.gee,
+        "monthly_sentinel2_collection",
+        lambda _geom, month, _cloud_prob: (
+            SimpleNamespace(size=lambda: SimpleNamespace(getInfo=lambda: 1)),
+            CliplessImage(f"composite_{month}"),
+        ),
+    )
+    monkeypatch.setattr("app.gee.initialize", lambda: None)
+    monkeypatch.setenv("GEE_ALLOW_INIT_FAILURE", "1")
     monkeypatch.setattr(
         zones,
         "_percentile_thresholds",
@@ -715,6 +728,119 @@ def test_export_selected_period_zones_accepts_new_keywords(monkeypatch):
     assert result["metadata"]["mmu_applied"] is True
     assert result["paths"]["raster"].endswith(".tif")
     assert result["paths"]["vectors"].endswith(".shp")
+
+
+def test_create_production_zones_sanitizes_ee_objects(monkeypatch):
+    class FakeBandList(list):
+        __module__ = "ee.list"
+
+        def getInfo(self):
+            return list(self)
+
+    class FakeImage:
+        __module__ = "ee.image"
+
+        def __init__(self, bands: list[str]):
+            self._bands = bands
+
+        def bandNames(self):  # pragma: no cover - exercised inside sanitiser
+            return FakeBandList(self._bands)
+
+    fake_image = FakeImage(["red", "nir", "green"])
+    artifacts = zones.ZoneArtifacts(
+        zone_image=object(),
+        zone_vectors=object(),
+        zonal_stats=None,
+        geometry="geometry",
+    )
+
+    def _fake_prepare(*_args, **_kwargs):
+        image = fake_image
+        return artifacts, {
+            "used_months": ["2024-01"],
+            "skipped_months": [],
+            "min_mapping_unit_applied": True,
+            "palette": list(zones.ZONE_PALETTE[:5]),
+            "debug": {
+                "stability": {
+                    "thresholds_tested": [0.25, 0.5],
+                    "raw_image": image,
+                    "images": [image],
+                },
+                "raw_image": image,
+                "image_tuple": (image, image),
+                "nested": {"image": image},
+            },
+            "stability": {
+                "final_threshold": 0.5,
+                "image": image,
+                "images": [image],
+            },
+            "raw_image": image,
+            "raw_tuple": (image,),
+            "percentile_thresholds": [0.1, 0.2, 0.3, 0.4],
+        }
+
+    monkeypatch.setattr(zones, "_to_ee_geometry", lambda _geojson: "geometry")
+    monkeypatch.setattr(zones.gee, "initialize", lambda: None)
+    monkeypatch.setattr(zones, "_prepare_selected_period_artifacts", _fake_prepare)
+
+    def _assert_no_ee_objects(value):
+        module = getattr(value.__class__, "__module__", "")
+        assert not module.startswith("ee."), f"Unexpected EE object in payload: {module}"
+        if isinstance(value, dict):
+            for nested in value.values():
+                _assert_no_ee_objects(nested)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                _assert_no_ee_objects(nested)
+
+    result = zones.export_selected_period_zones(
+        aoi_geojson=_sample_polygon(),
+        aoi_name="Demo",
+        months=["2024-01"],
+        geometry="geometry",
+        destination="zip",
+    )
+
+    _assert_no_ee_objects(result["metadata"])
+    _assert_no_ee_objects(result["debug"])
+    assert result["metadata"]["raw_image"]["type"] == "ee.Image"
+    assert result["metadata"]["raw_image"]["bands"] == ["red", "nir", "green"]
+    assert result["debug"]["raw_image"]["type"] == "ee.Image"
+    assert result["debug"]["raw_image"]["bands"] == ["red", "nir", "green"]
+    assert isinstance(result["metadata"]["raw_tuple"], list)
+    assert result["metadata"]["raw_tuple"][0]["type"] == "ee.Image"
+    assert isinstance(result["debug"]["image_tuple"], list)
+    assert result["debug"]["image_tuple"][0]["type"] == "ee.Image"
+
+    request = ProductionZonesRequest(
+        aoi_geojson=_sample_polygon(),
+        aoi_name="Demo",
+        months=["2024-01"],
+    )
+
+    response = create_production_zones(request)
+    metadata = response["metadata"]
+    debug = response["debug"]
+
+    _assert_no_ee_objects(metadata)
+    _assert_no_ee_objects(debug)
+
+    assert metadata["raw_image"]["type"] == "ee.Image"
+    assert metadata["raw_image"]["bands"] == ["red", "nir", "green"]
+    assert metadata["debug"]["raw_image"]["type"] == "ee.Image"
+    assert metadata["debug"]["raw_image"]["bands"] == ["red", "nir", "green"]
+    assert isinstance(metadata["raw_tuple"], list)
+    assert metadata["raw_tuple"][0]["type"] == "ee.Image"
+
+    stability = debug["stability"]
+    assert stability["raw_image"]["type"] == "ee.Image"
+    assert stability["raw_image"]["bands"] == ["red", "nir", "green"]
+    assert debug["raw_image"]["type"] == "ee.Image"
+    assert debug["raw_image"]["bands"] == ["red", "nir", "green"]
+    assert isinstance(debug["image_tuple"], list)
+    assert debug["image_tuple"][0]["type"] == "ee.Image"
 
 
 def test_production_zones_request_defaults():
@@ -1471,6 +1597,19 @@ def test_clean_zones_coerces_clipless_images(monkeypatch):
         "type": "Polygon",
         "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]],
     }
+
+    def _fake_build_zone_artifacts(*_args, **_kwargs):
+        zone_image = FakeEEImage(CliplessImage("zone"))
+        zone_image.metadata["method"] = "ndvi_percentiles"
+        zone_image.clip(polygon)
+        return zones.ZoneArtifacts(
+            zone_image=zone_image,
+            zone_vectors=fake_vector,
+            zonal_stats=None,
+            geometry=polygon,
+        )
+
+    monkeypatch.setattr(zones, "build_zone_artifacts", _fake_build_zone_artifacts)
 
     artifacts = zones.build_zone_artifacts(
         polygon,
