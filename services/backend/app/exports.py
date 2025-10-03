@@ -1091,8 +1091,9 @@ def _stretch_to_byte(
     max_value: float = 3000.0,
     gamma: float = 1.0,
 ) -> ee.Image:
+    base_image = ee.Image(image)
     span = max(max_value - min_value, 1.0)
-    selected = image.select(list(bands)).resample("bilinear")
+    selected = base_image.select(list(bands)).resample("bilinear")
     scaled = selected.subtract(min_value).divide(span).clamp(0, 1)
     if gamma not in (1.0, 1):
         try:
@@ -1100,7 +1101,7 @@ def _stretch_to_byte(
         except ZeroDivisionError:
             inv_gamma = 1.0
         scaled = scaled.pow(ee.Number(inv_gamma))
-    byte_image = scaled.multiply(255).toUint8()
+    byte_image = ee.Image(scaled.multiply(255).toUint8())
     return byte_image.clip(geometry).reproject("EPSG:4326", None, scale_m)
 
 
