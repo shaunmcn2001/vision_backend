@@ -599,6 +599,7 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
             "metadata": {
                 "used_months": list(months),
                 "skipped_months": [],
+                "min_mapping_unit_applied": False,
                 "mmu_applied": False,
             },
             "prefix": "zones/PROD_202401_202401_tiny_field_zones",
@@ -639,6 +640,7 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
     exports._build_zone_artifacts_for_job(job)
 
     assert job.zone_state is not None
+    assert job.zone_state.metadata.get("min_mapping_unit_applied") is False
     assert job.zone_state.metadata.get("mmu_applied") is False
     assert captured["aoi_geojson"] is job.aoi_geojson
     assert captured["geometry"] is geometry_sentinel
