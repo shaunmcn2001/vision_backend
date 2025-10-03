@@ -108,12 +108,18 @@ def _index_collection_for_range(
     collection_name: str = DEFAULT_COLLECTION,
 ):
     geom = ee.Geometry(geometry_geojson)
+
+    def _map_index_band(img):
+        image = ee.Image(img)
+        index_band = ee.Image(definition.compute(image, parameters))
+        return image.addBands(index_band)
+
     collection = (
         ee.ImageCollection(collection_name)
         .filterBounds(geom)
         .filterDate(start_iso, end_iso)
         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", _CLOUD_COVER_THRESHOLD))
-        .map(lambda img: img.addBands(definition.compute(img, parameters)))
+        .map(_map_index_band)
     )
     return geom, collection
 
@@ -135,7 +141,8 @@ def _index_image_for_range(
         parameters=parameters,
         collection_name=collection_name,
     )
-    image = ee.Image(collection.select(definition.band_name).mean()).clip(geom)
+    mean_image = ee.Image(collection.select(definition.band_name).mean())
+    image = mean_image.clip(geom)
     if definition.valid_range is not None:
         low, high = definition.valid_range
         image = image.clamp(low, high)

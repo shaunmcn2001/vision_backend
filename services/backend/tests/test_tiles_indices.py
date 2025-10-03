@@ -31,6 +31,7 @@ def test_gndvi_images_and_metadata(monkeypatch):
     )
 
     assert isinstance(annual, FakeMeanImage)
+    assert hasattr(annual, "clip")
     assert annual.clamped_to == (-1.0, 1.0)
     assert annual.value == pytest.approx(0.6)
 
@@ -48,6 +49,7 @@ def test_gndvi_images_and_metadata(monkeypatch):
     )
 
     assert isinstance(month, FakeMeanImage)
+    assert hasattr(month, "clip")
     assert month.clamped_to == (-1.0, 1.0)
     assert month.value == pytest.approx(1.0)
 
