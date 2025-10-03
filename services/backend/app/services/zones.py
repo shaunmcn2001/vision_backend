@@ -1559,6 +1559,7 @@ def export_selected_period_zones(
     gcs_bucket: str | None = None,
     gcs_prefix: str | None = None,
     include_zonal_stats: bool = True,
+    include_stats: bool | None = None,
     apply_stability_mask: bool = True,
 ):
     # ✅ Normalize AOI FIRST so all downstream EE ops see an ee.Geometry, not a dict
@@ -1594,6 +1595,10 @@ def export_selected_period_zones(
     if mmu_ha < 0:
         raise ValueError("min_mapping_unit_ha must be non-negative")
 
+    include_stats_flag = bool(
+        include_stats if include_stats is not None else include_zonal_stats
+    )
+
     gee.initialize()
     geometry = geometry or _resolve_geometry(aoi_geojson)
 
@@ -1615,7 +1620,7 @@ def export_selected_period_zones(
         simplify_buffer_m=simplify_buffer_m,
         method=DEFAULT_METHOD,
         sample_size=DEFAULT_SAMPLE_SIZE,
-        include_stats=include_zonal_stats,
+        include_stats=include_stats_flag,
     )
 
     metadata = dict(metadata)
@@ -1625,7 +1630,7 @@ def export_selected_period_zones(
         raise ValueError("No valid Sentinel-2 scenes available for the selected period")
 
     prefix_base = export_prefix(aoi_name, used_months)
-    stats_name = f"{prefix_base}_zonal_stats.csv" if include_zonal_stats else None
+    stats_name = f"{prefix_base}_zonal_stats.csv" if include_stats_flag else None
 
     export_target = (export_target or "zip").strip().lower()
     if export_target not in {"zip", "gcs", "drive"}:
@@ -1690,7 +1695,7 @@ def export_selected_period_zones(
             aoi_name=aoi_name,
             months=used_months,
             bucket=bucket,
-            include_stats=include_zonal_stats,
+            include_stats=include_stats_flag,
             prefix_override=cleaned_prefix,
         )
         result["bucket"] = bucket
@@ -1705,7 +1710,7 @@ def export_selected_period_zones(
             "vector_components": gcs_components,
             "zonal_stats": (
                 f"gs://{bucket}/{cleaned_prefix}_zonal_stats.csv"
-                if include_zonal_stats
+                if include_stats_flag
                 else None
             ),
         }
@@ -1725,7 +1730,7 @@ def export_selected_period_zones(
         artifacts,
         folder=folder,
         prefix=drive_prefix,
-        include_stats=include_zonal_stats,
+        include_stats=include_stats_flag,
     )
     result["folder"] = folder
     result["prefix"] = drive_prefix
@@ -1739,7 +1744,7 @@ def export_selected_period_zones(
         "vector_components": drive_components,
         "zonal_stats": (
                 f"drive://{folder}/{drive_prefix}_zonal_stats.csv"
-                if include_zonal_stats
+                if include_stats_flag
                 else None
         ),
     }
