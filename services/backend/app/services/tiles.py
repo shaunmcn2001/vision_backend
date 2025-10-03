@@ -74,7 +74,7 @@ def _index_image_for_range(
         parameters=parameters,
         collection=collection,
     )
-    img = coll.select(definition.band_name).mean().clip(geom)
+    img = ee.Image(coll.select(definition.band_name).mean()).clip(geom)
     if definition.valid_range is not None:
         low, high = definition.valid_range
         img = img.clamp(low, high)
