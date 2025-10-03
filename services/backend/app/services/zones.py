@@ -13,8 +13,8 @@ import ee
 
 from app import gee
 from app.exports import sanitize_name
-from app.services.serialization import sanitize_metadata
 from app.utils.geometry import area_ha
+from app.utils.sanitization import sanitize_for_json
 
 
 DEFAULT_CLOUD_PROB_MAX = 40
@@ -1656,7 +1656,7 @@ def export_selected_period_zones(
         }
     )
 
-    metadata = sanitize_metadata(metadata)
+    metadata = sanitize_for_json(metadata)
     palette = metadata.get("palette") if isinstance(metadata, dict) else None
     thresholds = metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
 
@@ -1679,7 +1679,10 @@ def export_selected_period_zones(
         result["thresholds"] = thresholds
 
     debug_info = metadata.get("debug") if isinstance(metadata, dict) else None
-    if debug_info:
+    if debug_info is not None:
+        debug_info = sanitize_for_json(debug_info)
+        if isinstance(metadata, dict):
+            metadata["debug"] = debug_info
         result["debug"] = debug_info
 
     if export_target == "zip":
