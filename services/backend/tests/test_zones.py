@@ -805,14 +805,10 @@ def test_create_production_zones_sanitizes_ee_objects(monkeypatch):
 
     _assert_no_ee_objects(result["metadata"])
     _assert_no_ee_objects(result["debug"])
-    assert result["metadata"]["raw_image"]["type"] == "ee.Image"
-    assert result["metadata"]["raw_image"]["bands"] == ["red", "nir", "green"]
-    assert result["debug"]["raw_image"]["type"] == "ee.Image"
-    assert result["debug"]["raw_image"]["bands"] == ["red", "nir", "green"]
-    assert isinstance(result["metadata"]["raw_tuple"], list)
-    assert result["metadata"]["raw_tuple"][0]["type"] == "ee.Image"
-    assert isinstance(result["debug"]["image_tuple"], list)
-    assert result["debug"]["image_tuple"][0]["type"] == "ee.Image"
+    assert result["metadata"]["raw_image"] is None
+    assert result["debug"]["raw_image"] is None
+    assert result["metadata"]["raw_tuple"] == [None]
+    assert result["debug"]["image_tuple"] == [None, None]
 
     request = ProductionZonesRequest(
         aoi_geojson=_sample_polygon(),
@@ -827,20 +823,16 @@ def test_create_production_zones_sanitizes_ee_objects(monkeypatch):
     _assert_no_ee_objects(metadata)
     _assert_no_ee_objects(debug)
 
-    assert metadata["raw_image"]["type"] == "ee.Image"
-    assert metadata["raw_image"]["bands"] == ["red", "nir", "green"]
-    assert metadata["debug"]["raw_image"]["type"] == "ee.Image"
-    assert metadata["debug"]["raw_image"]["bands"] == ["red", "nir", "green"]
-    assert isinstance(metadata["raw_tuple"], list)
-    assert metadata["raw_tuple"][0]["type"] == "ee.Image"
+    assert metadata["raw_image"] is None
+    assert metadata["debug"]["raw_image"] is None
+    assert metadata["raw_tuple"] == [None]
 
     stability = debug["stability"]
-    assert stability["raw_image"]["type"] == "ee.Image"
-    assert stability["raw_image"]["bands"] == ["red", "nir", "green"]
-    assert debug["raw_image"]["type"] == "ee.Image"
-    assert debug["raw_image"]["bands"] == ["red", "nir", "green"]
-    assert isinstance(debug["image_tuple"], list)
-    assert debug["image_tuple"][0]["type"] == "ee.Image"
+    assert stability.get("raw_image") is None
+    assert stability.get("image") is None
+    assert stability.get("images") == [None]
+    assert debug["raw_image"] is None
+    assert debug["image_tuple"] == [None, None]
 
 
 def test_production_zones_request_defaults():
