@@ -864,16 +864,54 @@ def _add_zonal_stats(feature: ee.Feature, stats_images: Mapping[str, ee.Image]) 
     area_ha_val = geometry.area(maxError=1).divide(10_000)
     ordered = [stats_images[name].rename(name) for name in sorted(stats_images)]
     stats_image = ee.Image.cat(ordered)
-    stats = stats_image.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=geometry,
-        scale=DEFAULT_SCALE,
-        bestEffort=True,
-        tileScale=4,
-        maxPixels=gee.MAX_PIXELS,
+    stats_dict = ee.Dictionary(
+        stats_image.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=geometry,
+            scale=DEFAULT_SCALE,
+            bestEffort=True,
+            tileScale=4,
+            maxPixels=gee.MAX_PIXELS,
+        )
     )
+
+    keys = ee.List(stats_dict.keys())
+
+    def _coerce_value(key):
+        value = stats_dict.get(key)
+        if value is None:
+            return None
+
+        image_cls = getattr(ee, "Image", None)
+        try:
+            if image_cls is not None and isinstance(value, image_cls):
+                return None
+        except TypeError:
+            # ``ee.Image`` may not be a Python type in fake implementations.
+            pass
+
+        number_cls = getattr(ee, "Number", None)
+        try:
+            if number_cls is not None and isinstance(value, number_cls):
+                return ee.Number(value)
+        except TypeError:
+            # ``ee.Number`` can be a factory function in tests; fall through.
+            pass
+
+        if isinstance(value, (int, float)):
+            return ee.Number(value)
+
+        try:
+            return ee.Number(value)
+        except Exception:
+            return None
+
+    numeric_values = keys.map(_coerce_value)
+    numeric_stats = ee.Dictionary.fromLists(keys, numeric_values)
     zone_value = ee.Number(feature.get("zone")).toInt()
-    return feature.set(stats).set({"area_ha": area_ha_val, "zone": zone_value, "zone_id": zone_value})
+    return feature.set(numeric_stats).set(
+        {"area_ha": area_ha_val, "zone": zone_value, "zone_id": zone_value}
+    )
 
 
 def _build_percentile_zones(
