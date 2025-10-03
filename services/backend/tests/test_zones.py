@@ -671,6 +671,52 @@ def test_create_production_zones_endpoint(monkeypatch):
     assert response["thresholds"] == [0.1, 0.2, 0.3, 0.4]
 
 
+def test_export_selected_period_zones_accepts_new_keywords(monkeypatch):
+    fake_artifacts = zones.ZoneArtifacts(
+        zone_image=object(),
+        zone_vectors=object(),
+        zonal_stats=None,
+        geometry="normalized-geometry",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(zones, "_to_ee_geometry", lambda _geojson: "normalized-geometry")
+    monkeypatch.setattr(zones.gee, "initialize", lambda: None)
+
+    def _fake_prepare(aoi_geojson, **kwargs):
+        captured.update(
+            {
+                "min_mapping_unit_ha": kwargs.get("min_mapping_unit_ha"),
+                "simplify_tol_m": kwargs.get("simplify_tol_m"),
+            }
+        )
+        return fake_artifacts, {
+            "used_months": ["2024-01"],
+            "skipped_months": [],
+            "min_mapping_unit_applied": True,
+        }
+
+    monkeypatch.setattr(zones, "_prepare_selected_period_artifacts", _fake_prepare)
+
+    result = zones.export_selected_period_zones(
+        aoi_geojson=_sample_polygon(),
+        aoi_name="Alias Field",
+        months=["2024-01"],
+        geometry="normalized-geometry",
+        min_mapping_unit_ha=3.5,
+        simplify_tolerance_m=7,
+        destination="zip",
+        include_zonal_stats=False,
+    )
+
+    assert captured["min_mapping_unit_ha"] == 3.5
+    assert captured["simplify_tol_m"] == 7
+    assert result["metadata"]["min_mapping_unit_applied"] is True
+    assert result["metadata"]["mmu_applied"] is True
+    assert result["paths"]["raster"].endswith(".tif")
+    assert result["paths"]["vectors"].endswith(".shp")
+
+
 def test_production_zones_request_defaults():
     request = ProductionZonesRequest(
         aoi_geojson=_sample_polygon(),
