@@ -178,7 +178,15 @@ def test_index_image_for_range_wraps_mean_result(monkeypatch):
                 self._base.clamp(low, high)
             return self
 
-    monkeypatch.setattr(export.ee, "Image", WrappedImage)
+    original_image_ctor = export.ee.Image
+
+    def wrap_mean(value):
+        base = original_image_ctor(value)
+        if isinstance(base, FakeMeanImage):
+            return WrappedImage(base)
+        return base
+
+    monkeypatch.setattr(export.ee, "Image", wrap_mean)
 
     geometry = {"type": "Point", "coordinates": [0, 0]}
     _collection, image = export._index_image_for_range(
@@ -191,6 +199,7 @@ def test_index_image_for_range_wraps_mean_result(monkeypatch):
 
     assert isinstance(image, WrappedImage)
     assert isinstance(captured["base"], FakeMeanImage)
+    assert hasattr(captured["base"], "clip")
     assert captured["clip_geom"] == geometry
     assert captured["base"].clipped_geom == geometry
     assert captured["clamps"] == [(-1.0, 1.0)]
