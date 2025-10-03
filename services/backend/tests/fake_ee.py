@@ -147,6 +147,7 @@ def setup_fake_ee(monkeypatch, module, values: Iterable[float]):
         ImageCollection=fake_image_collection,
         Geometry=lambda geom: geom,
         Filter=fake_filter,
+        Image=lambda value: value,
     )
 
     monkeypatch.setattr(module, "ee", fake_ee)
