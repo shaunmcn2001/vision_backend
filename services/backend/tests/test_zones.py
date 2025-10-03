@@ -1254,3 +1254,190 @@ def test_simplify_vectors_sets_area_and_buffer(monkeypatch):
     assert feature.props["area_m2"].value == 12_000
     assert feature.props["area_ha"] == pytest.approx(1.2)
 
+
+def test_clean_zones_coerces_clipless_images(monkeypatch):
+    class CliplessImage:
+        def __init__(self, label: str = "base"):
+            self.label = label
+
+        def focal_mode(self, **_kwargs):
+            return CliplessImage("focal_mode")
+
+        def focal_min(self, **_kwargs):
+            return self
+
+        def focal_max(self, **_kwargs):
+            return self
+
+        def gt(self, *_args, **_kwargs):
+            return CliplessImage("gt")
+
+        def updateMask(self, *_args, **_kwargs):
+            return self
+
+        def clamp(self, *_args, **_kwargs):
+            return self
+
+        def rename(self, *_args, **_kwargs):
+            return self
+
+        def where(self, *_args, **_kwargs):
+            return CliplessImage("where")
+
+        def reduceConnectedComponents(self, *_args, **_kwargs):
+            return CliplessImage("connected")
+
+        def lt(self, *_args, **_kwargs):
+            return CliplessImage("lt")
+
+        def toInt16(self):
+            return self
+
+    class FakePixelArea:
+        def addBands(self, _image):
+            return CliplessImage("pixel_area")
+
+    class FakeReducer:
+        @staticmethod
+        def sum():
+            return "sum"
+
+    class FakeNumber:
+        def __init__(self, value):
+            self._value = value
+
+        def getInfo(self):
+            getter = getattr(self._value, "getInfo", None)
+            if callable(getter):
+                return getter()
+            return self._value
+
+    class FakeSize:
+        def __init__(self, count: int):
+            self._count = count
+
+        def getInfo(self):
+            return self._count
+
+    class FakeComposites:
+        def __init__(self, count: int = 1):
+            self._size = FakeSize(count)
+
+        def size(self):
+            return self._size
+
+    class FakeEEImage:
+        def __init__(self, source):
+            if isinstance(source, FakeEEImage):
+                self._source = source._source
+                self.clipped = source.clipped
+                self.metadata = dict(getattr(source, "metadata", {}))
+            else:
+                self._source = source
+                self.clipped = None
+                self.metadata: dict[str, Any] = {}
+
+        def clip(self, geometry):
+            self.clipped = geometry
+            return self
+
+        def toInt16(self):
+            return self
+
+        def setMulti(self, metadata: dict[str, Any]):
+            self.metadata.update(metadata)
+            return self
+
+        def __getattr__(self, name: str):
+            return getattr(self._source, name)
+
+        @staticmethod
+        def pixelArea():
+            return FakePixelArea()
+
+        @staticmethod
+        def cat(_images):
+            return FakeEEImage(CliplessImage("cat"))
+
+    fake_ee = SimpleNamespace(
+        Image=FakeEEImage,
+        Geometry=lambda geom: geom,
+        Reducer=FakeReducer,
+        Number=lambda value: FakeNumber(value),
+    )
+
+    monkeypatch.setattr(zones, "ee", fake_ee)
+
+    clipless = CliplessImage("input")
+    geometry = {"type": "Point", "coordinates": [0, 0]}
+
+    cleaned = zones._clean_zones(
+        clipless,
+        geometry,
+        smooth_radius_m=0,
+        open_radius_m=0,
+        close_radius_m=0,
+        min_mapping_unit_ha=1,
+    )
+
+    assert isinstance(cleaned, FakeEEImage)
+    assert cleaned.clipped == geometry
+
+    fake_vector = SimpleNamespace()
+    fake_stats = SimpleNamespace()
+
+    monkeypatch.setattr(zones, "_build_masked_s2_collection", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        zones,
+        "_build_composite_collection",
+        lambda **_kwargs: (FakeComposites(), []),
+    )
+    monkeypatch.setattr(zones, "_ndvi_collection", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        zones,
+        "_ndvi_statistics",
+        lambda *_args, **_kwargs: (
+            CliplessImage("mean"),
+            CliplessImage("median"),
+            CliplessImage("std"),
+            CliplessImage("cv"),
+        ),
+    )
+    monkeypatch.setattr(
+        zones,
+        "_stability_mask",
+        lambda *_args, **_kwargs: (CliplessImage("mask"), {"threshold": 0.5}),
+    )
+    monkeypatch.setattr(
+        zones,
+        "_ndvi_percentile_thresholds",
+        lambda *_args, **_kwargs: ([0.1, 0.2], [0.1, 0.2]),
+    )
+    monkeypatch.setattr(
+        zones,
+        "_classify_percentiles",
+        lambda *_args, **_kwargs: CliplessImage("classified"),
+    )
+    monkeypatch.setattr(zones, "_vectorize_zones", lambda *_args, **_kwargs: fake_vector)
+    monkeypatch.setattr(zones, "_zonal_statistics", lambda *_args, **_kwargs: fake_stats)
+
+    polygon = {
+        "type": "Polygon",
+        "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]],
+    }
+
+    artifacts = zones.build_zone_artifacts(
+        polygon,
+        months=["2024-01"],
+        include_stats=False,
+        smooth_radius_m=0,
+        open_radius_m=0,
+        close_radius_m=0,
+    )
+
+    assert isinstance(artifacts.zone_image, FakeEEImage)
+    assert artifacts.zone_image.metadata["method"] == "ndvi_percentiles"
+    assert artifacts.zone_image.clipped == polygon
+    assert artifacts.zone_vectors is fake_vector
+    assert artifacts.zonal_stats is None
+
