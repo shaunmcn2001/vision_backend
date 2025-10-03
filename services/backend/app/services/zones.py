@@ -13,6 +13,7 @@ import ee
 
 from app import gee
 from app.exports import sanitize_name
+from app.services.serialization import sanitize_metadata
 from app.utils.geometry import area_ha
 
 
@@ -1655,6 +1656,7 @@ def export_selected_period_zones(
         }
     )
 
+    metadata = sanitize_metadata(metadata)
     palette = metadata.get("palette") if isinstance(metadata, dict) else None
     thresholds = metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
 

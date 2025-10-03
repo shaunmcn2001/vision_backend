@@ -249,7 +249,13 @@ def test_stability_mask_fallback_prevents_empty_error(monkeypatch):
     )
 
     monkeypatch.setattr(zones, "ee", fake_ee)
-    monkeypatch.setattr(zones, "gee", SimpleNamespace(MAX_PIXELS=1_000, initialize=lambda: None))
+    fake_gee = SimpleNamespace(
+        MAX_PIXELS=1_000,
+        initialize=lambda: None,
+        S2_SR_COLLECTION="S2",
+        S2_CLOUD_PROB_COLLECTION="S2_CLOUDS",
+    )
+    monkeypatch.setattr(zones, "gee", fake_gee)
 
     geometry = object()
     cv_image = _FakeCVImage(total_pixels, survivors_by_threshold)
@@ -290,26 +296,13 @@ def test_stability_mask_fallback_prevents_empty_error(monkeypatch):
         def rename(self, _name):
             return self
 
-        def get(self, name):
-            if name not in self._properties:
-                return None
-            value = self._properties[name]
-
-            class _InfoWrapper:
-                def __init__(self, info):
-                    self._info = info
-
-                def getInfo(self):  # pragma: no cover - trivial
-                    return self._info
-
-            return _InfoWrapper(value)
-
     class _FakeZoneVectors:
         pass
 
-    def _fake_build_zone_artifacts(
+    def _fake_prepare_selected_period_artifacts(
         aoi_geojson_or_geom,
         *,
+        geometry: object,
         months,
         include_stats,
         **_kwargs,
@@ -341,24 +334,26 @@ def test_stability_mask_fallback_prevents_empty_error(monkeypatch):
         if stability_count <= 0:
             raise ValueError(zones.STABILITY_MASK_EMPTY_ERROR)
 
-        zone_image = _FakeZoneImage(
-            {
-                "months_used": months,
-                "months_skipped": [],
-                "thresholds": [0.2, 0.4, 0.6],
-                "palette": ["#123456", "#abcdef"],
-                "stability": {"thresholds_tested": thresholds_to_try},
-            }
-        )
-
-        return zones.ZoneArtifacts(
+        zone_image = _FakeZoneImage({})
+        artifacts = zones.ZoneArtifacts(
             zone_image=zone_image,
             zone_vectors=_FakeZoneVectors(),
             zonal_stats=None,
             geometry=geometry,
         )
+        metadata = {
+            "used_months": list(months),
+            "skipped_months": [],
+            "palette": ["#123456", "#abcdef"],
+            "percentile_thresholds": [0.2, 0.4, 0.6],
+            "stability": {"thresholds_tested": thresholds_to_try},
+            "debug": {"stability": {"thresholds_tested": thresholds_to_try}},
+        }
+        return artifacts, metadata
 
-    monkeypatch.setattr(zones, "build_zone_artifacts", _fake_build_zone_artifacts)
+    monkeypatch.setattr(
+        zones, "_prepare_selected_period_artifacts", _fake_prepare_selected_period_artifacts
+    )
 
     result = zones.export_selected_period_zones(
         aoi_geojson={"type": "Polygon", "coordinates": []},
