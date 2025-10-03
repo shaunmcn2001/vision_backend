@@ -18,7 +18,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.append(str(BACKEND_DIR))
 
-from fake_ee import setup_fake_ee
+from fake_ee import FakeMeanImage, setup_fake_ee
 
 from app.api import export, s2_indices
 
@@ -153,6 +153,48 @@ async def test_export_geotiffs_uses_visualized_params(monkeypatch):
     params = download_args[0]
     assert "noDataValue" not in params
     assert params["formatOptions"] == {"cloudOptimized": False}
+
+
+def test_index_image_for_range_wraps_mean_result(monkeypatch):
+    context = setup_fake_ee(monkeypatch, export, [0.4, -0.2])
+    definition, parameters = export.resolve_index("ndvi")
+
+    captured: dict[str, object] = {}
+
+    class WrappedImage:
+        def __init__(self, base):
+            self._base = base
+            captured["base"] = base
+
+        def clip(self, geom):
+            captured["clip_geom"] = geom
+            if hasattr(self._base, "clip"):
+                self._base.clip(geom)
+            return self
+
+        def clamp(self, low: float, high: float):
+            captured.setdefault("clamps", []).append((low, high))
+            if hasattr(self._base, "clamp"):
+                self._base.clamp(low, high)
+            return self
+
+    monkeypatch.setattr(export.ee, "Image", WrappedImage)
+
+    geometry = {"type": "Point", "coordinates": [0, 0]}
+    _collection, image = export._index_image_for_range(
+        geometry,
+        "2024-01-01",
+        "2024-01-31",
+        definition=definition,
+        parameters=parameters,
+    )
+
+    assert isinstance(image, WrappedImage)
+    assert isinstance(captured["base"], FakeMeanImage)
+    assert captured["clip_geom"] == geometry
+    assert captured["base"].clipped_geom == geometry
+    assert captured["clamps"] == [(-1.0, 1.0)]
+    assert context["log"].get("clamp_calls") == [(-1.0, 1.0)]
 
 
 def test_normalise_indices_handles_mixed_case():
