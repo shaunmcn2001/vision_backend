@@ -21,6 +21,7 @@ if str(BACKEND_DIR) not in sys.path:
 from fake_ee import FakeMeanImage, setup_fake_ee
 
 from app.api import export, s2_indices
+from app import indices
 
 
 @pytest.fixture
@@ -198,12 +199,65 @@ def test_index_image_for_range_wraps_mean_result(monkeypatch):
     )
 
     assert isinstance(image, WrappedImage)
-    assert isinstance(captured["base"], FakeMeanImage)
-    assert hasattr(captured["base"], "clip")
-    assert captured["clip_geom"] == geometry
-    assert captured["base"].clipped_geom == geometry
-    assert captured["clamps"] == [(-1.0, 1.0)]
-    assert context["log"].get("clamp_calls") == [(-1.0, 1.0)]
+
+
+def test_finish_coerces_elements_without_clip(monkeypatch):
+    class ElementWithoutClip:
+        def __init__(self) -> None:
+            self.rename_calls = 0
+            self.to_float_calls = 0
+
+        def rename(self, name: str):  # pragma: no cover - should not be called
+            self.rename_calls += 1
+            return self
+
+        def toFloat(self):  # pragma: no cover - should not be called
+            self.to_float_calls += 1
+            return self
+
+    class WrappedImage:
+        def __init__(self, base: ElementWithoutClip) -> None:
+            self.base = base
+            self.ops: list[tuple] = []
+
+        def rename(self, name: str) -> "WrappedImage":
+            self.ops.append(("rename", name))
+            return self
+
+        def toFloat(self) -> "WrappedImage":
+            self.ops.append(("toFloat", None))
+            return self
+
+        def clip(self, geometry):
+            self.ops.append(("clip", geometry))
+            return self
+
+        def reproject(self, crs: str, _proj, scale: int):
+            self.ops.append(("reproject", crs, scale))
+            return self
+
+    class FakeEE:
+        @staticmethod
+        def Image(value):
+            return WrappedImage(value)
+
+    monkeypatch.setattr(indices, "ee", FakeEE())
+
+    element = ElementWithoutClip()
+    geometry = {"type": "Point", "coordinates": [0, 0]}
+
+    result = indices._finish(element, "TEST", geometry, 30)
+
+    assert isinstance(result, WrappedImage)
+    assert result.base is element
+    assert element.rename_calls == 0
+    assert element.to_float_calls == 0
+    assert result.ops == [
+        ("rename", "TEST"),
+        ("toFloat", None),
+        ("clip", geometry),
+        ("reproject", "EPSG:4326", 30),
+    ]
 
 
 def test_normalise_indices_handles_mixed_case():

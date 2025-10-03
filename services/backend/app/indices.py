@@ -48,8 +48,9 @@ def _safe_sqrt(image: ee.Image) -> ee.Image:
 
 
 def _finish(image: ee.Image, name: str, geometry: ee.Geometry, scale_m: int) -> ee.Image:
+    wrapped = ee.Image(image)
     return (
-        image.rename(name)
+        wrapped.rename(name)
         .toFloat()
         .clip(geometry)
         .reproject("EPSG:4326", None, scale_m)
