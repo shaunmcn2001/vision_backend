@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, root_validator, validator
 from shapely.geometry import shape
 
 from app.services import zones as zone_service
+from app.utils.sanitization import sanitize_for_json
 
 
 router = APIRouter(prefix="/zones", tags=["zones"])
@@ -332,6 +333,10 @@ def create_production_zones(request: ProductionZonesRequest):
         response["prefix"] = result.get("prefix")
     else:
         response["prefix"] = result.get("prefix")
+
+    response["metadata"] = sanitize_for_json(response.get("metadata"))
+    if "debug" in response:
+        response["debug"] = sanitize_for_json(response.get("debug"))
 
     return response
 
