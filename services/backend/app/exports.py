@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import re
@@ -18,6 +19,7 @@ from typing import Dict, Iterable, List, Literal, Optional, Tuple, TYPE_CHECKING
 
 import ee
 import requests
+import shapefile
 from google.cloud import storage
 
 from app import gee, index_visualization, indices
@@ -645,72 +647,81 @@ def _download_zone_artifacts(
     if not job.zone_artifacts or not job.zone_config or job.zone_state is None:
         return [], {}
 
-    zone_service = _zone_service()
     artifacts = job.zone_artifacts
     prefix = job.zone_state.prefix or _zone_prefix(job)
 
+    raster_src = Path(artifacts.raster_path)
+    if not raster_src.exists():
+        raise FileNotFoundError(f"Missing raster artifact at {raster_src}")
     raster_name = f"{prefix}.tif"
     raster_path = temp_dir / raster_name
     raster_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(raster_src, raster_path)
 
-    raster_params = {
-        "scale": zone_service.DEFAULT_SCALE,
-        "region": artifacts.geometry,
-        "crs": zone_service.DEFAULT_CRS,
-        "filePerBand": False,
-        "fileFormat": "GeoTIFF",
-        "format": "GEO_TIFF",
-        "name": Path(raster_name).stem,
-        "maxPixels": gee.MAX_PIXELS,
-        "formatOptions": {"cloudOptimized": False, "noDataValue": 0},
-    }
-
-    raster_url = artifacts.zone_image.getDownloadURL(raster_params)
-    raster_bytes, raster_content_type = _download_bytes(raster_url)
-    raster_payload = _extract_tiff(raster_bytes, raster_content_type)
-    raster_path.write_bytes(raster_payload)
-
-    vector_url = artifacts.zone_vectors.getDownloadURL({"fileFormat": "SHP"})
-    vector_files, vector_main = _extract_shapefile_archive(vector_url, temp_dir, prefix)
     vector_components: Dict[str, str] = {}
     shapefile_members: Dict[str, Path] = {}
-    for path, arcname in vector_files:
-        suffix = Path(arcname).suffix.lower().lstrip(".")
-        if suffix:
-            vector_components[suffix] = arcname
-            if suffix in {"shp", "dbf", "shx", "prj"}:
-                shapefile_members[suffix] = path
+    vector_files: List[tuple[Path, str]] = []
+    base_name = prefix
+    for ext, src in artifacts.vector_components.items():
+        src_path = Path(src)
+        if not src_path.exists():
+            continue
+        dest_name = f"{base_name}.{ext}"
+        dest_path = temp_dir / dest_name
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(src_path, dest_path)
+        vector_components[ext] = dest_name
+        vector_files.append((dest_path, dest_name))
+        if ext.lower() in {"shp", "dbf", "shx", "prj"}:
+            shapefile_members[ext.lower()] = dest_path
 
-    geojson_name = "zones.geojson"
+    geojson_name = f"{prefix}.geojson"
     geojson_path = temp_dir / geojson_name
     geojson_path.parent.mkdir(parents=True, exist_ok=True)
-    geojson_url = artifacts.zone_vectors.getDownloadURL({"fileFormat": "GeoJSON"})
-    geojson_payload, _ = _download_bytes(geojson_url)
-    geojson_path.write_bytes(geojson_payload)
+    if shapefile_members.get("shp"):
+        try:
+            reader = shapefile.Reader(str(shapefile_members["shp"]))
+            field_names = [field[0] for field in reader.fields[1:]]
+            features = []
+            for shape_record in reader.iterShapeRecords():
+                properties = {
+                    field_names[idx]: shape_record.record[idx]
+                    for idx in range(len(field_names))
+                }
+                geometry = shape_record.shape.__geo_interface__
+                features.append(
+                    {"type": "Feature", "geometry": geometry, "properties": properties}
+                )
+            geojson_path.write_text(
+                json.dumps({"type": "FeatureCollection", "features": features})
+            )
+        except Exception as exc:  # pragma: no cover - shapefile failure
+            logger.warning("Failed to generate GeoJSON from shapefile: %s", exc)
+            geojson_path.write_text(json.dumps({"type": "FeatureCollection", "features": []}))
+    else:
+        geojson_path.write_text(json.dumps({"type": "FeatureCollection", "features": []}))
 
-    shapefile_zip_name = "zones_shp.zip"
+    shapefile_zip_name = f"{prefix}_shp.zip"
     shapefile_zip_path = temp_dir / shapefile_zip_name
     shapefile_zip_created = False
     if {"shp", "dbf", "shx", "prj"}.issubset(shapefile_members):
-        shapefile_zip_path.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(
             shapefile_zip_path, "w", compression=zipfile.ZIP_DEFLATED
         ) as shp_archive:
             for suffix in ("shp", "dbf", "shx", "prj"):
                 member_path = shapefile_members[suffix]
-                arcname = Path(member_path.name)
-                shp_archive.write(member_path, arcname=arcname.name)
+                shp_archive.write(member_path, arcname=member_path.name)
         shapefile_zip_created = True
 
     stats_name: Optional[str] = None
     stats_path: Optional[Path] = None
-    if job.zone_config.include_stats and artifacts.zonal_stats is not None:
-        stats_name = f"{prefix}_zonal_stats.csv"
-        stats_path = temp_dir / stats_name
-        stats_path.parent.mkdir(parents=True, exist_ok=True)
-        stats_url = artifacts.zonal_stats.getDownloadURL({"fileFormat": "CSV"})
-        stats_payload, _ = _download_bytes(stats_url)
-        stats_path.write_bytes(stats_payload)
+    if job.zone_config.include_stats and artifacts.zonal_stats_path:
+        stats_src = Path(artifacts.zonal_stats_path)
+        if stats_src.exists():
+            stats_name = f"{prefix}_zonal_stats.csv"
+            stats_path = temp_dir / stats_name
+            stats_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(stats_src, stats_path)
 
     files: List[tuple[Path, str]] = [(raster_path, raster_name)]
     files.extend(vector_files)
@@ -722,7 +733,7 @@ def _download_zone_artifacts(
 
     paths = {
         "raster": raster_name,
-        "vectors": vector_main,
+        "vectors": vector_components.get("shp"),
         "vector_components": vector_components,
         "zonal_stats": stats_name,
         "geojson": geojson_name,
