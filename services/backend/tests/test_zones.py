@@ -1426,15 +1426,44 @@ def test_add_zonal_stats_converts_reduce_region_results(monkeypatch):
         def map(self, func):
             return FakeList([func(item) for item in self])
 
+        def iterate(self, func, initial):
+            acc = initial
+            for item in self:
+                acc = func(item, acc)
+            return acc
+
     class FakeDictionary:
-        def __init__(self, data):
-            self.data = dict(data)
+        def __init__(self, data=None):
+            if isinstance(data, FakeDictionary):
+                self.data = dict(data.data)
+            else:
+                self.data = dict(data or {})
 
         def keys(self):
             return FakeList(list(self.data.keys()))
 
         def get(self, key):
-            return self.data[key]
+            key_value = getattr(key, "value", key)
+            return self.data[key_value]
+
+        def set(self, key, value):
+            key_value = getattr(key, "value", key)
+            updated = dict(self.data)
+            updated[key_value] = value
+            return FakeDictionary(updated)
+
+        def __getitem__(self, key):  # pragma: no cover - compatibility hook
+            key_value = getattr(key, "value", key)
+            return self.data[key_value]
+
+        def combine(self, other):
+            if isinstance(other, FakeDictionary):
+                other_data = other.data
+            else:  # pragma: no cover - defensive fallback
+                other_data = dict(other)
+            merged = dict(self.data)
+            merged.update(other_data)
+            return FakeDictionary(merged)
 
         @staticmethod
         def fromLists(keys, values):
@@ -1447,12 +1476,31 @@ def test_add_zonal_stats_converts_reduce_region_results(monkeypatch):
         def toInt(self):
             return int(self.value)
 
+        def eq(self, other):
+            other_val = other.value if isinstance(other, FakeNumber) else other
+            return self.value == other_val
+
     def fake_number(value):
         if isinstance(value, FakeNumber):
             return value
+        if isinstance(value, FakeSentinelImage):
+            FakeImageModule.constant(value)
         if value is None:
             raise AssertionError("ee.Number should not receive None")
         return FakeNumber(value)
+
+    class FakeString:
+        def __init__(self, value):
+            self.value = str(value)
+
+        def compareTo(self, other):
+            other_val = getattr(other, "value", other)
+            if self.value == other_val:
+                return FakeNumber(0)
+            return FakeNumber(1 if self.value > other_val else -1)
+
+        def __str__(self):  # pragma: no cover - debug aid
+            return self.value
 
     class FakeBandImage:
         def __init__(self, value):
@@ -1480,10 +1528,30 @@ def test_add_zonal_stats_converts_reduce_region_results(monkeypatch):
             calls["constant"] += 1
             raise AssertionError("ee.Image.constant must not be called")
 
+    class FakeSentinelImage(FakeImageModule):
+        pass
+
     class FakeReducer:
         @staticmethod
         def mean():
             return "mean"
+
+    class FakeAlgorithms:
+        @staticmethod
+        def If(condition, true_case, false_case):
+            return true_case if condition else false_case
+
+        @staticmethod
+        def ObjectType(value):
+            if isinstance(value, FakeNumber):
+                return FakeString("Number")
+            if isinstance(value, (int, float)):
+                return FakeString("Number")
+            if value is None:
+                return FakeString("Null")
+            if isinstance(value, FakeSentinelImage):
+                return FakeString("Image")
+            return FakeString("Other")
 
     class FakeArea:
         def __init__(self, value):
@@ -1517,11 +1585,13 @@ def test_add_zonal_stats_converts_reduce_region_results(monkeypatch):
             return self.props[key]
 
     fake_ee = SimpleNamespace(
-        Dictionary=FakeDictionary,
-        List=FakeList,
+        Algorithms=FakeAlgorithms,
+        Dictionary=lambda value=None: FakeDictionary(value or {}),
+        List=lambda items=None: FakeList(items or []),
         Number=fake_number,
         Image=FakeImageModule,
         Reducer=FakeReducer,
+        String=FakeString,
     )
 
     monkeypatch.setattr(zones, "ee", fake_ee)
@@ -1529,6 +1599,8 @@ def test_add_zonal_stats_converts_reduce_region_results(monkeypatch):
     stats_images = {
         "NDVI_cv": FakeBandImage(None),
         "NDVI_mean": FakeBandImage(1.5),
+        "NDVI_misc": FakeBandImage(FakeSentinelImage()),
+        "NDVI_label": FakeBandImage("bad"),
     }
 
     feature = FakeFeature()
@@ -1539,6 +1611,8 @@ def test_add_zonal_stats_converts_reduce_region_results(monkeypatch):
     assert calls["constant"] == 0
     assert result.props["NDVI_mean"] == pytest.approx(1.5)
     assert result.props["NDVI_cv"] is None
+    assert result.props["NDVI_label"] is None
+    assert "NDVI_misc" not in result.props
     assert result.props["area_ha"] == pytest.approx(2.5)
     assert result.props["zone"] == 4
     assert result.props["zone_id"] == 4
