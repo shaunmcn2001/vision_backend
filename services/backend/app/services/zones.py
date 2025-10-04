@@ -4,12 +4,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import calendar
+import csv
 import os
 import math
+from pathlib import Path
 import re
+import tempfile
 from typing import Dict, List, Mapping, Sequence, Tuple, Union
+from urllib.request import urlopen
 
 import ee
+import numpy as np
+import rasterio
+from rasterio.features import shapes
+import shapefile
+from pyproj import CRS
+from shapely.geometry import mapping, shape
+from scipy import ndimage
 
 from app import gee
 from app.exports import sanitize_name
@@ -116,12 +127,242 @@ STABILITY_MASK_EMPTY_ERROR = (
 
 @dataclass(frozen=True)
 class ZoneArtifacts:
-    """Container for the images/vectors used for production zone exports."""
+    """Container for locally generated zone artefacts stored on disk."""
 
-    zone_image: ee.Image
-    zone_vectors: ee.FeatureCollection
-    zonal_stats: ee.FeatureCollection | None
-    geometry: ee.Geometry
+    raster_path: str
+    vector_path: str
+    vector_components: dict[str, str]
+    zonal_stats_path: str | None = None
+    working_dir: str | None = None
+
+
+def _ensure_working_directory(path: os.PathLike[str] | str | None) -> Path:
+    if path:
+        workdir = Path(path)
+        workdir.mkdir(parents=True, exist_ok=True)
+        return workdir
+    return Path(tempfile.mkdtemp(prefix="zones_"))
+
+
+def _geometry_region(geometry: ee.Geometry) -> List[List[List[float]]]:
+    info = geometry.getInfo()
+    if not info:
+        raise ValueError("Unable to resolve geometry information for download")
+    geom_type = info.get("type")
+    if geom_type == "Polygon":
+        return info.get("coordinates", [])
+    if geom_type == "MultiPolygon":
+        # getDownloadURL accepts a single polygon; use bounding polygon
+        coords = info.get("coordinates") or []
+        if coords:
+            return coords[0]
+    if "coordinates" in info:
+        return info["coordinates"]
+    raise ValueError("Geometry information missing coordinates")
+
+
+def _download_image_to_path(image: ee.Image, geometry: ee.Geometry, target: Path) -> Path:
+    params = {
+        "scale": DEFAULT_SCALE,
+        "crs": DEFAULT_EXPORT_CRS,
+        "region": _geometry_region(geometry),
+        "filePerBand": False,
+        "format": "GeoTIFF",
+    }
+    url = image.getDownloadURL(params)
+    with urlopen(url) as response, target.open("wb") as output:
+        output.write(response.read())
+    return target
+
+
+def _majority_filter(data: np.ndarray, radius: int) -> np.ndarray:
+    if radius <= 0:
+        return data
+
+    size = radius * 2 + 1
+
+    def _mode(window: np.ndarray) -> int:
+        values = window.astype(np.int32)
+        values = values[values > 0]
+        if values.size == 0:
+            return 0
+        counts = np.bincount(values)
+        return int(np.argmax(counts))
+
+    filtered = ndimage.generic_filter(data, _mode, size=size, mode="nearest")
+    zero_mask = data == 0
+    filtered[zero_mask] = 0
+    return filtered.astype(data.dtype)
+
+
+def _remove_small_regions(data: np.ndarray, min_pixels: int) -> np.ndarray:
+    if min_pixels <= 1:
+        return data
+
+    structure = ndimage.generate_binary_structure(data.ndim, 2)
+    result = data.copy()
+    for value in np.unique(result):
+        if value <= 0:
+            continue
+        mask = result == value
+        labeled, num = ndimage.label(mask, structure=structure)
+        if num == 0:
+            continue
+        sizes = ndimage.sum(mask, labeled, index=range(1, num + 1))
+        small_labels = [idx + 1 for idx, size in enumerate(sizes) if size < min_pixels]
+        if not small_labels:
+            continue
+        remove_mask = np.isin(labeled, small_labels)
+        result[remove_mask] = 0
+    return result
+
+
+def _classify_local_zones(
+    ndvi_raster: Path,
+    *,
+    working_dir: Path,
+    n_classes: int,
+    min_mapping_unit_ha: float,
+    smooth_radius_m: float,
+    open_radius_m: float,
+    close_radius_m: float,
+    include_stats: bool,
+) -> tuple[ZoneArtifacts, Dict[str, object]]:
+    with rasterio.open(ndvi_raster) as src:
+        ndvi = src.read(1, masked=True)
+        transform = src.transform
+        crs = src.crs
+        profile = src.profile
+
+    if ndvi.mask.all():
+        raise ValueError(NDVI_MASK_EMPTY_ERROR)
+
+    valid_values = ndvi.compressed()
+    if valid_values.size == 0:
+        raise ValueError(NDVI_MASK_EMPTY_ERROR)
+
+    percentiles = np.linspace(0, 100, n_classes + 1)[1:-1]
+    thresholds = np.percentile(valid_values, percentiles)
+
+    classified = np.digitize(ndvi.filled(np.nan), thresholds, right=False).astype(np.int16) + 1
+    classified[ndvi.mask] = 0
+
+    pixel_size_x = abs(transform.a)
+    pixel_size_y = abs(transform.e)
+    pixel_area = pixel_size_x * pixel_size_y
+    radius_scale = max(pixel_size_x, pixel_size_y)
+
+    smooth_radius_px = int(round(max(smooth_radius_m, 0) / radius_scale))
+    open_radius_px = int(round(max(open_radius_m, 0) / radius_scale))
+    close_radius_px = int(round(max(close_radius_m, 0) / radius_scale))
+
+    classified = _majority_filter(classified, smooth_radius_px)
+    classified = _majority_filter(classified, open_radius_px)
+    classified = _majority_filter(classified, close_radius_px)
+
+    min_pixels = int(round((min_mapping_unit_ha * 10_000) / pixel_area))
+    classified = _remove_small_regions(classified, min_pixels)
+
+    if np.any(classified == 0):
+        filled = _majority_filter(classified, 1)
+        zero_mask = classified == 0
+        classified[zero_mask] = filled[zero_mask]
+
+    classified = classified.astype(np.uint8)
+
+    raster_profile = profile.copy()
+    raster_profile.update(dtype=rasterio.uint8, count=1, compress="lzw", nodata=0)
+
+    raster_path = working_dir / "zones_classified.tif"
+    with rasterio.open(raster_path, "w", **raster_profile) as dst:
+        dst.write(classified, 1)
+
+    records: List[Dict[str, object]] = []
+    zonal_stats: List[Dict[str, object]] = []
+    for geom, value in shapes(classified, mask=classified > 0, transform=transform):
+        zone_id = int(value)
+        if zone_id <= 0:
+            continue
+        geom_shape = shape(geom)
+        area_m2 = geom_shape.area
+        area_ha = area_m2 / 10_000.0
+        records.append({"zone": zone_id, "geometry": geom_shape, "area_ha": area_ha})
+
+    vector_path = working_dir / "zones"
+    vector_path.mkdir(parents=True, exist_ok=True)
+    shp_base = vector_path / "zones"
+    with shapefile.Writer(str(shp_base)) as writer:
+        writer.autoBalance = 1
+        writer.field("zone", "N", decimal=0)
+        writer.field("area_ha", "F", decimal=4)
+        for record in records:
+            writer.record(int(record["zone"]), float(record["area_ha"]))
+            writer.shape(mapping(record["geometry"]))
+
+    shp_path = shp_base.with_suffix(".shp")
+    cpg_path = shp_base.with_suffix(".cpg")
+    cpg_path.write_text("UTF-8")
+    if crs:
+        prj_path = shp_base.with_suffix(".prj")
+        try:
+            prj_path.write_text(CRS.from_user_input(crs).to_wkt())
+        except Exception:  # pragma: no cover - pyproj failures
+            prj_path.write_text("")
+
+    vector_components: dict[str, str] = {}
+    for ext in ["shp", "dbf", "shx", "prj", "cpg"]:
+        component = shp_base.with_suffix(f".{ext}")
+        if component.exists():
+            vector_components[ext] = str(component)
+
+    unique_zones = np.unique(classified[classified > 0])
+    ndvi_data = ndvi.filled(np.nan)
+    for zone_id in unique_zones:
+        mask = classified == zone_id
+        zone_values = ndvi_data[mask]
+        zone_values = zone_values[~np.isnan(zone_values)]
+        if zone_values.size == 0:
+            continue
+        area_ha = float(mask.sum() * pixel_area / 10_000.0)
+        zonal_stats.append(
+            {
+                "zone": int(zone_id),
+                "area_ha": area_ha,
+                "mean_ndvi": float(np.mean(zone_values)),
+                "min_ndvi": float(np.min(zone_values)),
+                "max_ndvi": float(np.max(zone_values)),
+                "pixel_count": int(mask.sum()),
+            }
+        )
+
+    stats_path: Path | None = None
+    if include_stats and zonal_stats:
+        stats_path = working_dir / "zones_zonal_stats.csv"
+        with stats_path.open("w", newline="") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=["zone", "area_ha", "mean_ndvi", "min_ndvi", "max_ndvi", "pixel_count"],
+            )
+            writer.writeheader()
+            writer.writerows(zonal_stats)
+
+    metadata: Dict[str, object] = {
+        "percentile_thresholds": [float(value) for value in thresholds.tolist()],
+        "palette": list(ZONE_PALETTE[: max(1, min(n_classes, len(ZONE_PALETTE)))]),
+        "zones": zonal_stats,
+        "min_mapping_unit_applied": min_pixels > 1,
+        "mmu_applied": min_pixels > 1,
+    }
+
+    artifacts = ZoneArtifacts(
+        raster_path=str(raster_path),
+        vector_path=str(shp_path),
+        vector_components=vector_components,
+        zonal_stats_path=str(stats_path) if stats_path is not None else None,
+        working_dir=str(working_dir),
+    )
+
+    return artifacts, metadata
 
 
 def _ordered_months(months: Sequence[str]) -> List[str]:
@@ -1160,6 +1401,7 @@ def _prepare_selected_period_artifacts(
     aoi_geojson: Union[dict, ee.Geometry],
     *,
     geometry: ee.Geometry,
+    working_dir: Path,
     months: Sequence[str],
     start_date: date,
     end_date: date,
@@ -1177,8 +1419,15 @@ def _prepare_selected_period_artifacts(
     sample_size: int,
     include_stats: bool,
 ) -> tuple[ZoneArtifacts, Dict[str, object]]:
+    _ = (
+        cv_mask_threshold,
+        apply_stability_mask,
+        simplify_tol_m,
+        simplify_buffer_m,
+        method,
+        sample_size,
+    )
     ordered_months = _ordered_months(months)
-    stability_enabled = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
     composites, skipped_months, composite_metadata = _build_composite_series(
         geometry,
         ordered_months,
@@ -1191,99 +1440,11 @@ def _prepare_selected_period_artifacts(
 
     ndvi_images = [_compute_ndvi(image) for _, image in composites]
     stats = _ndvi_temporal_stats(ndvi_images)
-    cv_image = stats["cv"]
+    mean_image = stats["mean"].rename("NDVI_mean")
 
-    mean_pixel_count = _pixel_count(
-        stats["mean"],
-        geometry,
-        context="NDVI mean pixel count",
-        scale=DEFAULT_SCALE,
-    )
-    print("NDVI mean pixel count:", mean_pixel_count)
-
-    if mean_pixel_count <= 0:
-        raise ValueError(NDVI_MASK_EMPTY_ERROR)
-
-    initial_threshold = float(cv_mask_threshold)
-    thresholds_to_try: List[float] = [initial_threshold]
-    for fallback in STABILITY_THRESHOLD_SEQUENCE:
-        if fallback > initial_threshold + 1e-9:
-            thresholds_to_try.append(fallback)
-
-    total_pixels = _pixel_count(
-        cv_image,
-        geometry,
-        context="stability baseline pixel count",
-        scale=DEFAULT_SCALE,
-    )
-
-    stability: ee.Image | None = None
-    final_threshold = initial_threshold
-    survival_ratio = 0.0
-    surviving_pixels = 0
-    thresholds_tested: List[float] = []
-    ratio_history: List[float] = []
-
-    if total_pixels > 0:
-        for idx, threshold in enumerate(thresholds_to_try):
-            thresholds_tested.append(float(threshold))
-            candidate = cv_image.lte(threshold).selfMask()
-            surviving_pixels = _pixel_count(
-                candidate,
-                geometry,
-                context="stability surviving pixel count",
-                scale=DEFAULT_SCALE,
-            )
-            ratio = (surviving_pixels / total_pixels) if total_pixels else 0.0
-            ratio_history.append(ratio)
-            stability = candidate
-            final_threshold = float(threshold)
-            survival_ratio = ratio
-            if ratio >= MIN_STABILITY_SURVIVAL_RATIO or idx == len(thresholds_to_try) - 1:
-                break
-    else:
-        thresholds_tested.append(float(initial_threshold))
-        ratio_history.append(0.0)
-        stability = ee.Image(1)
-        surviving_pixels = 0
-        survival_ratio = 0.0
-
-    thresholds_for_mask = thresholds_tested or [initial_threshold]
-    guarded_mask = _stability_mask(
-        cv_image,
-        geometry,
-        thresholds_for_mask,
-        MIN_STABILITY_SURVIVAL_RATIO,
-        DEFAULT_SCALE,
-    )
-
-    if stability_enabled:
-        tmp_mask = guarded_mask
-    else:
-        tmp_mask = ee.Image(1)
-
-    mask_count_image = (
-        tmp_mask if stability_enabled else tmp_mask.updateMask(cv_image.mask())
-    )
-    mask_pixel_count = _pixel_count(
-        mask_count_image,
-        geometry,
-        context="stability mask pixel count",
-        scale=DEFAULT_SCALE,
-    )
-    print("Stability mask pixel count:", mask_pixel_count)
-
-    if stability_enabled:
-        stability = guarded_mask
-    else:
-        stability = tmp_mask
-        surviving_pixels = mask_pixel_count
-        survival_ratio = 1.0 if total_pixels > 0 else 0.0
-        final_threshold = initial_threshold
-
-    low_confidence = final_threshold > initial_threshold + 1e-9
-
-    stats = {**stats, "stability": stability}
+    workdir = _ensure_working_directory(working_dir)
+    ndvi_path = workdir / "mean_ndvi.tif"
+    _download_image_to_path(mean_image, geometry, ndvi_path)
 
     mmu_value = max(min_mapping_unit_ha, 0)
     mmu_applied = True
@@ -1296,65 +1457,15 @@ def _prepare_selected_period_artifacts(
             mmu_value = max(min_mapping_unit_ha, 0)
             mmu_applied = True
 
-    method_key = method.strip().lower()
-    extra_means: Dict[str, ee.Image] = {}
-
-    percentile_thresholds: List[float] = []
-
-    if method_key == "ndvi_percentiles":
-        try:
-            zone_image, percentile_thresholds = _build_percentile_zones(
-                ndvi_stats=stats,
-                geometry=geometry,
-                n_classes=n_classes,
-                smooth_radius_m=smooth_radius_m,
-                open_radius_m=open_radius_m,
-                close_radius_m=close_radius_m,
-                min_mapping_unit_ha=mmu_value,
-            )
-        except ValueError as exc:
-            raise ValueError(str(exc)) from exc
-    else:
-        zone_image, mean_images = _build_multiindex_zones(
-            ndvi_stats=stats,
-            composites=[image for _, image in composites],
-            geometry=geometry,
-            n_classes=n_classes,
-            smooth_radius_m=smooth_radius_m,
-            open_radius_m=open_radius_m,
-            close_radius_m=close_radius_m,
-            min_mapping_unit_ha=mmu_value,
-            sample_size=sample_size,
-        )
-        extra_means = {
-            name: image.updateMask(stats["stability"])
-            for name, image in mean_images.items()
-        }
-
-    zone_image = zone_image.updateMask(zone_image.neq(0)).toInt16()
-    # Do NOT reproject to EPSG:4326 here; keep native meter-scale projection.
-    # (Exports will set CRS explicitly.)
-    zone_image = zone_image.rename("zone")
-
-    vectors = _prepare_vectors(
-        zone_image,
-        geometry,
-        tolerance_m=simplify_tol_m,
-        buffer_m=simplify_buffer_m,
-    )
-
-    stats_collection = None
-    stats_images = _collect_stats_images(stats, extra_means)
-    if include_stats:
-        stats_collection = ee.FeatureCollection(
-            vectors.map(lambda feature: _add_zonal_stats(feature, stats_images))
-        )
-
-    artifacts = ZoneArtifacts(
-        zone_image=zone_image,
-        zone_vectors=vectors,
-        zonal_stats=stats_collection,
-        geometry=geometry,
+    artifacts, local_metadata = _classify_local_zones(
+        ndvi_path,
+        working_dir=workdir,
+        n_classes=n_classes,
+        min_mapping_unit_ha=mmu_value,
+        smooth_radius_m=smooth_radius_m,
+        open_radius_m=open_radius_m,
+        close_radius_m=close_radius_m,
+        include_stats=include_stats,
     )
 
     mmu_was_applied = mmu_value > 0 and mmu_applied
@@ -1366,43 +1477,8 @@ def _prepare_selected_period_artifacts(
     }
 
     metadata.update(composite_metadata)
-
-    if percentile_thresholds:
-        metadata["percentile_thresholds"] = percentile_thresholds
-    metadata["palette"] = list(ZONE_PALETTE[: max(1, min(n_classes, len(ZONE_PALETTE)))])
-
-    stability_metadata = {
-        "initial_threshold": initial_threshold,
-        "final_threshold": final_threshold,
-        "survival_ratio": survival_ratio,
-        "surviving_pixels": surviving_pixels,
-        "total_pixels": total_pixels,
-        "thresholds_tested": thresholds_tested,
-        "low_confidence": low_confidence,
-        "target_ratio": MIN_STABILITY_SURVIVAL_RATIO,
-        "mean_pixel_count": mean_pixel_count,
-        "mask_pixel_count": mask_pixel_count,
-        "apply_stability": stability_enabled,
-    }
-
-    metadata["stability"] = stability_metadata
-    metadata["low_confidence"] = low_confidence
-
-    debug_block = metadata.setdefault("debug", {})
-    debug_block["stability"] = {
-        "initial_threshold": initial_threshold,
-        "final_threshold": final_threshold,
-        "thresholds_tested": thresholds_tested,
-        "survival_ratios": ratio_history,
-        "survival_ratio": survival_ratio,
-        "surviving_pixels": surviving_pixels,
-        "total_pixels": total_pixels,
-        "target_ratio": MIN_STABILITY_SURVIVAL_RATIO,
-        "low_confidence": low_confidence,
-        "mean_pixel_count": mean_pixel_count,
-        "mask_pixel_count": mask_pixel_count,
-        "apply_stability": stability_enabled,
-    }
+    metadata.update(local_metadata)
+    metadata["downloaded_mean_ndvi"] = str(ndvi_path)
 
     return artifacts, metadata
 
@@ -1446,9 +1522,12 @@ def build_zone_artifacts(
     geometry = _resolve_geometry(aoi_geojson)
     start_date, end_date = _month_range_dates(months)
 
+    working_dir = _ensure_working_directory(None)
+
     artifacts, _metadata = _prepare_selected_period_artifacts(
         aoi_geojson,
         geometry=geometry,
+        working_dir=working_dir,
         months=months,
         start_date=start_date,
         end_date=end_date,
@@ -1479,50 +1558,9 @@ def start_zone_exports(
     include_stats: bool = True,
     prefix_override: str | None = None,
 ) -> Dict[str, ee.batch.Task]:
-    if prefix_override:
-        prefix = prefix_override
-    else:
-        if months is None:
-            raise ValueError("months must be provided when prefix_override is not set")
-        prefix = _export_prefix(aoi_name, months)
-    description_base = prefix.split("/")[-1][:90]
-
-    raster_task = ee.batch.Export.image.toCloudStorage(
-        image=artifacts.zone_image,
-        description=f"{description_base}_raster",
-        bucket=bucket,
-        fileNamePrefix=prefix,
-        region=artifacts.geometry,
-        scale=DEFAULT_SCALE,
-        crs=DEFAULT_EXPORT_CRS,  # metric CRS to match 10 m scale
-        maxPixels=gee.MAX_PIXELS,
-        fileFormat="GeoTIFF",
-        formatOptions={"cloudOptimized": False, "noDataValue": 0},
+    raise RuntimeError(
+        "Cloud exports are not supported for locally generated zone artifacts"
     )
-    raster_task.start()
-
-    vector_task = ee.batch.Export.table.toCloudStorage(
-        collection=artifacts.zone_vectors,
-        description=f"{description_base}_vectors",
-        bucket=bucket,
-        fileNamePrefix=prefix,
-        fileFormat="SHP",
-    )
-    vector_task.start()
-
-    stats_task = None
-    if include_stats and artifacts.zonal_stats is not None:
-        stats_prefix = prefix + "_zonal_stats"
-        stats_task = ee.batch.Export.table.toCloudStorage(
-            collection=artifacts.zonal_stats,
-            description=f"{description_base}_stats",
-            bucket=bucket,
-            fileNamePrefix=stats_prefix,
-            fileFormat="CSV",
-        )
-        stats_task.start()
-
-    return {"raster": raster_task, "vectors": vector_task, "stats": stats_task}
 
 
 def start_zone_exports_drive(
@@ -1532,42 +1570,9 @@ def start_zone_exports_drive(
     prefix: str,
     include_stats: bool = True,
 ) -> Dict[str, ee.batch.Task]:
-    description_base = prefix.split("/")[-1][:90]
-
-    raster_task = ee.batch.Export.image.toDrive(
-        image=artifacts.zone_image,
-        description=f"{description_base}_raster",
-        folder=folder,
-        fileNamePrefix=prefix,
-        region=artifacts.geometry,
-        scale=DEFAULT_SCALE,
-        crs=DEFAULT_EXPORT_CRS,  # metric CRS to match 10 m scale
-        maxPixels=gee.MAX_PIXELS,
-        fileFormat="GeoTIFF",
+    raise RuntimeError(
+        "Drive exports are not supported for locally generated zone artifacts"
     )
-    raster_task.start()
-
-    vector_task = ee.batch.Export.table.toDrive(
-        collection=artifacts.zone_vectors,
-        description=f"{description_base}_vectors",
-        folder=folder,
-        fileNamePrefix=prefix,
-        fileFormat="SHP",
-    )
-    vector_task.start()
-
-    stats_task = None
-    if include_stats and artifacts.zonal_stats is not None:
-        stats_task = ee.batch.Export.table.toDrive(
-            collection=artifacts.zonal_stats,
-            description=f"{description_base}_stats",
-            folder=folder,
-            fileNamePrefix=f"{prefix}_zonal_stats",
-            fileFormat="CSV",
-        )
-        stats_task.start()
-
-    return {"raster": raster_task, "vectors": vector_task, "stats": stats_task}
 
 
 def _task_payload(task: ee.batch.Task | None) -> Dict[str, object]:
@@ -1616,14 +1621,21 @@ def export_selected_period_zones(
     include_stats: bool | None = None,
     apply_stability_mask: bool = True,
 ):
-    # ✅ Normalize AOI FIRST so all downstream EE ops see an ee.Geometry, not a dict
+    working_dir = _ensure_working_directory(None)
+
     aoi = _to_ee_geometry(aoi_geojson)
     geometry = geometry or aoi
     if start_date is not None and end_date is not None and end_date < start_date:
         raise ValueError("end_date must be on or after start_date")
 
-    if months and not isinstance(months, Sequence):
-        months = list(months)
+    if cv_mask_threshold is None:
+        cv_mask_threshold = DEFAULT_CV_THRESHOLD
+    if min_mapping_unit_ha is not None:
+        mmu_ha = float(min_mapping_unit_ha)
+    if simplify_tolerance_m is not None:
+        simplify_tol_m = int(simplify_tolerance_m)
+    if destination is not None:
+        export_target = destination
 
     if not months:
         if start_date is None or end_date is None:
@@ -1633,32 +1645,22 @@ def export_selected_period_zones(
     ordered_months = _ordered_months(months)
     if start_date is None or end_date is None:
         start_date, end_date = _month_range_dates(ordered_months)
-    if min_mapping_unit_ha is not None:
-        mmu_ha = float(min_mapping_unit_ha)
-
-    if simplify_tolerance_m is not None:
-        simplify_tol_m = int(simplify_tolerance_m)
-
-    if destination is not None:
-        export_target = destination
-
-    if n_classes < 3 or n_classes > 7:
-        raise ValueError("n_classes must be between 3 and 7")
-    if smooth_radius_m < 0 or open_radius_m < 0 or close_radius_m < 0:
-        raise ValueError("Smoothing radii must be non-negative")
-    if mmu_ha < 0:
-        raise ValueError("min_mapping_unit_ha must be non-negative")
 
     include_stats_flag = bool(
         include_stats if include_stats is not None else include_zonal_stats
     )
 
-    gee.initialize()
+    try:
+        gee.initialize()
+    except Exception:  # pragma: no cover
+        if not _allow_init_failure():
+            raise
     geometry = geometry or _resolve_geometry(aoi_geojson)
 
     artifacts, metadata = _prepare_selected_period_artifacts(
         aoi_geojson,
         geometry=geometry,
+        working_dir=working_dir,
         months=ordered_months,
         start_date=start_date,
         end_date=end_date,
@@ -1677,138 +1679,44 @@ def export_selected_period_zones(
         include_stats=include_stats_flag,
     )
 
-    metadata = dict(metadata)
-    used_months: List[str] = list(metadata.get("used_months", []))
-    skipped: List[str] = list(metadata.get("skipped_months", []))
+    metadata = sanitize_for_json(dict(metadata))
+    used_months: list[str] = list(metadata.get("used_months", []))
+    skipped: list[str] = list(metadata.get("skipped_months", []))
     if not used_months:
         raise ValueError("No valid Sentinel-2 scenes available for the selected period")
 
     prefix_base = export_prefix(aoi_name, used_months)
-    stats_name = f"{prefix_base}_zonal_stats.csv" if include_stats_flag else None
 
-    export_target = (export_target or "zip").strip().lower()
-    if export_target not in {"zip", "gcs", "drive"}:
-        raise ValueError("export_target must be one of zip, gcs, or drive")
-
-    vector_components = {
-        "shp": f"{prefix_base}.shp",
-        "dbf": f"{prefix_base}.dbf",
-        "shx": f"{prefix_base}.shx",
-        "prj": f"{prefix_base}.prj",
-    }
-
-    mmu_applied_flag = bool(
-        metadata.get("min_mapping_unit_applied", metadata.get("mmu_applied", True))
-    )
     metadata.update(
         {
             "used_months": used_months,
             "skipped_months": skipped,
-            "min_mapping_unit_applied": mmu_applied_flag,
-            "mmu_applied": mmu_applied_flag,
         }
     )
 
-    metadata = sanitize_for_json(metadata)
-    palette = metadata.get("palette") if isinstance(metadata, dict) else None
-    thresholds = metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
-
     result: Dict[str, object] = {
         "paths": {
-            "raster": f"{prefix_base}.tif",
-            "vectors": vector_components["shp"],
-            "vector_components": vector_components,
-            "zonal_stats": stats_name,
+            "raster": artifacts.raster_path,
+            "vectors": artifacts.vector_path,
+            "vector_components": artifacts.vector_components,
+            "zonal_stats": artifacts.zonal_stats_path if include_stats_flag else None,
         },
         "tasks": {},
         "prefix": prefix_base,
         "metadata": metadata,
         "artifacts": artifacts,
+        "working_dir": artifacts.working_dir or str(working_dir),
     }
 
+    palette = metadata.get("palette") if isinstance(metadata, dict) else None
+    thresholds = metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
     if palette:
         result["palette"] = palette
     if thresholds:
         result["thresholds"] = thresholds
 
-    debug_info = metadata.get("debug") if isinstance(metadata, dict) else None
-    if debug_info is not None:
-        debug_info = sanitize_for_json(debug_info)
-        if isinstance(metadata, dict):
-            metadata["debug"] = debug_info
-        result["debug"] = debug_info
+    export_target = (export_target or "zip").strip().lower()
+    if export_target not in {"zip", "local"}:
+        raise ValueError("Only local zone exports are supported in this workflow")
 
-    if export_target == "zip":
-        return result
-
-    if export_target == "gcs":
-        bucket = resolve_export_bucket(gcs_bucket)
-        cleaned_prefix = prefix_base
-        if gcs_prefix:
-            trimmed = gcs_prefix.strip().strip("/")
-            if trimmed:
-                cleaned_prefix = f"{trimmed}/{prefix_base}"
-        tasks = start_zone_exports(
-            artifacts,
-            aoi_name=aoi_name,
-            months=used_months,
-            bucket=bucket,
-            include_stats=include_stats_flag,
-            prefix_override=cleaned_prefix,
-        )
-        result["bucket"] = bucket
-        result["prefix"] = cleaned_prefix
-        gcs_components = {
-            ext: f"gs://{bucket}/{cleaned_prefix}.{ext}"
-            for ext in ["shp", "dbf", "shx", "prj"]
-        }
-        result["paths"] = {
-            "raster": f"gs://{bucket}/{cleaned_prefix}.tif",
-            "vectors": gcs_components["shp"],
-            "vector_components": gcs_components,
-            "zonal_stats": (
-                f"gs://{bucket}/{cleaned_prefix}_zonal_stats.csv"
-                if include_stats_flag
-                else None
-            ),
-        }
-        result["tasks"] = {
-            "raster": _task_payload(tasks.get("raster")),
-            "vectors": _task_payload(tasks.get("vectors")),
-            "zonal_stats": _task_payload(tasks.get("stats")),
-        }
-        return result
-
-    folder = (os.getenv("GEE_DRIVE_FOLDER") or "Sentinel2_Indices").strip() or "Sentinel2_Indices"
-    folder = folder.rstrip("/")
-    if not folder.endswith("zones"):
-        folder = f"{folder}/zones"
-    drive_prefix = prefix_base.split("/")[-1]
-    tasks = start_zone_exports_drive(
-        artifacts,
-        folder=folder,
-        prefix=drive_prefix,
-        include_stats=include_stats_flag,
-    )
-    result["folder"] = folder
-    result["prefix"] = drive_prefix
-    drive_components = {
-        ext: f"drive://{folder}/{drive_prefix}.{ext}"
-        for ext in ["shp", "dbf", "shx", "prj"]
-    }
-    result["paths"] = {
-        "raster": f"drive://{folder}/{drive_prefix}.tif",
-        "vectors": drive_components["shp"],
-        "vector_components": drive_components,
-        "zonal_stats": (
-                f"drive://{folder}/{drive_prefix}_zonal_stats.csv"
-                if include_stats_flag
-                else None
-        ),
-    }
-    result["tasks"] = {
-        "raster": _task_payload(tasks.get("raster")),
-        "vectors": _task_payload(tasks.get("vectors")),
-        "zonal_stats": _task_payload(tasks.get("stats")),
-    }
     return result
