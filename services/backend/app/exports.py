@@ -663,13 +663,16 @@ def _download_zone_artifacts(
     vector_files: List[tuple[Path, str]] = []
     base_name = prefix
     for ext, src in artifacts.vector_components.items():
-        src_path = Path(src)
-        if not src_path.exists():
-            continue
         dest_name = f"{base_name}.{ext}"
         dest_path = temp_dir / dest_name
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src_path, dest_path)
+        if isinstance(src, (bytes, bytearray)):
+            dest_path.write_bytes(bytes(src))
+        else:
+            src_path = Path(str(src))
+            if not src_path.exists():
+                continue
+            shutil.copy(src_path, dest_path)
         vector_components[ext] = dest_name
         vector_files.append((dest_path, dest_name))
         if ext.lower() in {"shp", "dbf", "shx", "prj"}:
@@ -716,12 +719,19 @@ def _download_zone_artifacts(
     stats_name: Optional[str] = None
     stats_path: Optional[Path] = None
     if job.zone_config.include_stats and artifacts.zonal_stats_path:
-        stats_src = Path(artifacts.zonal_stats_path)
-        if stats_src.exists():
-            stats_name = f"{prefix}_zonal_stats.csv"
-            stats_path = temp_dir / stats_name
-            stats_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(stats_src, stats_path)
+        stats_src_obj = artifacts.zonal_stats_path
+        stats_name = f"{prefix}_zonal_stats.csv"
+        stats_path = temp_dir / stats_name
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(stats_src_obj, (bytes, bytearray)):
+            stats_path.write_bytes(bytes(stats_src_obj))
+        else:
+            stats_src = Path(str(stats_src_obj))
+            if stats_src.exists():
+                shutil.copy(stats_src, stats_path)
+            else:
+                stats_path = None
+                stats_name = None
 
     files: List[tuple[Path, str]] = [(raster_path, raster_name)]
     files.extend(vector_files)
@@ -740,6 +750,19 @@ def _download_zone_artifacts(
         "vectors_zip": shapefile_zip_name if shapefile_zip_created else None,
     }
     return files, paths
+
+
+def _cleanup_zone_workdir(job: ExportJob) -> None:
+    artifacts = job.zone_artifacts
+    if artifacts is None:
+        return
+    workdir = getattr(artifacts, "working_dir", None)
+    if workdir:
+        try:
+            shutil.rmtree(workdir, ignore_errors=True)
+        except Exception:
+            pass
+    job.zone_artifacts = None
 
 
 def _poll_zone_tasks(
@@ -806,86 +829,121 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
     if not job.zone_config or job.zone_state is None or job.zone_artifacts is None:
         return
 
-    zone_service = _zone_service()
     prefix = job.zone_state.prefix or _zone_prefix(job)
     job.zone_state.prefix = prefix
 
+    staging_dir = Path(tempfile.mkdtemp(prefix="zones_stage_"))
+
     try:
+        zone_files, zone_paths = _download_zone_artifacts(job, staging_dir)
         if job.export_target == "gcs":
             bucket = _gcs_bucket()
-            tasks = zone_service.start_zone_exports(
-                job.zone_artifacts,
-                aoi_name=job.aoi_name,
-                months=job.months,
-                bucket=bucket,
-                include_stats=job.zone_config.include_stats,
-            )
-            component_uris = {
-                ext: f"gs://{bucket}/{prefix}.{ext}"
-                for ext in ["shp", "dbf", "shx", "prj"]
-            }
-            job.zone_state.paths = {
-                "raster": f"gs://{bucket}/{prefix}.tif",
-                "vectors": component_uris["shp"],
-                "vector_components": component_uris,
-                "zonal_stats": (
-                    f"gs://{bucket}/{prefix}_zonal_stats.csv"
-                    if job.zone_config.include_stats
-                    else None
-                ),
-            }
-            job.zone_state.tasks = {
-                name: {
-                    "id": getattr(task, "id", None) if task else None,
-                    "state": "READY" if task else "SKIPPED",
-                    "destination_uri": None,
-                    "signed_url": None,
+            client = _storage_client()
+            bucket_ref = client.bucket(bucket)
+            uploaded_uris: Dict[str, str] = {}
+            for path, arcname in zone_files:
+                blob = bucket_ref.blob(arcname)
+                blob.upload_from_filename(str(path))
+                uploaded_uris[arcname] = f"gs://{bucket}/{arcname}"
+
+            def _to_gcs_uri(name: Optional[str]) -> Optional[str]:
+                if not name:
+                    return None
+                return uploaded_uris.get(name) or f"gs://{bucket}/{name}"
+
+            mapped_paths: Dict[str, object] = {}
+            for key, value in zone_paths.items():
+                if key == "vector_components" and isinstance(value, dict):
+                    mapped_paths[key] = {
+                        ext: _to_gcs_uri(name) for ext, name in value.items() if name
+                    }
+                else:
+                    mapped_paths[key] = _to_gcs_uri(value) if isinstance(value, str) else value
+
+            if "geojson" not in mapped_paths:
+                mapped_paths["geojson"] = _to_gcs_uri(zone_paths.get("geojson"))
+
+            job.zone_state.paths = mapped_paths
+            job.zone_state.tasks = {}
+            for key in ("raster", "vectors", "geojson", "zonal_stats", "vectors_zip"):
+                destination = mapped_paths.get(key)
+                if not isinstance(destination, str):
+                    continue
+                blob_path = destination[len(f"gs://{bucket}/") :]
+                signed_url = _generate_signed_gcs_url(bucket, blob_path)
+                job.zone_state.tasks[key] = {
+                    "id": None,
+                    "state": "COMPLETED",
+                    "destination_uri": destination,
+                    "signed_url": signed_url,
                     "error": None,
                 }
-                for name, task in tasks.items()
-            }
-            job.zone_state.status = "exporting"
+
+            metadata_entries = job.zone_state.metadata.get(ZONE_ARCHIVE_METADATA_KEY)
+            if isinstance(metadata_entries, list):
+                for entry in metadata_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    arcname = entry.get("arcname")
+                    if arcname and arcname in uploaded_uris:
+                        entry["path"] = uploaded_uris[arcname]
+                        entry["destination_uri"] = uploaded_uris[arcname]
+                        entry["included_in_zip"] = False
+                job.zone_state.metadata[ZONE_ARCHIVE_METADATA_KEY] = metadata_entries
+
+            job.zone_state.status = "completed"
+            _cleanup_zone_workdir(job)
             job.touch()
-            _poll_zone_tasks(job, tasks, bucket=bucket)
         elif job.export_target == "drive":
             folder = os.getenv("GEE_DRIVE_FOLDER", "Sentinel2_Indices") or "Sentinel2_Indices"
             folder = folder.strip().rstrip("/") or "Sentinel2_Indices"
             if not folder.endswith("zones"):
                 folder = f"{folder}/zones"
             drive_prefix = prefix.split("/")[-1]
-            tasks = zone_service.start_zone_exports_drive(
-                job.zone_artifacts,
-                folder=folder,
-                prefix=drive_prefix,
-                include_stats=job.zone_config.include_stats,
-            )
-            component_uris = {
-                ext: f"drive://{folder}/{drive_prefix}.{ext}"
-                for ext in ["shp", "dbf", "shx", "prj"]
-            }
-            job.zone_state.paths = {
-                "raster": f"drive://{folder}/{drive_prefix}.tif",
-                "vectors": component_uris["shp"],
-                "vector_components": component_uris,
-                "zonal_stats": (
-                    f"drive://{folder}/{drive_prefix}_zonal_stats.csv"
-                    if job.zone_config.include_stats
-                    else None
-                ),
-            }
-            job.zone_state.tasks = {
-                name: {
-                    "id": getattr(task, "id", None) if task else None,
-                    "state": "READY" if task else "SKIPPED",
-                    "destination_uri": None,
-                    "signed_url": None,
+            staged_dir = _output_dir() / "drive_zones" / job.job_id
+            staged_dir.mkdir(parents=True, exist_ok=True)
+            staged_paths: Dict[str, str] = {}
+            for path, arcname in zone_files:
+                dest = staged_dir / arcname
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(path, dest)
+                staged_paths[arcname] = str(dest)
+
+            def _to_drive_uri(name: Optional[str]) -> Optional[str]:
+                if not name:
+                    return None
+                final_name = Path(name).name
+                return f"drive://{folder}/{final_name}"
+
+            mapped_paths: Dict[str, object] = {}
+            for key, value in zone_paths.items():
+                if key == "vector_components" and isinstance(value, dict):
+                    mapped_paths[key] = {
+                        ext: _to_drive_uri(name) for ext, name in value.items() if name
+                    }
+                else:
+                    mapped_paths[key] = _to_drive_uri(value) if isinstance(value, str) else value
+
+            mapped_paths["geojson"] = _to_drive_uri(zone_paths.get("geojson"))
+
+            job.zone_state.paths = mapped_paths
+            job.zone_state.tasks = {}
+            for key in ("raster", "vectors", "geojson", "zonal_stats", "vectors_zip"):
+                destination = mapped_paths.get(key)
+                if not isinstance(destination, str):
+                    continue
+                job.zone_state.tasks[key] = {
+                    "id": None,
+                    "state": "STAGED",
+                    "destination_uri": destination,
+                    "signed_url": destination,
                     "error": None,
                 }
-                for name, task in tasks.items()
-            }
-            job.zone_state.status = "exporting"
+
+            job.zone_state.metadata.setdefault("drive_staging", staged_paths)
+            job.zone_state.status = "completed"
+            _cleanup_zone_workdir(job)
             job.touch()
-            _poll_zone_tasks(job, tasks)
         else:
             job.zone_state.status = "failed"
             job.zone_state.error = f"Unsupported export target for zones: {job.export_target}"
@@ -905,6 +963,8 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
         if not job.error:
             job.error = str(exc)
         job.touch()
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 def _process_zip_exports(job: ExportJob) -> None:
     if job.temp_dir is None:
         job.temp_dir = Path(tempfile.mkdtemp(prefix="s2idx_"))
@@ -949,6 +1009,7 @@ def _process_zip_exports(job: ExportJob) -> None:
                 ]
                 if zone_archive_entries:
                     job.zone_state.metadata[ZONE_ARCHIVE_METADATA_KEY] = zone_archive_entries
+                _cleanup_zone_workdir(job)
             except Exception as exc:
                 logger.exception(
                     "Failed to download zone artifacts for job %s (AOI %s): %s",
