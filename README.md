@@ -2,6 +2,12 @@
 
 A Cloud Run–ready FastAPI backend template for NDVI/indices via Google Earth Engine.
 
+## Dependencies
+
+Install the backend requirements to pull in third-party services, including the real ``rasterio`` distribution used by
+the zone-classification pipeline::
+
+    pip install -r services/backend/requirements.txt
 
 ## NDVI monthly endpoint
 
