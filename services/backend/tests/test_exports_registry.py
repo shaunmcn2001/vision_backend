@@ -100,6 +100,61 @@ def _build_zip_job(tmp_path, job_id: str = "job-zip"):
     return job, local_path, zip_path, temp_dir
 
 
+def _create_zone_artifacts(workdir: Path) -> zones.ZoneArtifacts:
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    raster_path = workdir / "zones.tif"
+    with rasterio.open(
+        raster_path,
+        "w",
+        driver="GTiff",
+        height=1,
+        width=1,
+        count=1,
+        dtype="uint8",
+        crs=zones.DEFAULT_EXPORT_CRS,
+        transform=from_origin(0, 10, zones.DEFAULT_SCALE, zones.DEFAULT_SCALE),
+        nodata=0,
+    ) as dst:
+        dst.write(np.array([[1]], dtype="uint8"), 1)
+
+    vector_dir = workdir / "vectors"
+    vector_dir.mkdir(exist_ok=True)
+    shp_base = vector_dir / "zones"
+    with shapefile.Writer(str(shp_base), shapeType=shapefile.POLYGON) as writer:
+        writer.autoBalance = 1
+        writer.field("zone", "N", decimal=0)
+        writer.field("area_ha", "F", decimal=4)
+        writer.record(1, 0.1)
+        writer.shape(
+            {
+                "type": "Polygon",
+                "coordinates": [[[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]]],
+            }
+        )
+    shp_base.with_suffix(".cpg").write_text("UTF-8")
+    shp_base.with_suffix(".prj").write_text("")
+    shp_path = shp_base.with_suffix(".shp")
+    vector_components = {}
+    for ext in ["shp", "dbf", "shx", "prj", "cpg"]:
+        member = shp_base.with_suffix(f".{ext}")
+        if member.exists():
+            vector_components[ext] = str(member)
+
+    stats_path = workdir / "zones_stats.csv"
+    stats_path.write_text(
+        "zone,area_ha,mean_ndvi,min_ndvi,max_ndvi,pixel_count\n1,0.1,0.5,0.4,0.6,10\n"
+    )
+
+    return zones.ZoneArtifacts(
+        raster_path=str(raster_path),
+        vector_path=str(shp_path),
+        vector_components=vector_components,
+        zonal_stats_path=str(stats_path),
+        working_dir=str(workdir),
+    )
+
+
 def test_create_job_generates_all_exports(monkeypatch):
     monkeypatch.setattr(exports.gee, "initialize", lambda: None)
     monkeypatch.setattr(exports.gee, "geometry_from_geojson", lambda geojson: geojson)
@@ -381,54 +436,7 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
     job.zone_state.prefix = exports._zone_prefix(job)
 
     workdir = tmp_path / "zone_artifacts"
-    workdir.mkdir()
-
-    raster_path = workdir / "zones.tif"
-    with rasterio.open(
-        raster_path,
-        "w",
-        driver="GTiff",
-        height=1,
-        width=1,
-        count=1,
-        dtype="uint8",
-        crs=zones.DEFAULT_EXPORT_CRS,
-        transform=from_origin(0, 10, zones.DEFAULT_SCALE, zones.DEFAULT_SCALE),
-        nodata=0,
-    ) as dst:
-        dst.write(np.array([[1]], dtype="uint8"), 1)
-
-    vector_dir = workdir / "vectors"
-    vector_dir.mkdir()
-    shp_base = vector_dir / "zones"
-    with shapefile.Writer(str(shp_base), shapeType=shapefile.POLYGON) as writer:
-        writer.autoBalance = 1
-        writer.field("zone", "N", decimal=0)
-        writer.field("area_ha", "F", decimal=4)
-        writer.record(1, 0.1)
-        writer.shape({
-            "type": "Polygon",
-            "coordinates": [[[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]]],
-        })
-    shp_base.with_suffix(".cpg").write_text("UTF-8")
-    shp_base.with_suffix(".prj").write_text("")
-    shp_path = shp_base.with_suffix(".shp")
-    vector_components = {}
-    for ext in ["shp", "dbf", "shx", "prj"]:
-        member = shp_path.with_suffix(f".{ext}")
-        if member.exists():
-            vector_components[ext] = str(member)
-
-    stats_path = workdir / "zones_stats.csv"
-    stats_path.write_text("zone,area_ha,mean_ndvi,min_ndvi,max_ndvi,pixel_count\n1,0.1,0.5,0.4,0.6,10\n")
-
-    job.zone_artifacts = zones.ZoneArtifacts(
-        raster_path=str(raster_path),
-        vector_path=str(shp_path),
-        vector_components=vector_components,
-        zonal_stats_path=str(stats_path),
-        working_dir=str(workdir),
-    )
+    job.zone_artifacts = _create_zone_artifacts(workdir)
 
     files, paths = exports._download_zone_artifacts(job, tmp_path)
 
@@ -440,6 +448,87 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
         assert paths["zonal_stats"].endswith("_zonal_stats.csv")
     if paths["vectors_zip"]:
         assert paths["vectors_zip"] in file_names
+    assert paths["geojson"].endswith(".geojson")
+
+
+def test_start_zone_cloud_exports_uploads_zone_files(tmp_path, monkeypatch):
+    job, *_ = _build_zip_job(tmp_path)
+    job.export_target = "gcs"
+    job.zone_state.status = "ready"
+    job.zone_state.prefix = exports._zone_prefix(job)
+
+    artifacts_dir = tmp_path / "zone_artifacts"
+    job.zone_artifacts = _create_zone_artifacts(artifacts_dir)
+
+    uploaded: dict[str, bytes] = {}
+
+    class FakeBlob:
+        def __init__(self, name: str):
+            self.name = name
+
+        def upload_from_filename(self, filename: str) -> None:
+            uploaded[self.name] = Path(filename).read_bytes()
+
+        def generate_signed_url(self, **_kwargs) -> str:
+            return f"https://signed/{self.name}"
+
+    class FakeBucket:
+        def __init__(self, name: str):
+            self.name = name
+
+        def blob(self, name: str) -> FakeBlob:
+            return FakeBlob(name)
+
+    class FakeClient:
+        def __init__(self, name: str):
+            self._bucket = FakeBucket(name)
+
+        def bucket(self, name: str) -> FakeBucket:
+            assert name == self._bucket.name
+            return self._bucket
+
+    monkeypatch.setenv("GEE_GCS_BUCKET", "test-bucket")
+    fake_client = FakeClient("test-bucket")
+    monkeypatch.setattr(exports, "_storage_client", lambda: fake_client)
+
+    exports._start_zone_cloud_exports(job)
+
+    prefix = job.zone_state.prefix
+    expected_names = {
+        f"{prefix}.tif",
+        f"{prefix}.shp",
+        f"{prefix}.dbf",
+        f"{prefix}.shx",
+        f"{prefix}.prj",
+        f"{prefix}.cpg",
+        f"{prefix}.geojson",
+        f"{prefix}_zonal_stats.csv",
+        f"{prefix}_shp.zip",
+    }
+
+    assert expected_names.issubset(set(uploaded))
+
+    raster_bytes = uploaded[f"{prefix}.tif"]
+    assert len(raster_bytes) > 0
+
+    geojson_data = uploaded[f"{prefix}.geojson"].decode()
+    assert "FeatureCollection" in geojson_data
+
+    stats_data = uploaded[f"{prefix}_zonal_stats.csv"].decode()
+    assert "zone,area_ha" in stats_data
+
+    with zipfile.ZipFile(io.BytesIO(uploaded[f"{prefix}_shp.zip"])) as shp_zip:
+        zip_members = set(shp_zip.namelist())
+        assert {f"{Path(prefix).name}.{ext}" for ext in ["shp", "dbf", "shx", "prj"]} <= zip_members
+
+    paths = job.zone_state.paths
+    assert paths["raster"] == f"gs://test-bucket/{prefix}.tif"
+    assert paths["geojson"] == f"gs://test-bucket/{prefix}.geojson"
+    assert paths["vectors_zip"] == f"gs://test-bucket/{prefix}_shp.zip"
+    assert job.zone_state.tasks["raster"]["signed_url"] == f"https://signed/{prefix}.tif"
+    assert job.zone_state.status == "completed"
+    assert job.zone_artifacts is None
+    assert not Path(artifacts_dir).exists()
 
 def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
     job, *_ = _build_zip_job(tmp_path)
