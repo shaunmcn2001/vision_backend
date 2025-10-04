@@ -877,39 +877,54 @@ def _add_zonal_stats(feature: ee.Feature, stats_images: Mapping[str, ee.Image]) 
 
     keys = ee.List(stats_dict.keys())
 
-    def _coerce_value(key):
-        value = stats_dict.get(key)
+    def _sanitize_value(key) -> ee.Dictionary:
+        key_str = ee.String(key)
+        value = stats_dict.get(key_str)
+
+        number_ctor = getattr(ee, "Number", None)
+        if isinstance(value, (int, float)) and number_ctor is not None:
+            return ee.Dictionary({}).set(key_str, number_ctor(value))
+
         if value is None:
-            return None
+            return ee.Dictionary({}).set(key_str, None)
 
         image_cls = getattr(ee, "Image", None)
         try:
             if image_cls is not None and isinstance(value, image_cls):
-                return None
+                return ee.Dictionary({})
         except TypeError:
-            # ``ee.Image`` may not be a Python type in fake implementations.
+            # ``ee.Image`` may not be a Python type in some fakes.
             pass
 
-        number_cls = getattr(ee, "Number", None)
         try:
-            if number_cls is not None and isinstance(value, number_cls):
-                return ee.Number(value)
+            if number_ctor is not None and isinstance(value, number_ctor):
+                return ee.Dictionary({}).set(key_str, number_ctor(value))
         except TypeError:
-            # ``ee.Number`` can be a factory function in tests; fall through.
+            # ``ee.Number`` may not be a Python type in fake implementations.
             pass
 
-        if isinstance(value, (int, float)):
-            return ee.Number(value)
+        value_type = ee.String(ee.Algorithms.ObjectType(value))
+        is_number = value_type.compareTo("Number").eq(0)
+        is_image = value_type.compareTo("Image").eq(0)
 
-        try:
-            return ee.Number(value)
-        except Exception:
-            return None
+        return ee.Dictionary(
+            ee.Algorithms.If(
+                is_image,
+                ee.Dictionary({}),
+                ee.Algorithms.If(
+                    is_number,
+                    ee.Dictionary({}).set(key_str, value),
+                    ee.Dictionary({}).set(key_str, None),
+                ),
+            )
+        )
 
-    numeric_values = keys.map(_coerce_value)
-    numeric_stats = ee.Dictionary.fromLists(keys, numeric_values)
+    def _merge(entry: ee.ComputedObject, acc: ee.ComputedObject) -> ee.Dictionary:
+        return ee.Dictionary(acc).combine(ee.Dictionary(entry))
+
+    sanitized_stats = ee.Dictionary(keys.map(_sanitize_value).iterate(_merge, ee.Dictionary({})))
     zone_value = ee.Number(feature.get("zone")).toInt()
-    return feature.set(numeric_stats).set(
+    return feature.set(sanitized_stats).set(
         {"area_ha": area_ha_val, "zone": zone_value, "zone_id": zone_value}
     )
 
