@@ -270,12 +270,30 @@ def _classify_local_zones(
 
     classified = classified.astype(np.uint8)
 
+    unique_zones = np.unique(classified[classified > 0])
+
+    def _hex_to_rgba(value: str) -> tuple[int, int, int, int]:
+        value = value.lstrip("#")
+        return (
+            int(value[0:2], 16),
+            int(value[2:4], 16),
+            int(value[4:6], 16),
+            255,
+        )
+
+    colormap: dict[int, tuple[int, int, int, int]] = {0: (0, 0, 0, 0)}
+    if unique_zones.size:
+        for zone_id in unique_zones:
+            palette_index = min(len(ZONE_PALETTE) - 1, int(zone_id) - 1)
+            colormap[int(zone_id)] = _hex_to_rgba(ZONE_PALETTE[palette_index])
+
     raster_profile = profile.copy()
     raster_profile.update(dtype=rasterio.uint8, count=1, compress="lzw", nodata=0)
 
     raster_path = working_dir / "zones_classified.tif"
     with rasterio.open(raster_path, "w", **raster_profile) as dst:
         dst.write(classified, 1)
+        dst.write_colormap(1, colormap)
 
     records: List[Dict[str, object]] = []
     zonal_stats: List[Dict[str, object]] = []
@@ -315,7 +333,6 @@ def _classify_local_zones(
         if component.exists():
             vector_components[ext] = str(component)
 
-    unique_zones = np.unique(classified[classified > 0])
     ndvi_data = ndvi.filled(np.nan)
     for zone_id in unique_zones:
         mask = classified == zone_id
