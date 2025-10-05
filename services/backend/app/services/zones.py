@@ -1390,6 +1390,169 @@ def _apply_cleanup(
     return cleaned
 
 
+@dataclass
+class CleanupResult:
+    image: ee.Image
+    applied_operations: Dict[str, bool]
+    executed_operations: Dict[str, bool]
+    fallback_applied: bool
+    fallback_removed: List[str]
+
+
+def _unique_zone_count(image: ee.Image, geometry: ee.Geometry) -> int:
+    try:
+        result = image.reduceRegion(
+            reducer=ee.Reducer.frequencyHistogram(),
+            geometry=geometry,
+            scale=DEFAULT_SCALE,
+            bestEffort=True,
+            tileScale=4,
+            maxPixels=gee.MAX_PIXELS,
+        )
+        info = result.getInfo()
+    except Exception:
+        return 0
+
+    if not isinstance(info, Mapping):
+        return 0
+
+    histogram: Mapping[object, object] | None = None
+    for value in info.values():
+        if isinstance(value, Mapping):
+            histogram = value
+            break
+
+    if not histogram:
+        return 0
+
+    def _as_positive_number(raw: object) -> float | None:
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        try:
+            return float(str(raw))
+        except (TypeError, ValueError):
+            return None
+
+    count = 0
+    for key in histogram.keys():
+        numeric = _as_positive_number(key)
+        if numeric is not None and numeric > 0:
+            count += 1
+
+    return count
+
+
+def _apply_cleanup_with_fallback_tracking(
+    classified: ee.Image,
+    geometry: ee.Geometry,
+    *,
+    n_classes: int,
+    smooth_radius_m: float,
+    open_radius_m: float,
+    close_radius_m: float,
+    min_mapping_unit_ha: float,
+) -> CleanupResult:
+    mmu_value = max(float(min_mapping_unit_ha), 0.0)
+
+    applied_operations: Dict[str, bool] = {
+        "smooth": bool(smooth_radius_m > 0),
+        "open": bool(open_radius_m > 0),
+        "close": bool(close_radius_m > 0),
+        "min_mapping_unit": bool(mmu_value > 0),
+    }
+    executed_operations = dict(applied_operations)
+
+    stage_names: List[str] = []
+    stage_images: List[ee.Image] = []
+    stage_counts: List[int] = []
+
+    def _append_stage(name: str, image: ee.Image) -> None:
+        stage_names.append(name)
+        stage_images.append(image)
+        stage_counts.append(_unique_zone_count(image, geometry))
+
+    base_image = _apply_cleanup(
+        classified,
+        geometry,
+        n_classes=n_classes,
+        smooth_radius_m=0.0,
+        open_radius_m=0.0,
+        close_radius_m=0.0,
+        min_mapping_unit_ha=0.0,
+    )
+    _append_stage("initial", base_image)
+
+    if applied_operations["smooth"]:
+        smooth_image = _apply_cleanup(
+            classified,
+            geometry,
+            n_classes=n_classes,
+            smooth_radius_m=smooth_radius_m,
+            open_radius_m=0.0,
+            close_radius_m=0.0,
+            min_mapping_unit_ha=0.0,
+        )
+        _append_stage("smooth", smooth_image)
+
+    if applied_operations["open"]:
+        open_image = _apply_cleanup(
+            classified,
+            geometry,
+            n_classes=n_classes,
+            smooth_radius_m=smooth_radius_m,
+            open_radius_m=open_radius_m,
+            close_radius_m=0.0,
+            min_mapping_unit_ha=0.0,
+        )
+        _append_stage("open", open_image)
+
+    if applied_operations["close"]:
+        close_image = _apply_cleanup(
+            classified,
+            geometry,
+            n_classes=n_classes,
+            smooth_radius_m=smooth_radius_m,
+            open_radius_m=open_radius_m,
+            close_radius_m=close_radius_m,
+            min_mapping_unit_ha=0.0,
+        )
+        _append_stage("close", close_image)
+
+    if applied_operations["min_mapping_unit"]:
+        mmu_image = _apply_cleanup(
+            classified,
+            geometry,
+            n_classes=n_classes,
+            smooth_radius_m=smooth_radius_m,
+            open_radius_m=open_radius_m,
+            close_radius_m=close_radius_m,
+            min_mapping_unit_ha=mmu_value,
+        )
+        _append_stage("min_mapping_unit", mmu_image)
+
+    fallback_removed: List[str] = []
+    final_index = len(stage_images) - 1
+    while final_index > 0 and stage_counts[final_index] < n_classes:
+        stage_name = stage_names[final_index]
+        if stage_name in applied_operations:
+            applied_operations[stage_name] = False
+            fallback_removed.append(stage_name)
+        final_index -= 1
+
+    fallback_removed.reverse()
+    fallback_applied = bool(fallback_removed)
+
+    final_image = stage_images[final_index]
+
+    return CleanupResult(
+        image=final_image,
+        applied_operations=dict(applied_operations),
+        executed_operations=dict(executed_operations),
+        fallback_applied=fallback_applied,
+        fallback_removed=list(fallback_removed),
+    )
+
+
 def _clean_zones(
     classified: ee.Image,
     geometry: ee.Geometry,
@@ -1674,7 +1837,7 @@ def _build_multiindex_zones(
     close_radius_m: float,
     min_mapping_unit_ha: float,
     sample_size: int,
-) -> tuple[ee.Image, Dict[str, ee.Image]]:
+) -> tuple[ee.Image, Dict[str, ee.Image], CleanupResult]:
     indices = {
         "NDVI": [image.normalizedDifference(["B8", "B4"]).rename("NDVI") for image in composites],
         "NDRE": [
@@ -1719,7 +1882,7 @@ def _build_multiindex_zones(
     ranked = _rank_zones(clustered, ndvi_stats["mean"], geometry).updateMask(
         ndvi_stats["stability"]
     )
-    cleaned = _apply_cleanup(
+    cleanup = _apply_cleanup_with_fallback_tracking(
         ranked,
         geometry,
         n_classes=n_classes,
@@ -1728,8 +1891,9 @@ def _build_multiindex_zones(
         close_radius_m=close_radius_m,
         min_mapping_unit_ha=min_mapping_unit_ha,
     )
+    cleanup.image = cleanup.image.rename("zone")
 
-    return cleaned.rename("zone"), mean_images
+    return cleanup.image, mean_images, cleanup
 
 
 def _build_multiindex_zones_with_features(
@@ -1743,7 +1907,7 @@ def _build_multiindex_zones_with_features(
     close_radius_m: float,
     min_mapping_unit_ha: float,
     sample_size: int,
-) -> tuple[ee.Image, Dict[str, ee.Image]]:
+) -> tuple[ee.Image, Dict[str, ee.Image], CleanupResult]:
     stability = ndvi_stats["stability"]
     masked_features: Dict[str, ee.Image] = {}
     for name, image in feature_images.items():
@@ -1766,7 +1930,7 @@ def _build_multiindex_zones_with_features(
     clusterer = ee.Clusterer.wekaKMeans(n_classes).train(training)
     clustered = stack.cluster(clusterer)
     ranked = _rank_zones(clustered, ndvi_stats["mean"], geometry).updateMask(stability)
-    cleaned = _apply_cleanup(
+    cleanup = _apply_cleanup_with_fallback_tracking(
         ranked,
         geometry,
         n_classes=n_classes,
@@ -1775,8 +1939,9 @@ def _build_multiindex_zones_with_features(
         close_radius_m=close_radius_m,
         min_mapping_unit_ha=min_mapping_unit_ha,
     )
+    cleanup.image = cleanup.image.rename("zone")
 
-    return cleaned.rename("zone"), masked_features
+    return cleanup.image, masked_features, cleanup
 
 
 def _prepare_selected_period_artifacts(
@@ -1885,8 +2050,9 @@ def _prepare_selected_period_artifacts(
     # Multi-index K-means branch
     composite_images = [image for _, image in composites]
     feature_images_meta = composite_metadata.get("feature_images")
+    cleanup_result: CleanupResult
     if isinstance(feature_images_meta, Mapping) and feature_images_meta:
-        zone_image, feature_payload = _build_multiindex_zones_with_features(
+        zone_image, feature_payload, cleanup_result = _build_multiindex_zones_with_features(
             ndvi_stats=ndvi_stats,
             feature_images=feature_images_meta,
             geometry=geometry,
@@ -1898,7 +2064,7 @@ def _prepare_selected_period_artifacts(
             sample_size=sample_size,
         )
     else:
-        zone_image, feature_payload = _build_multiindex_zones(
+        zone_image, feature_payload, cleanup_result = _build_multiindex_zones(
             ndvi_stats=ndvi_stats,
             composites=composite_images,
             geometry=geometry,
@@ -1927,14 +2093,9 @@ def _prepare_selected_period_artifacts(
         "close_radius_m": float(max(close_radius_m, 0)),
         "min_mapping_unit_ha": float(max(mmu_value, 0)),
     }
-    mmu_was_applied = mmu_value > 0 and mmu_applied
-    applied_operations = {
-        "smooth": smoothing_requested["smooth_radius_m"] > 0,
-        "open": smoothing_requested["open_radius_m"] > 0,
-        "close": smoothing_requested["close_radius_m"] > 0,
-        "min_mapping_unit": mmu_was_applied,
-    }
-    executed_operations = dict(applied_operations)
+    applied_operations = dict(cleanup_result.applied_operations)
+    executed_operations = dict(cleanup_result.executed_operations)
+    mmu_was_applied = bool(applied_operations.get("min_mapping_unit"))
 
     populated = classified_data[classified_data > 0]
     final_zone_count = int(np.unique(populated).size) if populated.size else 0
@@ -1951,8 +2112,8 @@ def _prepare_selected_period_artifacts(
         smoothing_requested=smoothing_requested,
         applied_operations=applied_operations,
         executed_operations=executed_operations,
-        fallback_applied=False,
-        fallback_removed=[],
+        fallback_applied=bool(cleanup_result.fallback_applied),
+        fallback_removed=list(cleanup_result.fallback_removed),
         min_mapping_unit_ha=mmu_value,
         requested_zone_count=n_classes,
         effective_zone_count=effective_zone_count,
