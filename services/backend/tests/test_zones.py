@@ -449,6 +449,48 @@ def test_classify_local_zones_preserves_classes_without_smoothing(tmp_path: Path
     assert metadata["final_zone_count"] == 4
 
 
+def test_classify_local_zones_preserves_nodata_border(tmp_path: Path) -> None:
+    ndvi_path = tmp_path / "mean_ndvi_masked_border.tif"
+    data = np.full((6, 6), 0.3, dtype=np.float32)
+    data[0, :] = -9999.0
+    data[-1, :] = -9999.0
+    data[:, 0] = -9999.0
+    data[:, -1] = -9999.0
+    data[2:4, 2:4] = np.array([[0.6, 0.7], [0.8, 0.9]], dtype=np.float32)
+    _write_ndvi_raster(ndvi_path, data=data)
+
+    artifacts, metadata = zones._classify_local_zones(
+        ndvi_path,
+        working_dir=tmp_path,
+        n_classes=3,
+        min_mapping_unit_ha=0.0,
+        smooth_radius_m=20.0,
+        open_radius_m=0.0,
+        close_radius_m=0.0,
+        include_stats=False,
+    )
+
+    with rasterio.open(artifacts.raster_path) as classified:
+        classified_data = classified.read(1)
+
+    assert np.all(classified_data[0, :] == 0)
+    assert np.all(classified_data[-1, :] == 0)
+    assert np.all(classified_data[:, 0] == 0)
+    assert np.all(classified_data[:, -1] == 0)
+
+    reader = shapefile.Reader(str(artifacts.vector_path))
+    shapes = list(reader.iterShapeRecords())
+    assert shapes, "Expected at least one zone geometry"
+    for shape_record in shapes:
+        minx, miny, maxx, maxy = shape_record.shape.bbox
+        assert minx >= 10.0 - 1e-6
+        assert maxx <= 50.0 + 1e-6
+        assert maxy <= 20.0 + 1e-6
+        assert miny >= -20.0 - 1e-6
+
+    assert metadata["final_zone_count"] == 3
+
+
 def test_classify_local_zones_relaxes_mmu_when_classes_removed(tmp_path: Path) -> None:
     ndvi_path = tmp_path / "mean_ndvi_sparse_classes.tif"
     data = np.full((30, 30), 0.1, dtype=np.float32)
