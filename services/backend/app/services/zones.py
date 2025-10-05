@@ -1047,7 +1047,8 @@ def _build_composite_series(
 def _compute_ndvi(image: ee.Image) -> ee.Image:
     bands = image.select(["B8", "B4"]).toFloat()
     ndvi = bands.normalizedDifference(["B8", "B4"]).rename("NDVI")
-    return ndvi.updateMask(image.mask())
+    valid_mask = bands.mask().reduce(ee.Reducer.min())
+    return ndvi.updateMask(valid_mask)
 
 
 def _compute_ndre(image: ee.Image) -> ee.Image:
