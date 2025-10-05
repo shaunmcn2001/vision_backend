@@ -650,6 +650,14 @@ def _download_zone_artifacts(
     artifacts = job.zone_artifacts
     prefix = job.zone_state.prefix or _zone_prefix(job)
 
+    mean_ndvi_src = Path(artifacts.mean_ndvi_path)
+    if not mean_ndvi_src.exists():
+        raise FileNotFoundError(f"Missing mean NDVI raster at {mean_ndvi_src}")
+    mean_ndvi_name = f"{prefix}_mean_ndvi.tif"
+    mean_ndvi_path = temp_dir / mean_ndvi_name
+    mean_ndvi_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(mean_ndvi_src, mean_ndvi_path)
+
     raster_src = Path(artifacts.raster_path)
     if not raster_src.exists():
         raise FileNotFoundError(f"Missing raster artifact at {raster_src}")
@@ -733,7 +741,10 @@ def _download_zone_artifacts(
                 stats_path = None
                 stats_name = None
 
-    files: List[tuple[Path, str]] = [(raster_path, raster_name)]
+    files: List[tuple[Path, str]] = [
+        (mean_ndvi_path, mean_ndvi_name),
+        (raster_path, raster_name),
+    ]
     files.extend(vector_files)
     files.append((geojson_path, geojson_name))
     if shapefile_zip_created:
@@ -743,6 +754,7 @@ def _download_zone_artifacts(
 
     paths = {
         "raster": raster_name,
+        "mean_ndvi": mean_ndvi_name,
         "vectors": vector_components.get("shp"),
         "vector_components": vector_components,
         "zonal_stats": stats_name,
@@ -865,7 +877,7 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
 
             job.zone_state.paths = mapped_paths
             job.zone_state.tasks = {}
-            for key in ("raster", "vectors", "geojson", "zonal_stats", "vectors_zip"):
+            for key in ("raster", "mean_ndvi", "vectors", "geojson", "zonal_stats", "vectors_zip"):
                 destination = mapped_paths.get(key)
                 if not isinstance(destination, str):
                     continue
@@ -928,7 +940,7 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
 
             job.zone_state.paths = mapped_paths
             job.zone_state.tasks = {}
-            for key in ("raster", "vectors", "geojson", "zonal_stats", "vectors_zip"):
+            for key in ("raster", "mean_ndvi", "vectors", "geojson", "zonal_stats", "vectors_zip"):
                 destination = mapped_paths.get(key)
                 if not isinstance(destination, str):
                     continue
@@ -1059,6 +1071,7 @@ def _process_zip_exports(job: ExportJob) -> None:
     if job.zone_state is not None and job.zone_state.paths:
         keep_keys = (
             "raster",
+            "mean_ndvi",
             "vectors",
             "zonal_stats",
             "vector_components",

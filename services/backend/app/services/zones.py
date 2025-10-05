@@ -134,6 +134,7 @@ class ZoneArtifacts:
     """Container for locally generated zone artefacts stored on disk."""
 
     raster_path: str
+    mean_ndvi_path: str
     vector_path: str
     vector_components: dict[str, str]
     zonal_stats_path: str | None = None
@@ -328,6 +329,7 @@ def _assemble_zone_artifacts(
     working_dir: Path,
     include_stats: bool,
     raster_path: Path,
+    mean_ndvi_path: Path,
     smoothing_requested: Mapping[str, float],
     applied_operations: Mapping[str, bool],
     executed_operations: Mapping[str, bool],
@@ -475,6 +477,7 @@ def _assemble_zone_artifacts(
 
     artifacts = ZoneArtifacts(
         raster_path=str(raster_path),
+        mean_ndvi_path=str(mean_ndvi_path),
         vector_path=str(shp_path),
         vector_components=vector_components,
         zonal_stats_path=str(stats_path) if stats_path is not None else None,
@@ -755,6 +758,7 @@ def _classify_local_zones(
         working_dir=working_dir,
         include_stats=include_stats,
         raster_path=raster_path,
+        mean_ndvi_path=ndvi_raster,
         smoothing_requested=smoothing_requested,
         applied_operations=applied_operations,
         executed_operations=executed_operations,
@@ -2234,6 +2238,7 @@ def _prepare_selected_period_artifacts(
             working_dir=workdir,
             include_stats=include_stats,
             raster_path=zone_raster_path,
+            mean_ndvi_path=ndvi_path,
             smoothing_requested=smoothing_requested,
             applied_operations=applied_operations,
             executed_operations=executed_operations,
@@ -2333,6 +2338,7 @@ def _prepare_selected_period_artifacts(
         working_dir=workdir,
         include_stats=include_stats,
         raster_path=zone_raster_path,
+        mean_ndvi_path=ndvi_path,
         smoothing_requested=smoothing_requested,
         applied_operations=applied_operations,
         executed_operations=executed_operations,
@@ -2594,6 +2600,7 @@ def export_selected_period_zones(
     result: Dict[str, object] = {
         "paths": {
             "raster": artifacts.raster_path,
+            "mean_ndvi": artifacts.mean_ndvi_path,
             "vectors": artifacts.vector_path,
             "vector_components": artifacts.vector_components,
             "zonal_stats": artifacts.zonal_stats_path if include_stats_flag else None,

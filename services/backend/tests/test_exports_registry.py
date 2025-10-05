@@ -103,6 +103,21 @@ def _build_zip_job(tmp_path, job_id: str = "job-zip"):
 def _create_zone_artifacts(workdir: Path) -> zones.ZoneArtifacts:
     workdir.mkdir(parents=True, exist_ok=True)
 
+    mean_ndvi_path = workdir / "mean_ndvi.tif"
+    with rasterio.open(
+        mean_ndvi_path,
+        "w",
+        driver="GTiff",
+        height=1,
+        width=1,
+        count=1,
+        dtype="float32",
+        crs=zones.DEFAULT_EXPORT_CRS,
+        transform=from_origin(0, 10, zones.DEFAULT_SCALE, zones.DEFAULT_SCALE),
+        nodata=-9999.0,
+    ) as dst:
+        dst.write(np.array([[0.5]], dtype=np.float32), 1)
+
     raster_path = workdir / "zones.tif"
     with rasterio.open(
         raster_path,
@@ -148,6 +163,7 @@ def _create_zone_artifacts(workdir: Path) -> zones.ZoneArtifacts:
 
     return zones.ZoneArtifacts(
         raster_path=str(raster_path),
+        mean_ndvi_path=str(mean_ndvi_path),
         vector_path=str(shp_path),
         vector_components=vector_components,
         zonal_stats_path=str(stats_path),
@@ -442,6 +458,7 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
 
     file_names = {name for _, name in files}
     assert f"{job.zone_state.prefix}.tif" in file_names
+    assert f"{job.zone_state.prefix}_mean_ndvi.tif" in file_names
     assert paths["vectors"].endswith(".shp")
     assert set(paths["vector_components"]) >= {"shp", "dbf", "shx", "prj"}
     if paths["zonal_stats"]:
@@ -449,6 +466,7 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
     if paths["vectors_zip"]:
         assert paths["vectors_zip"] in file_names
     assert paths["geojson"].endswith(".geojson")
+    assert paths["mean_ndvi"].endswith("_mean_ndvi.tif")
 
 
 def test_start_zone_cloud_exports_uploads_zone_files(tmp_path, monkeypatch):
@@ -496,6 +514,7 @@ def test_start_zone_cloud_exports_uploads_zone_files(tmp_path, monkeypatch):
     prefix = job.zone_state.prefix
     expected_names = {
         f"{prefix}.tif",
+        f"{prefix}_mean_ndvi.tif",
         f"{prefix}.shp",
         f"{prefix}.dbf",
         f"{prefix}.shx",
@@ -523,9 +542,11 @@ def test_start_zone_cloud_exports_uploads_zone_files(tmp_path, monkeypatch):
 
     paths = job.zone_state.paths
     assert paths["raster"] == f"gs://test-bucket/{prefix}.tif"
+    assert paths["mean_ndvi"] == f"gs://test-bucket/{prefix}_mean_ndvi.tif"
     assert paths["geojson"] == f"gs://test-bucket/{prefix}.geojson"
     assert paths["vectors_zip"] == f"gs://test-bucket/{prefix}_shp.zip"
     assert job.zone_state.tasks["raster"]["signed_url"] == f"https://signed/{prefix}.tif"
+    assert job.zone_state.tasks["mean_ndvi"]["signed_url"] == f"https://signed/{prefix}_mean_ndvi.tif"
     assert job.zone_state.status == "completed"
     assert job.zone_artifacts is None
     assert not Path(artifacts_dir).exists()
@@ -539,6 +560,21 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
 
     def _write_artifacts(workdir: Path) -> zones.ZoneArtifacts:
         workdir.mkdir(parents=True, exist_ok=True)
+        mean_ndvi_path = workdir / "mean_ndvi.tif"
+        with rasterio.open(
+            mean_ndvi_path,
+            "w",
+            driver="GTiff",
+            height=1,
+            width=1,
+            count=1,
+            dtype="float32",
+            crs=zones.DEFAULT_EXPORT_CRS,
+            transform=from_origin(0, 10, zones.DEFAULT_SCALE, zones.DEFAULT_SCALE),
+            nodata=-9999.0,
+        ) as dst:
+            dst.write(np.array([[0.5]], dtype=np.float32), 1)
+
         raster_path = workdir / "zones.tif"
         with rasterio.open(
             raster_path,
@@ -578,6 +614,7 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
 
         return zones.ZoneArtifacts(
             raster_path=str(raster_path),
+            mean_ndvi_path=str(mean_ndvi_path),
             vector_path=str(shp_path),
             vector_components=vector_components,
             zonal_stats_path=str(stats_path),
