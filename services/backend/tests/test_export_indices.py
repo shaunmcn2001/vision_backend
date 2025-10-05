@@ -156,38 +156,9 @@ async def test_export_geotiffs_uses_visualized_params(monkeypatch):
     assert params["formatOptions"] == {"cloudOptimized": False}
 
 
-def test_index_image_for_range_wraps_mean_result(monkeypatch):
+def test_index_image_for_range_returns_clamped_mean(monkeypatch):
     context = setup_fake_ee(monkeypatch, export, [0.4, -0.2])
     definition, parameters = export.resolve_index("ndvi")
-
-    captured: dict[str, object] = {}
-
-    class WrappedImage:
-        def __init__(self, base):
-            self._base = base
-            captured["base"] = base
-
-        def clip(self, geom):
-            captured["clip_geom"] = geom
-            if hasattr(self._base, "clip"):
-                self._base.clip(geom)
-            return self
-
-        def clamp(self, low: float, high: float):
-            captured.setdefault("clamps", []).append((low, high))
-            if hasattr(self._base, "clamp"):
-                self._base.clamp(low, high)
-            return self
-
-    original_image_ctor = export.ee.Image
-
-    def wrap_mean(value):
-        base = original_image_ctor(value)
-        if isinstance(base, FakeMeanImage):
-            return WrappedImage(base)
-        return base
-
-    monkeypatch.setattr(export.ee, "Image", wrap_mean)
 
     geometry = {"type": "Point", "coordinates": [0, 0]}
     _collection, image = export._index_image_for_range(
@@ -198,7 +169,11 @@ def test_index_image_for_range_wraps_mean_result(monkeypatch):
         parameters=parameters,
     )
 
-    assert isinstance(image, WrappedImage)
+    assert isinstance(image, FakeMeanImage)
+    assert image.value == pytest.approx(0.1)
+    assert image.clipped_geom == geometry
+    assert image.clamped_to == (-1.0, 1.0)
+    assert context["log"].get("reduce_calls") == ["sum", "count", "median", "stdDev"]
 
 
 def test_finish_coerces_elements_without_clip(monkeypatch):

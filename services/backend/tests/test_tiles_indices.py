@@ -53,6 +53,12 @@ def test_gndvi_images_and_metadata(monkeypatch):
     assert month.clamped_to == (-1.0, 1.0)
     assert month.value == pytest.approx(1.0)
 
+    reduce_calls = context["log"].get("reduce_calls", [])
+    assert reduce_calls.count("sum") == 2
+    assert reduce_calls.count("count") == 2
+    assert reduce_calls.count("median") == 2
+    assert reduce_calls.count("stdDev") == 2
+
     tile = tiles.get_tile_template_for_image(month, definition=definition)
     assert tile["vis"]["bands"] == [definition.band_name]
     assert tile["vis"]["min"] == pytest.approx(definition.valid_range[0])
