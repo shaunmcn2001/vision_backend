@@ -235,6 +235,32 @@ def _majority_filter(data: np.ndarray, radius: int) -> np.ndarray:
     return filtered.astype(data.dtype)
 
 
+def _apply_morphological_operation(
+    data: np.ndarray, radius: int, *, operation: str
+) -> np.ndarray:
+    if radius <= 0:
+        return data
+
+    size = radius * 2 + 1
+    footprint = np.ones((size, size), dtype=bool)
+    valid_mask = data > 0
+    if not np.any(valid_mask):
+        return data
+
+    working = data.copy()
+    working[~valid_mask] = 0
+
+    if operation == "opening":
+        filtered = ndimage.grey_opening(working, footprint=footprint, mode="nearest")
+    elif operation == "closing":
+        filtered = ndimage.grey_closing(working, footprint=footprint, mode="nearest")
+    else:  # pragma: no cover - defensive branch
+        raise ValueError(f"Unsupported morphological operation: {operation}")
+
+    filtered[~valid_mask] = 0
+    return filtered.astype(data.dtype)
+
+
 def _remove_small_regions(data: np.ndarray, min_pixels: int) -> np.ndarray:
     if min_pixels <= 1:
         return data
@@ -380,25 +406,39 @@ def _classify_local_zones(
         "close": False,
         "min_mapping_unit": False,
     }
+    executed_operations: dict[str, bool] = {
+        "smooth": False,
+        "open": False,
+        "close": False,
+        "min_mapping_unit": False,
+    }
 
     if smooth_radius_px > 0:
         classified = _majority_filter(classified, smooth_radius_px)
         stage_results.append(("smooth", classified.copy()))
         applied_operations["smooth"] = True
+        executed_operations["smooth"] = True
     if open_radius_px > 0:
-        classified = _majority_filter(classified, open_radius_px)
+        classified = _apply_morphological_operation(
+            classified, open_radius_px, operation="opening"
+        )
         stage_results.append(("open", classified.copy()))
         applied_operations["open"] = True
+        executed_operations["open"] = True
     if close_radius_px > 0:
-        classified = _majority_filter(classified, close_radius_px)
+        classified = _apply_morphological_operation(
+            classified, close_radius_px, operation="closing"
+        )
         stage_results.append(("close", classified.copy()))
         applied_operations["close"] = True
+        executed_operations["close"] = True
 
     min_pixels = int(round((min_mapping_unit_ha * 10_000) / pixel_area))
     if min_pixels > 1:
         classified = _remove_small_regions(classified, min_pixels)
         stage_results.append(("min_mapping_unit", classified.copy()))
         applied_operations["min_mapping_unit"] = True
+        executed_operations["min_mapping_unit"] = True
 
     fallback_removed: list[str] = []
     final_index = len(stage_results) - 1
@@ -540,8 +580,13 @@ def _classify_local_zones(
         )
         for stage_name, metadata_key in stage_key_map.items()
     }
+    smoothing_executed = {
+        stage_key_map[name]: bool(executed_operations.get(name))
+        for name in stage_key_map
+    }
 
     skipped_steps = [stage_key_map[name] for name in fallback_removed if name in stage_key_map]
+    skipped_steps = sorted(set(skipped_steps))
 
     final_zone_count = int(unique_zones.size)
     metadata: Dict[str, object] = {
@@ -553,8 +598,10 @@ def _classify_local_zones(
         "smoothing_parameters": {
             "requested": smoothing_requested,
             "applied": smoothing_applied,
+            "executed": smoothing_executed,
             "fallback_applied": fallback_applied,
             "skipped_steps": skipped_steps,
+            "rolled_back_steps": skipped_steps,
         },
         "requested_zone_count": int(n_classes),
         "effective_zone_count": int(effective_n_classes),
