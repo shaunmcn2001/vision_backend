@@ -277,7 +277,12 @@ def _classify_local_zones(
     if ndvi.mask.all():
         raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
-    valid_values = ndvi.compressed()
+    ndvi_data = ndvi.filled(np.nan)
+    combined_mask = np.ma.getmaskarray(ndvi) | np.isnan(ndvi_data)
+    if combined_mask.all():
+        raise ValueError(NDVI_MASK_EMPTY_ERROR)
+
+    valid_values = ndvi_data[~combined_mask]
     if valid_values.size == 0:
         raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
@@ -289,35 +294,34 @@ def _classify_local_zones(
 
     effective_n_classes = min(n_classes, unique_values.size)
 
+    vmin = float(np.min(valid_values))
+    vmax = float(np.max(valid_values))
+
     percentiles = np.linspace(0, 100, effective_n_classes + 1)[1:-1]
-    raw_thresholds = np.percentile(valid_values, percentiles) if percentiles.size else np.array([])
+    raw_thresholds = (
+        np.nanpercentile(valid_values, percentiles) if percentiles.size else np.array([])
+    )
 
     thresholds = raw_thresholds
     if thresholds.size:
         thresholds = np.asarray(thresholds, dtype=float)
-        if not np.all(np.diff(thresholds) > 0):
-            thresholds = np.unique(thresholds)
-            if thresholds.size != raw_thresholds.size:
-                min_ndvi = float(np.min(valid_values))
-                max_ndvi = float(np.max(valid_values))
-                if np.isclose(min_ndvi, max_ndvi):
-                    raise ValueError(
-                        "Unable to derive distinct NDVI thresholds for zone classification; "
-                        "all pixels share the same value."
-                    )
-                thresholds = np.linspace(min_ndvi, max_ndvi, effective_n_classes + 1)[1:-1]
-        if thresholds.size != raw_thresholds.size or not np.all(np.diff(thresholds) > 0):
+        thresholds = thresholds[~np.isnan(thresholds)]
+        thresholds = np.unique(thresholds)
+        if thresholds.size < max(effective_n_classes - 1, 0):
+            thresholds = np.linspace(vmin, vmax, effective_n_classes + 1)[1:-1]
+        if thresholds.size != max(effective_n_classes - 1, 0) or not np.all(
+            np.diff(thresholds) > 0
+        ):
             raise ValueError(
                 "Unable to derive strictly increasing NDVI thresholds for zone classification."
             )
 
-    # ``np.digitize`` defaults to ``right=False`` which excludes the lower bound of each bin
-    # (assigning exact matches to the next class). When the first percentile equals the
-    # minimum NDVI value this behaviour empties class 1, which later results in a
-    # "fewer zones than requested" error. Including the lower bound keeps the percentile
-    # classes contiguous and ensures the first class remains populated.
-    classified = np.digitize(ndvi.filled(np.nan), thresholds, right=True).astype(np.int16) + 1
-    classified[ndvi.mask] = 0
+    comparison_data = ndvi_data[..., None]
+    if thresholds.size:
+        classified = np.sum(comparison_data > thresholds, axis=-1, dtype=np.int16) + 1
+    else:
+        classified = np.ones(ndvi_data.shape, dtype=np.int16)
+    classified[combined_mask] = 0
 
     unique_zones = np.unique(classified[classified > 0])
     if unique_zones.size < effective_n_classes and effective_n_classes > 1 and percentiles.size:
@@ -349,11 +353,11 @@ def _classify_local_zones(
                         ],
                         dtype=float,
                     )
+                    fallback_comparison = comparison_data
                     fallback_classified = (
-                        np.digitize(ndvi.filled(np.nan), fallback_thresholds, right=True).astype(np.int16)
-                        + 1
+                        np.sum(fallback_comparison > fallback_thresholds, axis=-1, dtype=np.int16) + 1
                     )
-                    fallback_classified[ndvi.mask] = 0
+                    fallback_classified[combined_mask] = 0
                     fallback_unique = np.unique(fallback_classified[fallback_classified > 0])
                     if fallback_unique.size == effective_n_classes:
                         thresholds = fallback_thresholds
