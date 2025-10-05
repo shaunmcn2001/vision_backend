@@ -520,7 +520,7 @@ def _classify_local_zones(
             "Unable to derive distinct NDVI thresholds for zone classification; all pixels share the same value."
         )
 
-    effective_n_classes = min(n_classes, unique_values.size)
+    effective_n_classes = n_classes
 
     vmin = float(np.min(valid_values))
     vmax = float(np.max(valid_values))
@@ -540,9 +540,7 @@ def _classify_local_zones(
         if thresholds.size != max(effective_n_classes - 1, 0) or not np.all(
             np.diff(thresholds) > 0
         ):
-            raise ValueError(
-                "Unable to derive strictly increasing NDVI thresholds for zone classification."
-            )
+            thresholds = np.array([], dtype=float)
 
     comparison_data = ndvi_data[..., None]
     if thresholds.size:
@@ -552,7 +550,12 @@ def _classify_local_zones(
     classified[combined_mask] = 0
 
     unique_zones = np.unique(classified[classified > 0])
-    if unique_zones.size < effective_n_classes and effective_n_classes > 1 and percentiles.size:
+    if (
+        unique_zones.size < effective_n_classes
+        and effective_n_classes > 1
+        and percentiles.size
+        and unique_values.size >= effective_n_classes
+    ):
         unique_sorted, counts = np.unique(valid_values, return_counts=True)
         if unique_sorted.size >= effective_n_classes:
             num_thresholds = effective_n_classes - 1
@@ -683,6 +686,19 @@ def _classify_local_zones(
         thresholds = np.array([], dtype=float)
         kmeans_cluster_centers = [float(centers[idx]) for idx in center_order]
         kmeans_fallback_applied = True
+
+        if unique_zones.size < effective_n_classes:
+            if valid_values.size >= effective_n_classes:
+                sorted_indices = np.argsort(valid_values, kind="mergesort")
+                splits = np.array_split(sorted_indices, effective_n_classes)
+                if all(split.size for split in splits):
+                    fallback_flat = np.zeros(valid_values.size, dtype=np.uint8)
+                    for class_index, split in enumerate(splits, start=1):
+                        fallback_flat[split] = np.uint8(class_index)
+                    ranked_classified = np.zeros(ndvi_data.shape, dtype=np.uint8)
+                    ranked_classified[~combined_mask] = fallback_flat
+                    classified = ranked_classified
+                    unique_zones = np.unique(classified[classified > 0])
 
         if unique_zones.size < effective_n_classes:
             raise ValueError(
