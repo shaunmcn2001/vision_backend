@@ -7,6 +7,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.append(str(BACKEND_DIR))
 
 from app.api import routes
+from app.services import image_stats
 from app.services import ndvi as ndvi_service
 
 
@@ -65,6 +66,7 @@ class FakeImage:
 class FakeFilteredCollection:
     def __init__(self, month, capture):
         self._month = month
+        self.month = month
         self._capture = capture
 
     def mean(self):
@@ -113,8 +115,34 @@ def make_fake_ee(capture):
 
 
 def _patch_ndvi_service(monkeypatch, capture):
-    monkeypatch.setattr(ndvi_service, "ee", make_fake_ee(capture))
+    fake_module = make_fake_ee(capture)
+    monkeypatch.setattr(ndvi_service, "ee", fake_module)
+    monkeypatch.setattr(image_stats, "ee", make_fake_ee(capture))
     monkeypatch.setattr(ndvi_service, "init_ee", lambda: None)
+    _patch_temporal_stats(monkeypatch, capture)
+
+
+def _patch_temporal_stats(monkeypatch, capture):
+    def fake_temporal_stats(
+        collection,
+        *,
+        band_name,
+        rename_prefix=None,
+        mean_band_name=None,
+    ):
+        month = getattr(collection, "month", getattr(collection, "_month", None))
+        capture.setdefault("temporal_stats", []).append(
+            {
+                "month": month,
+                "band": band_name,
+                "rename_prefix": rename_prefix,
+                "mean_band_name": mean_band_name,
+            }
+        )
+        return {"mean": FakeImage(month, capture)}
+
+    monkeypatch.setattr(image_stats, "temporal_stats", fake_temporal_stats)
+    monkeypatch.setattr(ndvi_service, "temporal_stats", fake_temporal_stats)
 
 
 def test_monthly_index_defaults(monkeypatch):
@@ -143,6 +171,9 @@ def test_monthly_index_defaults(monkeypatch):
     assert set(capture["normalized_difference"]) == {("B8", "B4")}
     assert set(capture["selected_bands"]) == {"NDVI"}
     assert set(capture["reduce_keys"]) == {"NDVI"}
+    assert len(capture.get("temporal_stats", [])) == 12
+    assert {entry["band"] for entry in capture["temporal_stats"]} == {"NDVI"}
+    assert {entry["mean_band_name"] for entry in capture["temporal_stats"]} == {"NDVI"}
 
 
 def test_monthly_index_gndvi(monkeypatch):
@@ -162,6 +193,8 @@ def test_monthly_index_gndvi(monkeypatch):
     assert response["index"]["band"] == "GNDVI"
     assert response["data"][0] == {"month": 1, "gndvi": 0.01}
     assert set(capture["normalized_difference"]) == {("B8", "B3")}
+    assert {entry["band"] for entry in capture["temporal_stats"]} == {"GNDVI"}
+    assert {entry["mean_band_name"] for entry in capture["temporal_stats"]} == {"GNDVI"}
 
 
 def test_monthly_index_ndre_parameters(monkeypatch):
@@ -180,6 +213,7 @@ def test_monthly_index_ndre_parameters(monkeypatch):
     assert response["index"]["code"] == "ndre"
     assert response["index"]["parameters"] == {"nir_band": "B8A", "red_edge_band": "B5"}
     assert set(capture["normalized_difference"]) == {("B8A", "B5")}
+    assert {entry["band"] for entry in capture["temporal_stats"]} == {"NDRE"}
 
 
 def test_cache_paths_and_payload(monkeypatch):

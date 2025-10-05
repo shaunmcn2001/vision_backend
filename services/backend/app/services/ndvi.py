@@ -18,6 +18,7 @@ from app.services.gcs import (
     list_prefix,
     upload_json,
 )
+from app.services.image_stats import temporal_stats
 from app.services.indices import normalize_index_code, resolve_index
 
 
@@ -82,12 +83,17 @@ def compute_monthly_index(
 
     values = []
     for month in _iterate_months(start, end):
-        monthly = (
-            mapped_collection.filter(ee.Filter.calendarRange(month, month, "month"))
-            .mean()
-            .select(definition.band_name)
+        monthly_collection = mapped_collection.filter(
+            ee.Filter.calendarRange(month, month, "month")
         )
-        result = monthly.reduceRegion(
+        stats = temporal_stats(
+            monthly_collection,
+            band_name=definition.band_name,
+            rename_prefix=definition.band_name,
+            mean_band_name=definition.band_name,
+        )
+        monthly_mean = stats["mean"].select(definition.band_name)
+        result = monthly_mean.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=geom,
             scale=scale,

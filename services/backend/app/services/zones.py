@@ -28,6 +28,7 @@ from scipy import ndimage
 
 from app import gee
 from app.exports import sanitize_name
+from app.services.image_stats import temporal_stats
 from app.utils.geometry import area_ha
 from app.utils.sanitization import sanitize_for_json
 
@@ -1072,29 +1073,17 @@ def _compute_bsi(image: ee.Image) -> ee.Image:
 
 
 def _ndvi_temporal_stats(images: Sequence[ee.Image]) -> Mapping[str, ee.Image]:
-    collection = ee.ImageCollection(
-        [ee.Image(img).select("NDVI").toFloat().rename("NDVI") for img in images]
+    stats = temporal_stats(
+        images,
+        band_name="NDVI",
+        rename_prefix="NDVI",
     )
-    raw_sum = collection.reduce(ee.Reducer.sum())
-    raw_count = collection.reduce(ee.Reducer.count())
-    raw_median = collection.reduce(ee.Reducer.median())
-    raw_std = collection.reduce(ee.Reducer.stdDev())
-
-    valid_mask = raw_count.gt(0)
-    safe_count = raw_count.where(raw_count.eq(0), 1)
-
-    mean_unmasked = raw_sum.divide(safe_count)
-    mean = mean_unmasked.updateMask(valid_mask).rename("NDVI_mean")
-    median = raw_median.updateMask(valid_mask).rename("NDVI_median")
-    std = raw_std.updateMask(valid_mask).rename("NDVI_stdDev")
-
-    epsilon = ee.Image.constant(1e-6)
-    mean_abs = mean_unmasked.abs()
-    safe_denominator = mean_abs.where(mean_abs.lt(epsilon), epsilon)
-    cv_raw = raw_std.divide(safe_denominator)
-    cv = cv_raw.where(mean_unmasked.lte(0), 0).updateMask(valid_mask).rename("NDVI_cv")
-
-    return {"mean": mean, "median": median, "std": std, "cv": cv}
+    return {
+        "mean": stats["mean"],
+        "median": stats["median"],
+        "std": stats["std"],
+        "cv": stats["cv"],
+    }
 
 
 def _stability_mask(
