@@ -169,7 +169,8 @@ def _mask_sentinel2(image: ee.Image, cloud_prob_max: int) -> ee.Image:
     shadow_mask = scl.neq(3).And(scl.neq(11))
 
     combined_mask = prob_mask.And(qa_mask).And(shadow_mask)
-    return image.updateMask(combined_mask)
+    scaled = image.updateMask(combined_mask).divide(10_000)
+    return scaled.select(list(S2_BANDS))
 
 
 def monthly_sentinel2_collection(
