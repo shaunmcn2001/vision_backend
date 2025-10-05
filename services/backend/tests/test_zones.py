@@ -321,6 +321,135 @@ def test_prepare_selected_period_artifacts_percentiles(monkeypatch, tmp_path: Pa
     assert Path(artifacts.raster_path).exists()
 
 
+def test_prepare_selected_period_artifacts_ndvi_kmeans(monkeypatch, tmp_path: Path) -> None:
+    class FakeStatImage:
+        def __init__(self):
+            self.renamed: list[str] = []
+
+        def rename(self, name: str):
+            self.renamed.append(name)
+            return self
+
+    def fake_composites(_geometry, months, *_args, **_kwargs):
+        return [("2024-01", object())], [], {"composite_mode": "monthly"}
+
+    fake_stats = {
+        "mean": FakeStatImage(),
+        "median": FakeStatImage(),
+        "std": FakeStatImage(),
+        "cv": FakeStatImage(),
+    }
+
+    class FakeZoneImage:
+        def rename(self, _name: str):
+            return self
+
+    ndvi_kmeans_calls = {"count": 0}
+
+    feature_payload = {
+        "mean": object(),
+        "p10": object(),
+        "p90": object(),
+        "cv": object(),
+    }
+
+    def fake_ndvi_kmeans(*_args, **_kwargs):
+        ndvi_kmeans_calls["count"] += 1
+        image = FakeZoneImage()
+        cleanup = zones.CleanupResult(
+            image=image,
+            applied_operations={
+                "smooth": False,
+                "open": False,
+                "close": False,
+                "min_mapping_unit": True,
+            },
+            executed_operations={
+                "smooth": False,
+                "open": False,
+                "close": False,
+                "min_mapping_unit": True,
+            },
+            fallback_applied=False,
+            fallback_removed=[],
+        )
+        return image, dict(feature_payload), cleanup
+
+    monkeypatch.setattr(zones, "_build_composite_series", fake_composites)
+    monkeypatch.setattr(zones, "_compute_ndvi", lambda image: image)
+    monkeypatch.setattr(zones, "_ndvi_temporal_stats", lambda images: fake_stats)
+    monkeypatch.setattr(zones, "_stability_mask", lambda *args, **kwargs: "stability")
+
+    def _fail_percentiles(*_args, **_kwargs):
+        raise RuntimeError("percentile path should not run")
+
+    monkeypatch.setattr(zones, "_classify_local_zones", _fail_percentiles)
+
+    def _fail_multiindex(*_args, **_kwargs):
+        raise RuntimeError("multiindex path should not run")
+
+    monkeypatch.setattr(zones, "_build_multiindex_zones", _fail_multiindex)
+    monkeypatch.setattr(zones, "_build_multiindex_zones_with_features", _fail_multiindex)
+    monkeypatch.setattr(zones, "_build_ndvi_kmeans_zones", fake_ndvi_kmeans)
+
+    def fake_download(image, _geometry, target):
+        if target.name == "mean_ndvi.tif":
+            _write_ndvi_raster(target)
+        elif target.name == "zones_classified.tif":
+            data = np.array(
+                [
+                    [1, 1, 2],
+                    [2, 3, 3],
+                    [0, 0, 3],
+                ],
+                dtype=np.uint8,
+            )
+            _write_zone_raster(target, data)
+        else:  # pragma: no cover - defensive
+            raise AssertionError(target.name)
+        return target
+
+    monkeypatch.setattr(zones, "_download_image_to_path", fake_download)
+
+    aoi = {"type": "Polygon", "coordinates": [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]]}  # noqa: E501
+
+    artifacts, metadata = zones._prepare_selected_period_artifacts(
+        aoi,
+        geometry=aoi,
+        working_dir=tmp_path,
+        months=["2024-01"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 31),
+        cloud_prob_max=40,
+        n_classes=4,
+        cv_mask_threshold=zones.DEFAULT_CV_THRESHOLD,
+        apply_stability_mask=True,
+        min_mapping_unit_ha=1.5,
+        smooth_radius_m=0,
+        open_radius_m=0,
+        close_radius_m=0,
+        simplify_tol_m=0,
+        simplify_buffer_m=0,
+        method="ndvi_kmeans",
+        sample_size=4321,
+        include_stats=True,
+    )
+
+    assert ndvi_kmeans_calls["count"] == 1
+    assert metadata["zone_method"] == "ndvi_kmeans"
+    assert metadata["classification_method"] == "ndvi_kmeans"
+    assert metadata["percentile_thresholds"] == []
+    assert metadata["kmeans_sample_size"] == 4321
+    assert metadata["kmeans_features"] == {
+        "method": "kmeans",
+        "features": sorted(str(name) for name in feature_payload),
+    }
+    assert metadata["kmeans_feature_count"] == len(feature_payload)
+    assert metadata["stability_mask_applied"] is True
+    assert Path(artifacts.raster_path).exists()
+    assert Path(metadata["downloaded_zone_raster"]).exists()
+
+
 def test_prepare_selected_period_artifacts_multiindex(monkeypatch, tmp_path: Path) -> None:
     class FakeStatImage:
         def __init__(self):
