@@ -176,3 +176,102 @@ def test_export_selected_period_zones_returns_local_paths(monkeypatch, tmp_path:
         for record in reader.iterShapeRecords()
     }
     assert set(zones_in_file) <= set(range(1, 6))
+
+
+def test_classify_by_percentiles_handles_duplicate_thresholds(monkeypatch) -> None:
+    reducer_payload = {
+        "cut_01": 0.2,
+        "cut_02": 0.2,
+        "cut_03": 0.5,
+        "cut_04": 0.8,
+    }
+
+    class FakeReducerResult:
+        def __init__(self, data: dict[str, float]):
+            self._data = data
+
+        def getInfo(self):
+            return dict(self._data)
+
+    class FakeEEString(str):
+        def getInfo(self):
+            return str(self)
+
+    class FakeEEList(list):
+        def __init__(self, values):
+            super().__init__(values)
+
+        def get(self, index):
+            return self[index]
+
+        def iterate(self, func, first):
+            result = first
+            for value in self:
+                result = func(result, value)
+            return result
+
+    class FakeNumber(float):
+        pass
+
+    class FakeImage:
+        def __init__(self, values, reducer_result, band_name: str = "ndvi"):
+            self.values = list(values)
+            self.reducer_result = reducer_result
+            self.band_name = band_name
+
+        def bandNames(self):
+            return FakeEEList([self.band_name])
+
+        def rename(self, name):
+            if hasattr(name, "getInfo"):
+                self.band_name = name.getInfo()
+            else:
+                self.band_name = str(name)
+            return self
+
+        def reduceRegion(self, **_kwargs):
+            return self.reducer_result
+
+        def multiply(self, scalar):
+            factor = float(scalar)
+            return FakeImage([value * factor for value in self.values], self.reducer_result, self.band_name)
+
+        def gt(self, threshold):
+            thresh = float(threshold)
+            return FakeImage(
+                [1 if value > thresh else 0 for value in self.values],
+                None,
+                self.band_name,
+            )
+
+        def add(self, other):
+            if isinstance(other, FakeImage):
+                values = [a + b for a, b in zip(self.values, other.values)]
+            else:
+                values = [value + float(other) for value in self.values]
+            return FakeImage(values, None, self.band_name)
+
+        def toInt(self):
+            return FakeImage([int(round(value)) for value in self.values], None, self.band_name)
+
+    fake_ee = type(
+        "FakeEE",
+        (),
+        {
+            "String": staticmethod(lambda value: FakeEEString(value)),
+            "List": staticmethod(lambda values: FakeEEList(values)),
+            "Number": staticmethod(lambda value: FakeNumber(value)),
+            "Image": staticmethod(lambda value: value),
+            "Reducer": type("Reducer", (), {"percentile": staticmethod(lambda *args, **kwargs: (args, kwargs))})(),
+        },
+    )
+
+    monkeypatch.setattr(zones, "ee", fake_ee)
+
+    values = [0.1, 0.20000000000000003, 0.3, 0.51, 0.81]
+    image = FakeImage(values, FakeReducerResult(reducer_payload))
+
+    classified, thresholds = zones._classify_by_percentiles(image, geometry=object(), n_classes=5)
+
+    assert all(later > earlier for earlier, later in zip(thresholds, thresholds[1:]))
+    assert set(classified.values) == {1, 2, 3, 4, 5}
