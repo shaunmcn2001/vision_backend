@@ -1861,6 +1861,96 @@ def _rank_zones(cluster_image: ee.Image, ndvi_mean: ee.Image, geometry: ee.Geome
     return ranked.rename("zone")
 
 
+def _build_ndvi_feature_images(
+    ndvi_images: Sequence[ee.Image],
+    ndvi_stats: Mapping[str, ee.Image],
+) -> Dict[str, ee.Image]:
+    collection = ee.ImageCollection([image.rename("NDVI") for image in ndvi_images])
+    percentiles = collection.reduce(ee.Reducer.percentile([10, 90]))
+    mean_image = ndvi_stats["mean"].rename("NDVI_mean")
+    mask = mean_image.mask()
+
+    p10 = percentiles.select("NDVI_p10").rename("NDVI_p10").updateMask(mask)
+    p90 = percentiles.select("NDVI_p90").rename("NDVI_p90").updateMask(mask)
+    cv_image = ndvi_stats["cv"].rename("NDVI_cv").updateMask(mask)
+
+    return {
+        "mean": mean_image.updateMask(mask),
+        "p10": p10,
+        "p90": p90,
+        "cv": cv_image,
+    }
+
+
+def _train_weka_kmeans_classifier(
+    stack: ee.Image,
+    geometry: ee.Geometry,
+    *,
+    n_classes: int,
+    sample_size: int,
+    seed: int = 42,
+) -> ee.Clusterer:
+    training = stack.sample(
+        region=geometry,
+        scale=DEFAULT_SCALE,
+        numPixels=sample_size,
+        seed=seed,
+        tileScale=4,
+        geometries=False,
+    )
+    return ee.Clusterer.wekaKMeans(n_classes).train(training)
+
+
+def _build_ndvi_kmeans_zones(
+    *,
+    ndvi_images: Sequence[ee.Image],
+    ndvi_stats: Mapping[str, ee.Image],
+    geometry: ee.Geometry,
+    n_classes: int,
+    smooth_radius_m: float,
+    open_radius_m: float,
+    close_radius_m: float,
+    min_mapping_unit_ha: float,
+    sample_size: int,
+    rank_by_mean: bool = True,
+) -> tuple[ee.Image, Dict[str, ee.Image], CleanupResult]:
+    stability = ndvi_stats["stability"]
+    feature_images = _build_ndvi_feature_images(ndvi_images, ndvi_stats)
+    stack = ee.Image.cat(
+        [
+            feature_images["mean"],
+            feature_images["p10"],
+            feature_images["p90"],
+            feature_images["cv"],
+        ]
+    ).updateMask(stability)
+
+    clusterer = _train_weka_kmeans_classifier(
+        stack,
+        geometry,
+        n_classes=n_classes,
+        sample_size=sample_size,
+    )
+    clustered = stack.cluster(clusterer)
+    ranked = clustered
+    if rank_by_mean:
+        ranked = _rank_zones(clustered, feature_images["mean"], geometry)
+    ranked = ranked.updateMask(stability)
+
+    cleanup = _apply_cleanup_with_fallback_tracking(
+        ranked,
+        geometry,
+        n_classes=n_classes,
+        smooth_radius_m=smooth_radius_m,
+        open_radius_m=open_radius_m,
+        close_radius_m=close_radius_m,
+        min_mapping_unit_ha=min_mapping_unit_ha,
+    )
+    cleanup.image = cleanup.image.rename("zone")
+
+    return cleanup.image, feature_images, cleanup
+
+
 def _build_multiindex_zones(
     *,
     ndvi_stats: Mapping[str, ee.Image],
@@ -2082,6 +2172,89 @@ def _prepare_selected_period_artifacts(
 
         return artifacts, metadata
 
+    if method == "ndvi_kmeans":
+        zone_image, feature_payload, cleanup_result = _build_ndvi_kmeans_zones(
+            ndvi_images=ndvi_images,
+            ndvi_stats=ndvi_stats,
+            geometry=geometry,
+            n_classes=n_classes,
+            smooth_radius_m=smooth_radius_m,
+            open_radius_m=open_radius_m,
+            close_radius_m=close_radius_m,
+            min_mapping_unit_ha=mmu_value,
+            sample_size=sample_size,
+        )
+
+        zone_raster_path = workdir / "zones_classified.tif"
+        _download_image_to_path(zone_image, geometry, zone_raster_path)
+
+        with rasterio.open(zone_raster_path) as zone_src:
+            classified_data = zone_src.read(1)
+            zone_transform = zone_src.transform
+            zone_crs = zone_src.crs
+
+        with rasterio.open(ndvi_path) as ndvi_src:
+            ndvi_values = ndvi_src.read(1, masked=True)
+
+        smoothing_requested = {
+            "smooth_radius_m": float(max(smooth_radius_m, 0)),
+            "open_radius_m": float(max(open_radius_m, 0)),
+            "close_radius_m": float(max(close_radius_m, 0)),
+            "min_mapping_unit_ha": float(max(mmu_value, 0)),
+        }
+        applied_operations = dict(cleanup_result.applied_operations)
+        executed_operations = dict(cleanup_result.executed_operations)
+        mmu_was_applied = bool(applied_operations.get("min_mapping_unit"))
+
+        populated = classified_data[classified_data > 0]
+        final_zone_count = int(np.unique(populated).size) if populated.size else 0
+        effective_zone_count = min(n_classes, final_zone_count) if final_zone_count else 0
+
+        artifacts, local_metadata = _assemble_zone_artifacts(
+            classified=classified_data,
+            ndvi=ndvi_values,
+            transform=zone_transform,
+            crs=zone_crs,
+            working_dir=workdir,
+            include_stats=include_stats,
+            raster_path=zone_raster_path,
+            smoothing_requested=smoothing_requested,
+            applied_operations=applied_operations,
+            executed_operations=executed_operations,
+            fallback_applied=bool(cleanup_result.fallback_applied),
+            fallback_removed=list(cleanup_result.fallback_removed),
+            min_mapping_unit_ha=mmu_value,
+            requested_zone_count=n_classes,
+            effective_zone_count=effective_zone_count,
+            classification_method="ndvi_kmeans",
+            thresholds=[],
+            kmeans_fallback_applied=False,
+            kmeans_cluster_centers=[],
+        )
+
+        feature_names = sorted(str(name) for name in feature_payload.keys())
+        feature_metadata = {"method": "kmeans", "features": feature_names}
+
+        metadata = {
+            "used_months": ordered_months,
+            "skipped_months": skipped_months,
+            "min_mapping_unit_applied": mmu_was_applied,
+            "mmu_applied": mmu_was_applied,
+            "zone_method": method,
+            "kmeans_features": feature_metadata,
+            "kmeans_feature_count": len(feature_names),
+            "kmeans_sample_size": int(sample_size),
+            "stability_thresholds": list(STABILITY_THRESHOLD_SEQUENCE),
+            "stability_mask_applied": stability_flag,
+        }
+
+        metadata.update(composite_metadata)
+        metadata.update(local_metadata)
+        metadata["downloaded_mean_ndvi"] = str(ndvi_path)
+        metadata["downloaded_zone_raster"] = str(zone_raster_path)
+
+        return artifacts, metadata
+
     # Multi-index K-means branch
     composite_images = [image for _, image in composites]
     feature_images_meta = composite_metadata.get("feature_images")
@@ -2213,9 +2386,6 @@ def build_zone_artifacts(
         method_key = DEFAULT_METHOD
     if method_key not in {"ndvi_percentiles", "multiindex_kmeans", "ndvi_kmeans"}:
         raise ValueError("Unsupported method for production zones")
-    if method_key == "ndvi_kmeans":
-        method_key = "multiindex_kmeans"
-
     try:
         gee.initialize()
     except Exception:  # pragma: no cover - test fallback
@@ -2366,8 +2536,6 @@ def export_selected_period_zones(
     if method_selection not in {"ndvi_percentiles", "multiindex_kmeans", "ndvi_kmeans"}:
         raise ValueError("Unsupported method for production zones")
 
-    method_value = "multiindex_kmeans" if method_selection == "ndvi_kmeans" else method_selection
-
     artifacts, metadata = _prepare_selected_period_artifacts(
         aoi_geojson,
         geometry=geometry,
@@ -2385,7 +2553,7 @@ def export_selected_period_zones(
         close_radius_m=close_radius_m,
         simplify_tol_m=simplify_tol_m,
         simplify_buffer_m=simplify_buffer_m,
-        method=method_value,
+        method=method_selection,
         sample_size=DEFAULT_SAMPLE_SIZE,
         include_stats=include_stats_flag,
     )
