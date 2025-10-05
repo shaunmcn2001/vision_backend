@@ -284,6 +284,171 @@ def _remove_small_regions(data: np.ndarray, min_pixels: int) -> np.ndarray:
     return result
 
 
+def _assemble_zone_artifacts(
+    *,
+    classified: np.ndarray,
+    ndvi: np.ma.MaskedArray,
+    transform,
+    crs,
+    working_dir: Path,
+    include_stats: bool,
+    raster_path: Path,
+    smoothing_requested: Mapping[str, float],
+    applied_operations: Mapping[str, bool],
+    executed_operations: Mapping[str, bool],
+    fallback_applied: bool,
+    fallback_removed: Sequence[str],
+    min_mapping_unit_ha: float,
+    requested_zone_count: int,
+    effective_zone_count: int,
+    classification_method: str,
+    thresholds: Sequence[float],
+    kmeans_fallback_applied: bool,
+    kmeans_cluster_centers: Sequence[float],
+) -> tuple[ZoneArtifacts, Dict[str, object]]:
+    pixel_size_x = abs(transform.a)
+    pixel_size_y = abs(transform.e)
+    pixel_area = pixel_size_x * pixel_size_y
+
+    classified_array = np.asarray(classified)
+    if classified_array.dtype != np.uint8:
+        classified_array = classified_array.astype(np.uint8)
+
+    unique_zones = np.unique(classified_array[classified_array > 0])
+
+    records: List[Dict[str, object]] = []
+    zonal_stats: List[Dict[str, object]] = []
+    for geom, value in shapes(classified_array, mask=classified_array > 0, transform=transform):
+        zone_id = int(value)
+        if zone_id <= 0:
+            continue
+        geom_shape = shape(geom)
+        area_m2 = geom_shape.area
+        area_ha = area_m2 / 10_000.0
+        records.append({"zone": zone_id, "geometry": geom_shape, "area_ha": area_ha})
+
+    vector_path = working_dir / "zones"
+    vector_path.mkdir(parents=True, exist_ok=True)
+    shp_base = vector_path / "zones"
+    with shapefile.Writer(str(shp_base)) as writer:
+        writer.autoBalance = 1
+        writer.field("zone", "N", decimal=0)
+        writer.field("area_ha", "F", decimal=4)
+        for record in records:
+            writer.record(int(record["zone"]), float(record["area_ha"]))
+            writer.shape(mapping(record["geometry"]))
+
+    shp_path = shp_base.with_suffix(".shp")
+    cpg_path = shp_base.with_suffix(".cpg")
+    cpg_path.write_text("UTF-8")
+    if crs:
+        prj_path = shp_base.with_suffix(".prj")
+        try:
+            prj_path.write_text(CRS.from_user_input(crs).to_wkt())
+        except Exception:  # pragma: no cover - pyproj failures
+            prj_path.write_text("")
+
+    vector_components: dict[str, str] = {}
+    for ext in ["shp", "dbf", "shx", "prj", "cpg"]:
+        component = shp_base.with_suffix(f".{ext}")
+        if component.exists():
+            vector_components[ext] = str(component)
+
+    ndvi_data = ndvi.filled(np.nan)
+    for zone_id in unique_zones:
+        mask = classified_array == zone_id
+        zone_values = ndvi_data[mask]
+        zone_values = zone_values[~np.isnan(zone_values)]
+        if zone_values.size == 0:
+            continue
+        area_ha = float(mask.sum() * pixel_area / 10_000.0)
+        zonal_stats.append(
+            {
+                "zone": int(zone_id),
+                "area_ha": area_ha,
+                "mean_ndvi": float(np.mean(zone_values)),
+                "min_ndvi": float(np.min(zone_values)),
+                "max_ndvi": float(np.max(zone_values)),
+                "pixel_count": int(mask.sum()),
+            }
+        )
+
+    stats_path: Path | None = None
+    if include_stats and zonal_stats:
+        stats_path = working_dir / "zones_zonal_stats.csv"
+        with stats_path.open("w", newline="") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=["zone", "area_ha", "mean_ndvi", "min_ndvi", "max_ndvi", "pixel_count"],
+            )
+            writer.writeheader()
+            writer.writerows(zonal_stats)
+
+    smoothing_requested = {
+        key: float(max(value, 0)) for key, value in dict(smoothing_requested).items()
+    }
+    stage_key_map = {
+        "smooth": "smooth_radius_m",
+        "open": "open_radius_m",
+        "close": "close_radius_m",
+        "min_mapping_unit": "min_mapping_unit_ha",
+    }
+    smoothing_applied = {
+        metadata_key: (
+            smoothing_requested.get(metadata_key, 0.0)
+            if applied_operations.get(stage_name)
+            else 0.0
+        )
+        for stage_name, metadata_key in stage_key_map.items()
+    }
+    smoothing_executed = {
+        stage_key_map[name]: bool(executed_operations.get(name)) for name in stage_key_map
+    }
+
+    skipped_steps = [stage_key_map[name] for name in fallback_removed if name in stage_key_map]
+    skipped_steps = sorted(set(skipped_steps))
+
+    final_zone_count = int(unique_zones.size)
+    palette: list[str] = list(
+        ZONE_PALETTE[: max(1, min(final_zone_count, len(ZONE_PALETTE)))]
+    )
+
+    metadata: Dict[str, object] = {
+        "percentile_thresholds": [float(value) for value in thresholds],
+        "palette": palette,
+        "zones": zonal_stats,
+        "min_mapping_unit_applied": bool(applied_operations.get("min_mapping_unit")),
+        "mmu_applied": bool(applied_operations.get("min_mapping_unit")),
+        "smoothing_parameters": {
+            "requested": smoothing_requested,
+            "applied": smoothing_applied,
+            "executed": smoothing_executed,
+            "fallback_applied": bool(fallback_applied),
+            "skipped_steps": skipped_steps,
+            "rolled_back_steps": skipped_steps,
+        },
+        "requested_zone_count": int(requested_zone_count),
+        "effective_zone_count": int(effective_zone_count),
+        "final_zone_count": final_zone_count,
+    }
+
+    metadata["kmeans_fallback_applied"] = bool(kmeans_fallback_applied)
+    metadata["kmeans_cluster_centers"] = [
+        float(value) for value in kmeans_cluster_centers
+    ]
+    metadata["classification_method"] = classification_method
+
+    artifacts = ZoneArtifacts(
+        raster_path=str(raster_path),
+        vector_path=str(shp_path),
+        vector_components=vector_components,
+        zonal_stats_path=str(stats_path) if stats_path is not None else None,
+        working_dir=str(working_dir),
+    )
+
+    return artifacts, metadata
+
+
 def _classify_local_zones(
     ndvi_raster: Path,
     *,
@@ -522,132 +687,35 @@ def _classify_local_zones(
         if hasattr(dst, "write_colormap"):
             dst.write_colormap(1, colormap)
 
-    records: List[Dict[str, object]] = []
-    zonal_stats: List[Dict[str, object]] = []
-    for geom, value in shapes(classified, mask=classified > 0, transform=transform):
-        zone_id = int(value)
-        if zone_id <= 0:
-            continue
-        geom_shape = shape(geom)
-        area_m2 = geom_shape.area
-        area_ha = area_m2 / 10_000.0
-        records.append({"zone": zone_id, "geometry": geom_shape, "area_ha": area_ha})
-
-    vector_path = working_dir / "zones"
-    vector_path.mkdir(parents=True, exist_ok=True)
-    shp_base = vector_path / "zones"
-    with shapefile.Writer(str(shp_base)) as writer:
-        writer.autoBalance = 1
-        writer.field("zone", "N", decimal=0)
-        writer.field("area_ha", "F", decimal=4)
-        for record in records:
-            writer.record(int(record["zone"]), float(record["area_ha"]))
-            writer.shape(mapping(record["geometry"]))
-
-    shp_path = shp_base.with_suffix(".shp")
-    cpg_path = shp_base.with_suffix(".cpg")
-    cpg_path.write_text("UTF-8")
-    if crs:
-        prj_path = shp_base.with_suffix(".prj")
-        try:
-            prj_path.write_text(CRS.from_user_input(crs).to_wkt())
-        except Exception:  # pragma: no cover - pyproj failures
-            prj_path.write_text("")
-
-    vector_components: dict[str, str] = {}
-    for ext in ["shp", "dbf", "shx", "prj", "cpg"]:
-        component = shp_base.with_suffix(f".{ext}")
-        if component.exists():
-            vector_components[ext] = str(component)
-
-    ndvi_data = ndvi.filled(np.nan)
-    for zone_id in unique_zones:
-        mask = classified == zone_id
-        zone_values = ndvi_data[mask]
-        zone_values = zone_values[~np.isnan(zone_values)]
-        if zone_values.size == 0:
-            continue
-        area_ha = float(mask.sum() * pixel_area / 10_000.0)
-        zonal_stats.append(
-            {
-                "zone": int(zone_id),
-                "area_ha": area_ha,
-                "mean_ndvi": float(np.mean(zone_values)),
-                "min_ndvi": float(np.min(zone_values)),
-                "max_ndvi": float(np.max(zone_values)),
-                "pixel_count": int(mask.sum()),
-            }
-        )
-
-    stats_path: Path | None = None
-    if include_stats and zonal_stats:
-        stats_path = working_dir / "zones_zonal_stats.csv"
-        with stats_path.open("w", newline="") as csv_file:
-            writer = csv.DictWriter(
-                csv_file,
-                fieldnames=["zone", "area_ha", "mean_ndvi", "min_ndvi", "max_ndvi", "pixel_count"],
-            )
-            writer.writeheader()
-            writer.writerows(zonal_stats)
-
     smoothing_requested = {
         "smooth_radius_m": float(max(smooth_radius_m, 0)),
         "open_radius_m": float(max(open_radius_m, 0)),
         "close_radius_m": float(max(close_radius_m, 0)),
         "min_mapping_unit_ha": float(max(min_mapping_unit_ha, 0)),
     }
-    stage_key_map = {
-        "smooth": "smooth_radius_m",
-        "open": "open_radius_m",
-        "close": "close_radius_m",
-        "min_mapping_unit": "min_mapping_unit_ha",
-    }
-    smoothing_applied = {
-        metadata_key: (
-            smoothing_requested[metadata_key] if applied_operations.get(stage_name) else 0.0
-        )
-        for stage_name, metadata_key in stage_key_map.items()
-    }
-    smoothing_executed = {
-        stage_key_map[name]: bool(executed_operations.get(name))
-        for name in stage_key_map
-    }
 
-    skipped_steps = [stage_key_map[name] for name in fallback_removed if name in stage_key_map]
-    skipped_steps = sorted(set(skipped_steps))
-
-    final_zone_count = int(unique_zones.size)
-    metadata: Dict[str, object] = {
-        "percentile_thresholds": [float(value) for value in thresholds.tolist()],
-        "palette": list(ZONE_PALETTE[: max(1, min(final_zone_count, len(ZONE_PALETTE)))]),
-        "zones": zonal_stats,
-        "min_mapping_unit_applied": applied_operations["min_mapping_unit"],
-        "mmu_applied": applied_operations["min_mapping_unit"],
-        "smoothing_parameters": {
-            "requested": smoothing_requested,
-            "applied": smoothing_applied,
-            "executed": smoothing_executed,
-            "fallback_applied": fallback_applied,
-            "skipped_steps": skipped_steps,
-            "rolled_back_steps": skipped_steps,
-        },
-        "requested_zone_count": int(n_classes),
-        "effective_zone_count": int(effective_n_classes),
-        "final_zone_count": final_zone_count,
-    }
-
-    metadata["kmeans_fallback_applied"] = kmeans_fallback_applied
-    metadata["kmeans_cluster_centers"] = (
-        kmeans_cluster_centers if kmeans_cluster_centers is not None else []
-    )
-    metadata["classification_method"] = "kmeans" if kmeans_fallback_applied else "percentiles"
-
-    artifacts = ZoneArtifacts(
-        raster_path=str(raster_path),
-        vector_path=str(shp_path),
-        vector_components=vector_components,
-        zonal_stats_path=str(stats_path) if stats_path is not None else None,
-        working_dir=str(working_dir),
+    artifacts, metadata = _assemble_zone_artifacts(
+        classified=classified,
+        ndvi=ndvi,
+        transform=transform,
+        crs=crs,
+        working_dir=working_dir,
+        include_stats=include_stats,
+        raster_path=raster_path,
+        smoothing_requested=smoothing_requested,
+        applied_operations=applied_operations,
+        executed_operations=executed_operations,
+        fallback_applied=fallback_applied,
+        fallback_removed=fallback_removed,
+        min_mapping_unit_ha=min_mapping_unit_ha,
+        requested_zone_count=n_classes,
+        effective_zone_count=effective_n_classes,
+        classification_method="kmeans" if kmeans_fallback_applied else "percentiles",
+        thresholds=thresholds.tolist() if thresholds.size else [],
+        kmeans_fallback_applied=kmeans_fallback_applied,
+        kmeans_cluster_centers=(
+            kmeans_cluster_centers if kmeans_cluster_centers is not None else []
+        ),
     )
 
     return artifacts, metadata
@@ -1751,8 +1819,22 @@ def _prepare_selected_period_artifacts(
         raise ValueError("No valid Sentinel-2 scenes were found for the selected months")
 
     ndvi_images = [_compute_ndvi(image) for _, image in composites]
-    stats = _ndvi_temporal_stats(ndvi_images)
-    mean_image = stats["mean"].rename("NDVI_mean")
+    ndvi_stats = dict(_ndvi_temporal_stats(ndvi_images))
+
+    stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
+    if stability_flag:
+        stability_image = _stability_mask(
+            ndvi_stats["cv"],
+            geometry,
+            STABILITY_THRESHOLD_SEQUENCE,
+            MIN_STABILITY_SURVIVAL_RATIO,
+            DEFAULT_SCALE,
+        )
+    else:
+        stability_image = ee.Image(1)
+    ndvi_stats["stability"] = stability_image
+
+    mean_image = ndvi_stats["mean"].rename("NDVI_mean")
 
     workdir = _ensure_working_directory(working_dir)
     ndvi_path = workdir / "mean_ndvi.tif"
@@ -1769,28 +1851,134 @@ def _prepare_selected_period_artifacts(
             mmu_value = max(min_mapping_unit_ha, 0)
             mmu_applied = True
 
-    artifacts, local_metadata = _classify_local_zones(
-        ndvi_path,
+    if method == "ndvi_percentiles":
+        artifacts, local_metadata = _classify_local_zones(
+            ndvi_path,
+            working_dir=workdir,
+            n_classes=n_classes,
+            min_mapping_unit_ha=mmu_value,
+            smooth_radius_m=smooth_radius_m,
+            open_radius_m=open_radius_m,
+            close_radius_m=close_radius_m,
+            include_stats=include_stats,
+        )
+
+        mmu_was_applied = mmu_value > 0 and mmu_applied
+        metadata: Dict[str, object] = {
+            "used_months": ordered_months,
+            "skipped_months": skipped_months,
+            "min_mapping_unit_applied": mmu_was_applied,
+            "mmu_applied": mmu_was_applied,
+            "zone_method": method,
+            "stability_thresholds": list(STABILITY_THRESHOLD_SEQUENCE),
+            "stability_mask_applied": stability_flag,
+        }
+
+        metadata.update(composite_metadata)
+        metadata.update(local_metadata)
+        metadata["downloaded_mean_ndvi"] = str(ndvi_path)
+
+        return artifacts, metadata
+
+    # Multi-index K-means branch
+    composite_images = [image for _, image in composites]
+    feature_images_meta = composite_metadata.get("feature_images")
+    if isinstance(feature_images_meta, Mapping) and feature_images_meta:
+        zone_image, feature_payload = _build_multiindex_zones_with_features(
+            ndvi_stats=ndvi_stats,
+            feature_images=feature_images_meta,
+            geometry=geometry,
+            n_classes=n_classes,
+            smooth_radius_m=smooth_radius_m,
+            open_radius_m=open_radius_m,
+            close_radius_m=close_radius_m,
+            min_mapping_unit_ha=mmu_value,
+            sample_size=sample_size,
+        )
+    else:
+        zone_image, feature_payload = _build_multiindex_zones(
+            ndvi_stats=ndvi_stats,
+            composites=composite_images,
+            geometry=geometry,
+            n_classes=n_classes,
+            smooth_radius_m=smooth_radius_m,
+            open_radius_m=open_radius_m,
+            close_radius_m=close_radius_m,
+            min_mapping_unit_ha=mmu_value,
+            sample_size=sample_size,
+        )
+
+    zone_raster_path = workdir / "zones_classified.tif"
+    _download_image_to_path(zone_image.rename("zone"), geometry, zone_raster_path)
+
+    with rasterio.open(zone_raster_path) as zone_src:
+        classified_data = zone_src.read(1)
+        zone_transform = zone_src.transform
+        zone_crs = zone_src.crs
+
+    with rasterio.open(ndvi_path) as ndvi_src:
+        ndvi_values = ndvi_src.read(1, masked=True)
+
+    smoothing_requested = {
+        "smooth_radius_m": float(max(smooth_radius_m, 0)),
+        "open_radius_m": float(max(open_radius_m, 0)),
+        "close_radius_m": float(max(close_radius_m, 0)),
+        "min_mapping_unit_ha": float(max(mmu_value, 0)),
+    }
+    mmu_was_applied = mmu_value > 0 and mmu_applied
+    applied_operations = {
+        "smooth": smoothing_requested["smooth_radius_m"] > 0,
+        "open": smoothing_requested["open_radius_m"] > 0,
+        "close": smoothing_requested["close_radius_m"] > 0,
+        "min_mapping_unit": mmu_was_applied,
+    }
+    executed_operations = dict(applied_operations)
+
+    populated = classified_data[classified_data > 0]
+    final_zone_count = int(np.unique(populated).size) if populated.size else 0
+    effective_zone_count = min(n_classes, final_zone_count) if final_zone_count else 0
+
+    artifacts, local_metadata = _assemble_zone_artifacts(
+        classified=classified_data,
+        ndvi=ndvi_values,
+        transform=zone_transform,
+        crs=zone_crs,
         working_dir=workdir,
-        n_classes=n_classes,
-        min_mapping_unit_ha=mmu_value,
-        smooth_radius_m=smooth_radius_m,
-        open_radius_m=open_radius_m,
-        close_radius_m=close_radius_m,
         include_stats=include_stats,
+        raster_path=zone_raster_path,
+        smoothing_requested=smoothing_requested,
+        applied_operations=applied_operations,
+        executed_operations=executed_operations,
+        fallback_applied=False,
+        fallback_removed=[],
+        min_mapping_unit_ha=mmu_value,
+        requested_zone_count=n_classes,
+        effective_zone_count=effective_zone_count,
+        classification_method="multiindex_kmeans",
+        thresholds=[],
+        kmeans_fallback_applied=False,
+        kmeans_cluster_centers=[],
     )
 
-    mmu_was_applied = mmu_value > 0 and mmu_applied
-    metadata: Dict[str, object] = {
+    feature_names = sorted(str(name) for name in feature_payload.keys())
+
+    metadata = {
         "used_months": ordered_months,
         "skipped_months": skipped_months,
         "min_mapping_unit_applied": mmu_was_applied,
         "mmu_applied": mmu_was_applied,
+        "zone_method": method,
+        "multiindex_feature_names": feature_names,
+        "multiindex_feature_count": len(feature_payload),
+        "multiindex_sample_size": int(sample_size),
+        "stability_thresholds": list(STABILITY_THRESHOLD_SEQUENCE),
+        "stability_mask_applied": stability_flag,
     }
 
     metadata.update(composite_metadata)
     metadata.update(local_metadata)
     metadata["downloaded_mean_ndvi"] = str(ndvi_path)
+    metadata["downloaded_zone_raster"] = str(zone_raster_path)
 
     return artifacts, metadata
 
