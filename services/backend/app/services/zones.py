@@ -2209,6 +2209,8 @@ def build_zone_artifacts(
         raise ValueError("At least one month must be supplied")
 
     method_key = method.strip().lower()
+    if method_key == "ndvi_kmeans":
+        method_key = "multiindex_kmeans"
     if method_key not in {"ndvi_percentiles", "multiindex_kmeans"}:
         raise ValueError("Unsupported method for production zones")
 
@@ -2318,6 +2320,7 @@ def export_selected_period_zones(
     include_zonal_stats: bool = True,
     include_stats: bool | None = None,
     apply_stability_mask: bool = True,
+    method: str = DEFAULT_METHOD,
 ):
     working_dir = _ensure_working_directory(None)
 
@@ -2355,6 +2358,10 @@ def export_selected_period_zones(
             raise
     geometry = geometry or _resolve_geometry(aoi_geojson)
 
+    method_value = (method or DEFAULT_METHOD).strip().lower()
+    if method_value == "ndvi_kmeans":
+        method_value = "multiindex_kmeans"
+
     artifacts, metadata = _prepare_selected_period_artifacts(
         aoi_geojson,
         geometry=geometry,
@@ -2372,7 +2379,7 @@ def export_selected_period_zones(
         close_radius_m=close_radius_m,
         simplify_tol_m=simplify_tol_m,
         simplify_buffer_m=simplify_buffer_m,
-        method=DEFAULT_METHOD,
+        method=method_value,
         sample_size=DEFAULT_SAMPLE_SIZE,
         include_stats=include_stats_flag,
     )
