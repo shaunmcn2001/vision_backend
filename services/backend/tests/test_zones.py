@@ -208,6 +208,46 @@ def test_classify_local_zones_includes_minimum_in_first_class(tmp_path: Path) ->
     assert np.isclose(metadata["percentile_thresholds"][0], float(custom_data.min()))
 
 
+def test_classify_local_zones_preserves_classes_without_smoothing(tmp_path: Path) -> None:
+    ndvi_path = tmp_path / "mean_ndvi_minimal_smoothing.tif"
+    values = np.linspace(0.05, 0.95, 36, dtype=np.float32).reshape(6, 6)
+    _write_ndvi_raster(ndvi_path, data=values)
+
+    artifacts, metadata = zones._classify_local_zones(
+        ndvi_path,
+        working_dir=tmp_path,
+        n_classes=4,
+        min_mapping_unit_ha=0.0,
+        smooth_radius_m=0.0,
+        open_radius_m=0.0,
+        close_radius_m=0.0,
+        include_stats=False,
+    )
+
+    with rasterio.open(artifacts.raster_path) as classified:
+        classes = np.unique(classified.read(1))
+
+    populated_classes = {int(value) for value in classes if value > 0}
+    assert populated_classes == {1, 2, 3, 4}
+
+    smoothing_info = metadata.get("smoothing_parameters", {})
+    assert smoothing_info.get("fallback_applied") is False
+    assert smoothing_info.get("skipped_steps") == []
+    assert smoothing_info.get("applied", {}).get("smooth_radius_m") == 0.0
+    assert smoothing_info.get("applied", {}).get("open_radius_m") == 0.0
+    assert smoothing_info.get("applied", {}).get("close_radius_m") == 0.0
+    assert smoothing_info.get("applied", {}).get("min_mapping_unit_ha") == 0.0
+    executed_info = smoothing_info.get("executed", {})
+    assert executed_info.get("smooth_radius_m") is False
+    assert executed_info.get("open_radius_m") is False
+    assert executed_info.get("close_radius_m") is False
+    assert executed_info.get("min_mapping_unit_ha") is False
+
+    assert metadata["requested_zone_count"] == 4
+    assert metadata["effective_zone_count"] == 4
+    assert metadata["final_zone_count"] == 4
+
+
 def test_classify_local_zones_relaxes_mmu_when_classes_removed(tmp_path: Path) -> None:
     ndvi_path = tmp_path / "mean_ndvi_sparse_classes.tif"
     data = np.full((30, 30), 0.1, dtype=np.float32)
