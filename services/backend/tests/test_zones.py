@@ -17,15 +17,16 @@ import shapefile
 from app.services import zones
 
 
-def _write_ndvi_raster(path: Path) -> None:
-    data = np.array(
-        [
-            [0.1, 0.2, 0.3],
-            [0.4, 0.5, 0.6],
-            [0.7, 0.8, -9999.0],
-        ],
-        dtype=np.float32,
-    )
+def _write_ndvi_raster(path: Path, *, data: np.ndarray | None = None) -> None:
+    if data is None:
+        data = np.array(
+            [
+                [0.1, 0.2, 0.3],
+                [0.4, 0.5, 0.6],
+                [0.7, 0.8, -9999.0],
+            ],
+            dtype=np.float32,
+        )
     transform = from_origin(0, 30, zones.DEFAULT_SCALE, zones.DEFAULT_SCALE)
     with rasterio.open(
         path,
@@ -111,6 +112,37 @@ def test_classify_local_zones_generates_outputs(tmp_path: Path) -> None:
         reader = csv.DictReader(csv_file)
         rows = list(reader)
     assert any(float(row["mean_ndvi"]) > 0 for row in rows)
+
+
+def test_classify_local_zones_includes_minimum_in_first_class(tmp_path: Path) -> None:
+    ndvi_path = tmp_path / "mean_ndvi_equal_min.tif"
+    custom_data = np.array(
+        [
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.2, 0.3, 0.4],
+            [0.5, 0.6, 0.7, 0.8],
+            [0.9, 1.0, 1.1, 1.2],
+        ],
+        dtype=np.float32,
+    )
+    _write_ndvi_raster(ndvi_path, data=custom_data)
+
+    artifacts, metadata = zones._classify_local_zones(
+        ndvi_path,
+        working_dir=tmp_path,
+        n_classes=4,
+        min_mapping_unit_ha=0.0,
+        smooth_radius_m=0,
+        open_radius_m=0,
+        close_radius_m=0,
+        include_stats=True,
+    )
+
+    with rasterio.open(artifacts.raster_path) as classified:
+        classes = np.unique(classified.read(1))
+
+    assert set(classes) >= {1, 2, 3, 4}
+    assert np.isclose(metadata["percentile_thresholds"][0], float(custom_data.min()))
 
 
 def test_export_selected_period_zones_returns_local_paths(monkeypatch, tmp_path: Path) -> None:
