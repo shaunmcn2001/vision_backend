@@ -471,6 +471,7 @@ def _classify_local_zones(
 
     ndvi_data = ndvi.filled(np.nan)
     combined_mask = np.ma.getmaskarray(ndvi) | np.isnan(ndvi_data)
+    valid_mask = ~combined_mask
     if combined_mask.all():
         raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
@@ -658,9 +659,10 @@ def _classify_local_zones(
         classified = classified.astype(np.uint8)
 
     if np.any(classified == 0):
-        filled = _majority_filter(classified, 1)
-        zero_mask = classified == 0
-        classified[zero_mask] = filled[zero_mask]
+        fill_mask = valid_mask & (classified == 0)
+        if np.any(fill_mask):
+            filled = _majority_filter(classified, 1)
+            classified[fill_mask] = filled[fill_mask]
     unique_zones = np.unique(classified[classified > 0])
 
     def _hex_to_rgba(value: str) -> tuple[int, int, int, int]:
