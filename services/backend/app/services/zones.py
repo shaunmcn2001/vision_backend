@@ -303,7 +303,12 @@ def _classify_local_zones(
                 "Unable to derive strictly increasing NDVI thresholds for zone classification."
             )
 
-    classified = np.digitize(ndvi.filled(np.nan), thresholds, right=False).astype(np.int16) + 1
+    # ``np.digitize`` defaults to ``right=False`` which excludes the lower bound of each bin
+    # (assigning exact matches to the next class). When the first percentile equals the
+    # minimum NDVI value this behaviour empties class 1, which later results in a
+    # "fewer zones than requested" error. Including the lower bound keeps the percentile
+    # classes contiguous and ensures the first class remains populated.
+    classified = np.digitize(ndvi.filled(np.nan), thresholds, right=True).astype(np.int16) + 1
     classified[ndvi.mask] = 0
 
     pixel_size_x = abs(transform.a)
