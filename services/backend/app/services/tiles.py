@@ -6,6 +6,7 @@ from typing import Any, Mapping
 import ee
 from ee import ServiceAccountCredentials
 from app.services.gcs import download_json, exists
+from app.services.image_stats import temporal_stats
 from app.services.indices import IndexDefinition, resolve_index
 
 # Reuse the same SA method you used for NDVI
@@ -80,7 +81,13 @@ def _index_image_for_range(
         parameters=parameters,
         collection=collection,
     )
-    mean_img = ee.Image(coll.select(definition.band_name).mean())
+    stats = temporal_stats(
+        coll.select(definition.band_name),
+        band_name=definition.band_name,
+        rename_prefix=definition.band_name,
+        mean_band_name=definition.band_name,
+    )
+    mean_img = stats["mean"]
     img = mean_img.clip(geom)
     if definition.valid_range is not None:
         low, high = definition.valid_range
