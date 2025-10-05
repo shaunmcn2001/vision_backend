@@ -320,12 +320,54 @@ def _classify_local_zones(
     open_radius_px = int(round(max(open_radius_m, 0) / radius_scale))
     close_radius_px = int(round(max(close_radius_m, 0) / radius_scale))
 
-    classified = _majority_filter(classified, smooth_radius_px)
-    classified = _majority_filter(classified, open_radius_px)
-    classified = _majority_filter(classified, close_radius_px)
+    stage_results: list[tuple[str, np.ndarray]] = [("initial", classified.copy())]
+    applied_operations: dict[str, bool] = {
+        "smooth": False,
+        "open": False,
+        "close": False,
+        "min_mapping_unit": False,
+    }
+
+    if smooth_radius_px > 0:
+        classified = _majority_filter(classified, smooth_radius_px)
+        stage_results.append(("smooth", classified.copy()))
+        applied_operations["smooth"] = True
+    if open_radius_px > 0:
+        classified = _majority_filter(classified, open_radius_px)
+        stage_results.append(("open", classified.copy()))
+        applied_operations["open"] = True
+    if close_radius_px > 0:
+        classified = _majority_filter(classified, close_radius_px)
+        stage_results.append(("close", classified.copy()))
+        applied_operations["close"] = True
 
     min_pixels = int(round((min_mapping_unit_ha * 10_000) / pixel_area))
-    classified = _remove_small_regions(classified, min_pixels)
+    if min_pixels > 1:
+        classified = _remove_small_regions(classified, min_pixels)
+        stage_results.append(("min_mapping_unit", classified.copy()))
+        applied_operations["min_mapping_unit"] = True
+
+    fallback_removed: list[str] = []
+    final_index = len(stage_results) - 1
+    unique_zones = np.unique(stage_results[final_index][1][stage_results[final_index][1] > 0])
+    while unique_zones.size < n_classes and final_index > 0:
+        stage_name = stage_results[final_index][0]
+        if stage_name in applied_operations and applied_operations[stage_name]:
+            applied_operations[stage_name] = False
+            fallback_removed.append(stage_name)
+        final_index -= 1
+        unique_zones = np.unique(stage_results[final_index][1][stage_results[final_index][1] > 0])
+
+    fallback_removed.reverse()
+    fallback_applied = bool(fallback_removed)
+
+    classified = stage_results[final_index][1].copy()
+    unique_zones = np.unique(classified[classified > 0])
+    if unique_zones.size < n_classes:
+        raise ValueError(
+            "Zone classification produced fewer zones than requested even after relaxing smoothing "
+            f"operations ({unique_zones.size} < {n_classes}). Final thresholds: {thresholds.tolist()}"
+        )
 
     if np.any(classified == 0):
         filled = _majority_filter(classified, 1)
@@ -333,13 +375,7 @@ def _classify_local_zones(
         classified[zero_mask] = filled[zero_mask]
 
     classified = classified.astype(np.uint8)
-
     unique_zones = np.unique(classified[classified > 0])
-    if 0 < unique_zones.size < n_classes:
-        raise ValueError(
-            "Zone classification produced fewer zones than requested after smoothing operations "
-            f"({unique_zones.size} < {n_classes}). Final thresholds: {thresholds.tolist()}"
-        )
 
     def _hex_to_rgba(value: str) -> tuple[int, int, int, int]:
         value = value.lstrip("#")
@@ -433,12 +469,39 @@ def _classify_local_zones(
             writer.writeheader()
             writer.writerows(zonal_stats)
 
+    smoothing_requested = {
+        "smooth_radius_m": float(max(smooth_radius_m, 0)),
+        "open_radius_m": float(max(open_radius_m, 0)),
+        "close_radius_m": float(max(close_radius_m, 0)),
+        "min_mapping_unit_ha": float(max(min_mapping_unit_ha, 0)),
+    }
+    stage_key_map = {
+        "smooth": "smooth_radius_m",
+        "open": "open_radius_m",
+        "close": "close_radius_m",
+        "min_mapping_unit": "min_mapping_unit_ha",
+    }
+    smoothing_applied = {
+        metadata_key: (
+            smoothing_requested[metadata_key] if applied_operations.get(stage_name) else 0.0
+        )
+        for stage_name, metadata_key in stage_key_map.items()
+    }
+
+    skipped_steps = [stage_key_map[name] for name in fallback_removed if name in stage_key_map]
+
     metadata: Dict[str, object] = {
         "percentile_thresholds": [float(value) for value in thresholds.tolist()],
         "palette": list(ZONE_PALETTE[: max(1, min(n_classes, len(ZONE_PALETTE)))]),
         "zones": zonal_stats,
-        "min_mapping_unit_applied": min_pixels > 1,
-        "mmu_applied": min_pixels > 1,
+        "min_mapping_unit_applied": applied_operations["min_mapping_unit"],
+        "mmu_applied": applied_operations["min_mapping_unit"],
+        "smoothing_parameters": {
+            "requested": smoothing_requested,
+            "applied": smoothing_applied,
+            "fallback_applied": fallback_applied,
+            "skipped_steps": skipped_steps,
+        },
     }
 
     artifacts = ZoneArtifacts(

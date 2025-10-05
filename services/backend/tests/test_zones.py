@@ -145,6 +145,39 @@ def test_classify_local_zones_includes_minimum_in_first_class(tmp_path: Path) ->
     assert np.isclose(metadata["percentile_thresholds"][0], float(custom_data.min()))
 
 
+def test_classify_local_zones_relaxes_mmu_when_classes_removed(tmp_path: Path) -> None:
+    ndvi_path = tmp_path / "mean_ndvi_sparse_classes.tif"
+    data = np.full((30, 30), 0.1, dtype=np.float32)
+    data[15:, :] = 0.5
+    data[5:10, 5:10] = 0.2
+    data[10:12, 20:22] = 0.3
+    data[2:4, 25:27] = 0.4
+    _write_ndvi_raster(ndvi_path, data=data)
+
+    artifacts, metadata = zones._classify_local_zones(
+        ndvi_path,
+        working_dir=tmp_path,
+        n_classes=5,
+        min_mapping_unit_ha=1.5,
+        smooth_radius_m=0,
+        open_radius_m=0,
+        close_radius_m=0,
+        include_stats=False,
+    )
+
+    with rasterio.open(artifacts.raster_path) as classified:
+        raster_classes = np.unique(classified.read(1))
+
+    non_zero_classes = {int(value) for value in raster_classes if value > 0}
+    assert non_zero_classes == {1, 2, 3, 4, 5}
+
+    smoothing_info = metadata.get("smoothing_parameters", {})
+    assert smoothing_info.get("fallback_applied") is True
+    assert "min_mapping_unit_ha" in smoothing_info.get("skipped_steps", [])
+    assert smoothing_info.get("applied", {}).get("min_mapping_unit_ha") == 0.0
+    assert metadata["min_mapping_unit_applied"] is False
+
+
 def test_export_selected_period_zones_returns_local_paths(monkeypatch, tmp_path: Path) -> None:
     def fake_prepare(aoi_geojson, **kwargs):
         workdir = kwargs["working_dir"]
