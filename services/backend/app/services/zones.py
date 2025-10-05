@@ -1007,6 +1007,30 @@ def _classify_by_percentiles(
     except ValueError as exc:
         raise ValueError(STABILITY_MASK_EMPTY_ERROR) from exc
 
+    adjusted_thresholds: List[float] = []
+    previous = -math.inf
+    for raw_value in thresholds:
+        try:
+            numeric = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Percentile thresholds must be numeric") from exc
+
+        if not math.isfinite(numeric):
+            raise ValueError("Percentile thresholds must be finite values")
+
+        if numeric <= previous:
+            nudged = math.nextafter(previous, math.inf)
+            if not math.isfinite(nudged) or nudged <= previous:
+                raise ValueError(
+                    "Unable to derive strictly increasing percentile thresholds"
+                )
+            numeric = nudged
+
+        adjusted_thresholds.append(numeric)
+        previous = numeric
+
+    thresholds = adjusted_thresholds
+
     # Now classify pixels relative to thresholds
     zero = image.multiply(0)
 
