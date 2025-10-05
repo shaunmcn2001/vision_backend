@@ -282,7 +282,26 @@ def _classify_local_zones(
         raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
     percentiles = np.linspace(0, 100, n_classes + 1)[1:-1]
-    thresholds = np.percentile(valid_values, percentiles)
+    raw_thresholds = np.percentile(valid_values, percentiles) if percentiles.size else np.array([])
+
+    thresholds = raw_thresholds
+    if thresholds.size:
+        thresholds = np.asarray(thresholds, dtype=float)
+        if not np.all(np.diff(thresholds) > 0):
+            thresholds = np.unique(thresholds)
+            if thresholds.size != raw_thresholds.size:
+                min_ndvi = float(np.min(valid_values))
+                max_ndvi = float(np.max(valid_values))
+                if np.isclose(min_ndvi, max_ndvi):
+                    raise ValueError(
+                        "Unable to derive distinct NDVI thresholds for zone classification; "
+                        "all pixels share the same value."
+                    )
+                thresholds = np.linspace(min_ndvi, max_ndvi, n_classes + 1)[1:-1]
+        if thresholds.size != raw_thresholds.size or not np.all(np.diff(thresholds) > 0):
+            raise ValueError(
+                "Unable to derive strictly increasing NDVI thresholds for zone classification."
+            )
 
     classified = np.digitize(ndvi.filled(np.nan), thresholds, right=False).astype(np.int16) + 1
     classified[ndvi.mask] = 0
@@ -311,6 +330,11 @@ def _classify_local_zones(
     classified = classified.astype(np.uint8)
 
     unique_zones = np.unique(classified[classified > 0])
+    if 0 < unique_zones.size < n_classes:
+        raise ValueError(
+            "Zone classification produced fewer zones than requested after smoothing operations "
+            f"({unique_zones.size} < {n_classes}). Final thresholds: {thresholds.tolist()}"
+        )
 
     def _hex_to_rgba(value: str) -> tuple[int, int, int, int]:
         value = value.lstrip("#")
