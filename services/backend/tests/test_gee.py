@@ -66,3 +66,63 @@ def test_initialize_uses_google_application_credentials_path(tmp_path, monkeypat
     assert captured["email"] == info["client_email"]
     assert json.loads(captured["key_data"]) == info
     assert captured["credentials"] is creds_object
+
+
+def test_mask_sentinel2_scales_and_selects_bands():
+    class DummyMask:
+        def __init__(self, value: bool):
+            self.value = bool(value)
+
+        def And(self, other: "DummyMask") -> "DummyMask":
+            return DummyMask(self.value and other.value)
+
+    class DummyScalar:
+        def __init__(self, value: int):
+            self.value = value
+
+        def lte(self, threshold: int) -> DummyMask:
+            return DummyMask(self.value <= threshold)
+
+        def bitwiseAnd(self, mask: int) -> "DummyScalar":
+            return DummyScalar(self.value & mask)
+
+        def eq(self, other: int) -> DummyMask:
+            return DummyMask(self.value == other)
+
+        def neq(self, other: int) -> DummyMask:
+            return DummyMask(self.value != other)
+
+    class DummyImage:
+        def __init__(self) -> None:
+            self.mask_value: bool | None = None
+            self.divide_by: int | None = None
+            self.selected_bands: list[str] | None = None
+
+        def select(self, band):
+            if isinstance(band, list):
+                self.selected_bands = band
+                return self
+            if band == "cloud_probability":
+                return DummyScalar(20)
+            if band == "QA60":
+                return DummyScalar(0)
+            if band == "SCL":
+                return DummyScalar(5)
+            raise AssertionError(f"Unexpected band request: {band}")
+
+        def updateMask(self, mask: DummyMask) -> "DummyImage":
+            self.mask_value = mask.value
+            return self
+
+        def divide(self, value: int) -> "DummyImage":
+            self.divide_by = value
+            return self
+
+    image = DummyImage()
+
+    result = gee._mask_sentinel2(image, cloud_prob_max=30)
+
+    assert result is image
+    assert image.mask_value is True
+    assert image.divide_by == 10_000
+    assert image.selected_bands == list(gee.S2_BANDS)
