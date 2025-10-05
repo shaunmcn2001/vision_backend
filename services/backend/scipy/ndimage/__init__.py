@@ -1,6 +1,5 @@
 import numpy as np
 
-
 def generate_binary_structure(rank: int, connectivity: int) -> np.ndarray:
     if rank != 2:
         raise ValueError("Only 2D structures are supported in this stub")

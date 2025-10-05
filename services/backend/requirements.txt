@@ -14,3 +14,4 @@ pyshp>=2.3.1
 fastkml>=0.12
 python-multipart>=0.0.9
 requests
+scikit-learn
