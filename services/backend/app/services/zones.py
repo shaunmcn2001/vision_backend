@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 import calendar
 import csv
 import io
+import logging
 import os
 import math
 from pathlib import Path
@@ -31,6 +32,9 @@ from app.exports import sanitize_name
 from app.services.image_stats import temporal_stats
 from app.utils.geometry import area_ha
 from app.utils.sanitization import sanitize_for_json
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_CLOUD_PROB_MAX = 40
@@ -142,6 +146,14 @@ class ZoneArtifacts:
     working_dir: str | None = None
 
 
+@dataclass(frozen=True)
+class ImageExportResult:
+    """Result of staging an image locally while queueing an EE export task."""
+
+    path: Path
+    task: ee.batch.Task | None = None
+
+
 def _ensure_working_directory(path: os.PathLike[str] | str | None) -> Path:
     if path:
         workdir = Path(path)
@@ -224,11 +236,38 @@ def _extract_geotiff_from_zip(payload: bytes, target: Path) -> None:
             shutil.copyfileobj(source, output)
 
 
-def _download_image_to_path(image: ee.Image, geometry: ee.Geometry, target: Path) -> Path:
+def _download_image_to_path(
+    image: ee.Image, geometry: ee.Geometry, target: Path
+) -> ImageExportResult:
+    region_coords = _geometry_region(geometry)
+    ee_region = ee.Geometry.Polygon(region_coords)
+    sanitized_name = sanitize_name(target.stem or "export")
+    description = f"zones_{sanitized_name}"[:100]
+    folder = os.getenv("GEE_DRIVE_FOLDER", "Sentinel2_Zones")
+
+    task: ee.batch.Task | None = None
+    try:
+        task = ee.batch.Export.image.toDrive(
+            image=image,
+            description=description,
+            folder=folder,
+            fileNamePrefix=sanitized_name,
+            region=ee_region,
+            scale=DEFAULT_SCALE,
+            crs=DEFAULT_EXPORT_CRS,
+            fileFormat="GeoTIFF",
+            maxPixels=gee.MAX_PIXELS,
+            filePerBand=False,
+        )
+        task.start()
+    except Exception:  # pragma: no cover - diagnostic logging
+        logger.exception("Failed to start Drive export for %s", sanitized_name)
+        task = None
+
     params = {
         "scale": DEFAULT_SCALE,
         "crs": DEFAULT_EXPORT_CRS,
-        "region": _geometry_region(geometry),
+        "region": region_coords,
         "filePerBand": False,
         "format": "GeoTIFF",
     }
@@ -250,7 +289,7 @@ def _download_image_to_path(image: ee.Image, geometry: ee.Geometry, target: Path
     else:
         with target.open("wb") as output:
             output.write(payload)
-    return target
+    return ImageExportResult(path=target, task=task)
 
 
 def _majority_filter(data: np.ndarray, radius: int) -> np.ndarray:
@@ -2125,6 +2164,52 @@ def _prepare_selected_period_artifacts(
     ndvi_images = [_compute_ndvi(image) for _, image in composites]
     ndvi_stats = dict(_ndvi_temporal_stats(ndvi_images))
 
+    diag_region = geometry
+    try:
+        collection = ee.ImageCollection(ndvi_images)
+        size_value = int(ee.Number(collection.size()).getInfo() or 0)
+        logger.info("Zone NDVI collection size: %s", size_value)
+    except Exception:  # pragma: no cover - logging guard
+        logger.exception("Failed to evaluate NDVI collection size for zone export")
+
+    diag_kwargs = {
+        "geometry": diag_region,
+        "scale": DEFAULT_SCALE,
+        "bestEffort": True,
+        "tileScale": 4,
+        "maxPixels": gee.MAX_PIXELS,
+    }
+
+    try:
+        raw_count = ndvi_stats["mean"].mask().reduce(ee.Reducer.count())
+        raw_stats = raw_count.reduceRegion(reducer=ee.Reducer.sum(), **diag_kwargs)
+        raw_info = raw_stats.getInfo() if hasattr(raw_stats, "getInfo") else raw_stats
+        logger.info("Zone NDVI raw pixel stats: %s", raw_info)
+    except Exception:  # pragma: no cover - logging guard
+        logger.exception("Failed to compute NDVI raw pixel statistics")
+
+    try:
+        minmax = ndvi_stats["mean"].reduceRegion(
+            reducer=ee.Reducer.minMax(),
+            **diag_kwargs,
+        )
+        minmax_info = minmax.getInfo() if hasattr(minmax, "getInfo") else minmax
+        logger.info("Zone NDVI min/max: %s", minmax_info)
+    except Exception:  # pragma: no cover - logging guard
+        logger.exception("Failed to compute NDVI min/max diagnostics")
+
+    try:
+        histogram = ndvi_stats["mean"].reduceRegion(
+            reducer=ee.Reducer.histogram(),
+            **diag_kwargs,
+        )
+        histogram_info = (
+            histogram.getInfo() if hasattr(histogram, "getInfo") else histogram
+        )
+        logger.info("Zone NDVI histogram: %s", histogram_info)
+    except Exception:  # pragma: no cover - logging guard
+        logger.exception("Failed to compute NDVI histogram diagnostics")
+
     stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
     if stability_flag:
         stability_image = _stability_mask(
@@ -2142,7 +2227,8 @@ def _prepare_selected_period_artifacts(
 
     workdir = _ensure_working_directory(working_dir)
     ndvi_path = workdir / "mean_ndvi.tif"
-    _download_image_to_path(mean_image, geometry, ndvi_path)
+    mean_export = _download_image_to_path(mean_image, geometry, ndvi_path)
+    ndvi_path = mean_export.path
 
     mmu_value = max(min_mapping_unit_ha, 0)
     mmu_applied = True
@@ -2181,6 +2267,7 @@ def _prepare_selected_period_artifacts(
         metadata.update(composite_metadata)
         metadata.update(local_metadata)
         metadata["downloaded_mean_ndvi"] = str(ndvi_path)
+        metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
 
         return artifacts, metadata
 
@@ -2198,7 +2285,8 @@ def _prepare_selected_period_artifacts(
         )
 
         zone_raster_path = workdir / "zones_classified.tif"
-        _download_image_to_path(zone_image, geometry, zone_raster_path)
+        zone_export = _download_image_to_path(zone_image, geometry, zone_raster_path)
+        zone_raster_path = zone_export.path
 
         with rasterio.open(zone_raster_path) as zone_src:
             classified_data = zone_src.read(1)
@@ -2265,6 +2353,8 @@ def _prepare_selected_period_artifacts(
         metadata.update(local_metadata)
         metadata["downloaded_mean_ndvi"] = str(ndvi_path)
         metadata["downloaded_zone_raster"] = str(zone_raster_path)
+        metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
+        metadata["zone_raster_export_task"] = _task_payload(zone_export.task)
 
         return artifacts, metadata
 
@@ -2298,7 +2388,8 @@ def _prepare_selected_period_artifacts(
         )
 
     zone_raster_path = workdir / "zones_classified.tif"
-    _download_image_to_path(zone_image.rename("zone"), geometry, zone_raster_path)
+    zone_export = _download_image_to_path(zone_image.rename("zone"), geometry, zone_raster_path)
+    zone_raster_path = zone_export.path
 
     with rasterio.open(zone_raster_path) as zone_src:
         classified_data = zone_src.read(1)
@@ -2364,6 +2455,8 @@ def _prepare_selected_period_artifacts(
     metadata.update(local_metadata)
     metadata["downloaded_mean_ndvi"] = str(ndvi_path)
     metadata["downloaded_zone_raster"] = str(zone_raster_path)
+    metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
+    metadata["zone_raster_export_task"] = _task_payload(zone_export.task)
 
     return artifacts, metadata
 
