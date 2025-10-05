@@ -145,13 +145,23 @@ def test_download_image_to_path_handles_zipped_payload(monkeypatch, tmp_path: Pa
         def getDownloadURL(self, params):
             return "https://example.com/download"
 
+    class FakeTask:
+        def start(self):
+            pass
+
     monkeypatch.setattr(zones, "urlopen", lambda url: FakeResponse(payload))
     monkeypatch.setattr(zones, "_geometry_region", lambda geometry: [[0, 0]])
+    monkeypatch.setattr(zones.ee, "Geometry", SimpleNamespace(Polygon=lambda coords: coords))
+    monkeypatch.setattr(
+        zones.ee.batch.Export.image,
+        "toDrive",
+        lambda **_kwargs: FakeTask(),
+    )
 
     target = tmp_path / "downloaded_ndvi.tif"
     result = zones._download_image_to_path(FakeImage(), object(), target)
 
-    assert result == target
+    assert result.path == target
     assert target.exists()
     with rasterio.open(target) as dataset:
         assert dataset.count == 1
@@ -235,12 +245,22 @@ def test_download_image_to_path_merges_multipolygon_region(monkeypatch, tmp_path
         def headers(self):
             return {"Content-Type": "image/tiff"}
 
+    class FakeTask:
+        def start(self):
+            pass
+
     monkeypatch.setattr(zones, "urlopen", lambda url: FakeResponse())
+    monkeypatch.setattr(zones.ee, "Geometry", SimpleNamespace(Polygon=lambda coords: coords))
+    monkeypatch.setattr(
+        zones.ee.batch.Export.image,
+        "toDrive",
+        lambda **_kwargs: FakeTask(),
+    )
 
     target = tmp_path / "merged_region.tif"
     result = zones._download_image_to_path(FakeImage(), geometry, target)
 
-    assert result == target
+    assert result.path == target
     assert target.exists()
     assert dissolve_called["value"] is True
     assert "region" in captured
@@ -345,7 +365,7 @@ def test_prepare_selected_period_artifacts_percentiles(monkeypatch, tmp_path: Pa
     def fake_download(image, _geometry, target):
         if target.name == "mean_ndvi.tif":
             _write_ndvi_raster(target)
-        return target
+        return zones.ImageExportResult(path=target, task=None)
 
     monkeypatch.setattr(zones, "_download_image_to_path", fake_download)
 
@@ -380,6 +400,7 @@ def test_prepare_selected_period_artifacts_percentiles(monkeypatch, tmp_path: Pa
     assert Path(artifacts.raster_path).exists()
     assert Path(artifacts.mean_ndvi_path).exists()
     assert metadata["downloaded_mean_ndvi"] == artifacts.mean_ndvi_path
+    assert metadata["mean_ndvi_export_task"] == {}
 
 
 def test_prepare_selected_period_artifacts_ndvi_kmeans(monkeypatch, tmp_path: Path) -> None:
@@ -468,7 +489,7 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(monkeypatch, tmp_path: Pa
             _write_zone_raster(target, data)
         else:  # pragma: no cover - defensive
             raise AssertionError(target.name)
-        return target
+        return zones.ImageExportResult(path=target, task=None)
 
     monkeypatch.setattr(zones, "_download_image_to_path", fake_download)
 
@@ -500,6 +521,8 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(monkeypatch, tmp_path: Pa
     assert metadata["zone_method"] == "ndvi_kmeans"
     assert metadata["classification_method"] == "ndvi_kmeans"
     assert metadata["percentile_thresholds"] == []
+    assert metadata["mean_ndvi_export_task"] == {}
+    assert metadata["zone_raster_export_task"] == {}
     assert metadata["kmeans_sample_size"] == 4321
     assert metadata["kmeans_features"] == {
         "method": "kmeans",
@@ -589,7 +612,7 @@ def test_prepare_selected_period_artifacts_multiindex(monkeypatch, tmp_path: Pat
             _write_zone_raster(target, data)
         else:  # pragma: no cover - defensive
             raise AssertionError(target.name)
-        return target
+        return zones.ImageExportResult(path=target, task=None)
 
     monkeypatch.setattr(zones, "_download_image_to_path", fake_download)
 
@@ -627,6 +650,8 @@ def test_prepare_selected_period_artifacts_multiindex(monkeypatch, tmp_path: Pat
     assert Path(metadata["downloaded_zone_raster"]).exists()
     assert Path(artifacts.mean_ndvi_path).exists()
     assert metadata["downloaded_mean_ndvi"] == artifacts.mean_ndvi_path
+    assert metadata["mean_ndvi_export_task"] == {}
+    assert metadata["zone_raster_export_task"] == {}
 
 
 def test_cleanup_helper_rolls_back_min_mapping_unit(monkeypatch) -> None:
