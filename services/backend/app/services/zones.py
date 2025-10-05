@@ -13,7 +13,7 @@ import re
 import shutil
 import tempfile
 import zipfile
-from typing import Dict, List, Mapping, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Sequence, Tuple, Union
 from urllib.request import urlopen
 
 import ee
@@ -148,20 +148,55 @@ def _ensure_working_directory(path: os.PathLike[str] | str | None) -> Path:
     return Path(tempfile.mkdtemp(prefix="zones_"))
 
 
+def _as_lists(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_as_lists(item) for item in value]
+    if isinstance(value, list):
+        return [_as_lists(item) for item in value]
+    return value
+
+
 def _geometry_region(geometry: ee.Geometry) -> List[List[List[float]]]:
     info = geometry.getInfo()
     if not info:
         raise ValueError("Unable to resolve geometry information for download")
+
     geom_type = info.get("type")
     if geom_type == "Polygon":
-        return info.get("coordinates", [])
+        coordinates = info.get("coordinates")
+        if coordinates:
+            return _as_lists(coordinates)
+        raise ValueError("Geometry information missing coordinates")
+
     if geom_type == "MultiPolygon":
-        # getDownloadURL accepts a single polygon; use bounding polygon
-        coords = info.get("coordinates") or []
-        if coords:
-            return coords[0]
-    if "coordinates" in info:
-        return info["coordinates"]
+        dissolved = geometry.dissolve()
+        try:
+            dissolved_info = dissolved.getInfo()
+        except Exception:  # pragma: no cover - defensive guard for EE errors
+            dissolved_info = None
+
+        candidate_info = dissolved_info or info
+        if not candidate_info or "coordinates" not in candidate_info:
+            raise ValueError("Geometry information missing coordinates")
+
+        if candidate_info.get("type") == "Polygon":
+            coordinates = candidate_info.get("coordinates")
+            if coordinates:
+                return _as_lists(coordinates)
+
+        merged_shape = shape(candidate_info)
+        if merged_shape.is_empty:
+            raise ValueError("Unable to resolve geometry information for download")
+        if merged_shape.geom_type != "Polygon":
+            merged_shape = merged_shape.convex_hull
+        if merged_shape.geom_type != "Polygon":
+            raise ValueError("Geometry information could not be merged into a polygon")
+        mapped = mapping(merged_shape)
+        return _as_lists(mapped.get("coordinates", []))
+
+    coordinates = info.get("coordinates")
+    if coordinates is not None:
+        return _as_lists(coordinates)
     raise ValueError("Geometry information missing coordinates")
 
 
