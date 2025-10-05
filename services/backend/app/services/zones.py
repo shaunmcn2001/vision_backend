@@ -319,6 +319,47 @@ def _classify_local_zones(
     classified = np.digitize(ndvi.filled(np.nan), thresholds, right=True).astype(np.int16) + 1
     classified[ndvi.mask] = 0
 
+    unique_zones = np.unique(classified[classified > 0])
+    if unique_zones.size < effective_n_classes and effective_n_classes > 1 and percentiles.size:
+        unique_sorted, counts = np.unique(valid_values, return_counts=True)
+        if unique_sorted.size >= effective_n_classes:
+            num_thresholds = effective_n_classes - 1
+            if num_thresholds > 0:
+                boundary_props = np.cumsum(counts)[:-1] / float(counts.sum())
+                if boundary_props.size >= num_thresholds and boundary_props.size > 0:
+                    B = boundary_props.size
+                    selected_indices: list[int] = []
+                    prev_idx = -1
+                    for j, target in enumerate(percentiles / 100.0):
+                        min_idx = max(prev_idx + 1, j)
+                        max_idx = B - (num_thresholds - j - 1) - 1
+                        max_idx = min(max_idx, B - 1)
+                        if max_idx < min_idx:
+                            min_idx = max_idx
+                        found_idx = int(np.searchsorted(boundary_props, target, side="left"))
+                        if found_idx >= B:
+                            found_idx = B - 1
+                        idx = min(max(found_idx, min_idx), max_idx)
+                        selected_indices.append(idx)
+                        prev_idx = idx
+                    fallback_thresholds = np.array(
+                        [
+                            (float(unique_sorted[idx]) + float(unique_sorted[idx + 1])) / 2.0
+                            for idx in selected_indices
+                        ],
+                        dtype=float,
+                    )
+                    fallback_classified = (
+                        np.digitize(ndvi.filled(np.nan), fallback_thresholds, right=True).astype(np.int16)
+                        + 1
+                    )
+                    fallback_classified[ndvi.mask] = 0
+                    fallback_unique = np.unique(fallback_classified[fallback_classified > 0])
+                    if fallback_unique.size == effective_n_classes:
+                        thresholds = fallback_thresholds
+                        classified = fallback_classified
+                        unique_zones = fallback_unique
+
     pixel_size_x = abs(transform.a)
     pixel_size_y = abs(transform.e)
     pixel_area = pixel_size_x * pixel_size_y

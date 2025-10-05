@@ -143,6 +143,37 @@ def test_classify_local_zones_downscales_to_available_values(tmp_path: Path) -> 
     assert len(metadata["percentile_thresholds"]) == 1
 
 
+def test_classify_local_zones_recovers_sparse_percentiles(tmp_path: Path) -> None:
+    ndvi_path = tmp_path / "mean_ndvi_sparse_percentiles.tif"
+    data = np.full((20, 20), 0.1, dtype=np.float32)
+    data[:2, :2] = 0.2
+    data[0, 0] = 0.9
+    _write_ndvi_raster(ndvi_path, data=data)
+
+    artifacts, metadata = zones._classify_local_zones(
+        ndvi_path,
+        working_dir=tmp_path,
+        n_classes=3,
+        min_mapping_unit_ha=0.0,
+        smooth_radius_m=0,
+        open_radius_m=0,
+        close_radius_m=0,
+        include_stats=False,
+    )
+
+    with rasterio.open(artifacts.raster_path) as classified:
+        classes = np.unique(classified.read(1))
+
+    populated_classes = {int(value) for value in classes if value > 0}
+    assert populated_classes == {1, 2, 3}
+    assert metadata["effective_zone_count"] == 3
+    assert metadata["final_zone_count"] == 3
+
+    thresholds = metadata["percentile_thresholds"]
+    assert np.isclose(thresholds[0], 0.15, atol=1e-6)
+    assert np.isclose(thresholds[1], 0.55, atol=1e-6)
+
+
 def test_classify_local_zones_includes_minimum_in_first_class(tmp_path: Path) -> None:
     ndvi_path = tmp_path / "mean_ndvi_equal_min.tif"
     custom_data = np.array(
