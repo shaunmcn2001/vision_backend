@@ -1,6 +1,8 @@
 import csv
+import io
 from pathlib import Path
 import sys
+import zipfile
 
 TEST_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = TEST_DIR.parent
@@ -38,6 +40,42 @@ def _write_ndvi_raster(path: Path) -> None:
         nodata=-9999.0,
     ) as dst:
         dst.write(data, 1)
+
+
+def test_download_image_to_path_handles_zipped_payload(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "source_ndvi.tif"
+    _write_ndvi_raster(source)
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.write(source, arcname="mean_ndvi.tif")
+    payload = buffer.getvalue()
+
+    class FakeResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.close()
+
+        @property
+        def headers(self):
+            return {"Content-Type": "application/zip"}
+
+    class FakeImage:
+        def getDownloadURL(self, params):
+            return "https://example.com/download"
+
+    monkeypatch.setattr(zones, "urlopen", lambda url: FakeResponse(payload))
+    monkeypatch.setattr(zones, "_geometry_region", lambda geometry: [[0, 0]])
+
+    target = tmp_path / "downloaded_ndvi.tif"
+    result = zones._download_image_to_path(FakeImage(), object(), target)
+
+    assert result == target
+    assert target.exists()
+    with rasterio.open(target) as dataset:
+        assert dataset.count == 1
 
 
 def test_classify_local_zones_generates_outputs(tmp_path: Path) -> None:
