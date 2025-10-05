@@ -1,6 +1,7 @@
 import csv
 import io
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import zipfile
 
@@ -250,7 +251,25 @@ def test_prepare_selected_period_artifacts_multiindex(monkeypatch, tmp_path: Pat
 
     def fake_multiindex(*_args, **_kwargs):
         multiindex_calls["count"] += 1
-        return FakeZoneImage(), {"NDVI": object(), "NDRE": object()}
+        image = FakeZoneImage()
+        cleanup = zones.CleanupResult(
+            image=image,
+            applied_operations={
+                "smooth": False,
+                "open": False,
+                "close": False,
+                "min_mapping_unit": False,
+            },
+            executed_operations={
+                "smooth": False,
+                "open": False,
+                "close": False,
+                "min_mapping_unit": False,
+            },
+            fallback_applied=False,
+            fallback_removed=[],
+        )
+        return image, {"NDVI": object(), "NDRE": object()}, cleanup
 
     monkeypatch.setattr(zones, "_build_composite_series", fake_composites)
     monkeypatch.setattr(zones, "_compute_ndvi", lambda image: image)
@@ -317,6 +336,61 @@ def test_prepare_selected_period_artifacts_multiindex(monkeypatch, tmp_path: Pat
     assert metadata["multiindex_sample_size"] == 1234
     assert Path(artifacts.raster_path).exists()
     assert Path(metadata["downloaded_zone_raster"]).exists()
+
+
+def test_cleanup_helper_rolls_back_min_mapping_unit(monkeypatch) -> None:
+    class FakeReducerResult:
+        def __init__(self, histogram: dict[int, int]):
+            self._histogram = histogram
+
+        def getInfo(self):
+            return {"zone": {str(key): value for key, value in self._histogram.items()}}
+
+    class FakeCleanupImage:
+        def __init__(self, histogram: dict[int, int]):
+            self._histogram = dict(histogram)
+
+        def reduceRegion(self, **_kwargs):
+            return FakeReducerResult(self._histogram)
+
+        def rename(self, _name: str):  # pragma: no cover - interface parity
+            return self
+
+        def clip(self, _geometry):  # pragma: no cover - interface parity
+            return self
+
+    def fake_apply_cleanup(_classified, _geometry, **kwargs):
+        min_mapping_unit = kwargs.get("min_mapping_unit_ha", 0)
+        if min_mapping_unit and min_mapping_unit > 0:
+            histogram = {1: 8, 2: 6}
+        else:
+            histogram = {1: 8, 2: 6, 3: 2}
+        return FakeCleanupImage(histogram)
+
+    fake_ee = SimpleNamespace(Reducer=SimpleNamespace(frequencyHistogram=lambda: None))
+    monkeypatch.setattr(zones, "ee", fake_ee)
+    monkeypatch.setattr(zones, "_apply_cleanup", fake_apply_cleanup)
+
+    base_image = FakeCleanupImage({1: 8, 2: 6, 3: 2})
+    result = zones._apply_cleanup_with_fallback_tracking(
+        base_image,
+        geometry=object(),
+        n_classes=3,
+        smooth_radius_m=0,
+        open_radius_m=0,
+        close_radius_m=0,
+        min_mapping_unit_ha=1.5,
+    )
+
+    assert result.fallback_applied is True
+    assert result.fallback_removed == ["min_mapping_unit"]
+    assert result.applied_operations["min_mapping_unit"] is False
+    assert result.executed_operations["min_mapping_unit"] is True
+
+    histogram = result.image.reduceRegion().getInfo()["zone"]
+    populated = [key for key in histogram if int(key) > 0]
+    assert len(populated) == 3
+
 
 def test_classify_local_zones_downscales_to_available_values(tmp_path: Path) -> None:
     ndvi_path = tmp_path / "mean_ndvi_two_values.tif"
