@@ -16,6 +16,7 @@ import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 import shapefile
+from shapely.geometry import Polygon, mapping
 
 from app.services import zones
 
@@ -98,6 +99,102 @@ def test_download_image_to_path_handles_zipped_payload(monkeypatch, tmp_path: Pa
     with rasterio.open(target) as dataset:
         assert dataset.count == 1
 
+
+def test_download_image_to_path_merges_multipolygon_region(monkeypatch, tmp_path: Path) -> None:
+    polygon_a_coords = [
+        [0.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 1.0],
+        [1.0, 0.0],
+        [0.0, 0.0],
+    ]
+    polygon_b_coords = [
+        [1.0, 0.0],
+        [1.0, 1.0],
+        [2.0, 1.0],
+        [2.0, 0.0],
+        [1.0, 0.0],
+    ]
+    multipolygon_info = {
+        "type": "MultiPolygon",
+        "coordinates": [
+            [polygon_a_coords],
+            [polygon_b_coords],
+        ],
+    }
+
+    polygon_a = Polygon(polygon_a_coords)
+    polygon_b = Polygon(polygon_b_coords)
+    merged_polygon = polygon_a.union(polygon_b)
+
+    def _lists(value):
+        if isinstance(value, tuple):
+            return [_lists(item) for item in value]
+        if isinstance(value, list):
+            return [_lists(item) for item in value]
+        return value
+
+    merged_info = {
+        "type": "Polygon",
+        "coordinates": _lists(mapping(merged_polygon)["coordinates"]),
+    }
+
+    dissolve_called = {"value": False}
+
+    class FakeGeometry:
+        def __init__(self, info, dissolved=None):
+            self._info = info
+            self._dissolved = dissolved
+
+        def getInfo(self):
+            return self._info
+
+        def dissolve(self):
+            dissolve_called["value"] = True
+            if self._dissolved is None:
+                return self
+            return FakeGeometry(self._dissolved)
+
+    geometry = FakeGeometry(multipolygon_info, dissolved=merged_info)
+
+    captured = {}
+
+    class FakeImage:
+        def getDownloadURL(self, params):
+            captured.update(params)
+            return "https://example.com/download"
+
+    class FakeResponse(io.BytesIO):
+        def __init__(self):
+            super().__init__(b"fake-tiff")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.close()
+
+        @property
+        def headers(self):
+            return {"Content-Type": "image/tiff"}
+
+    monkeypatch.setattr(zones, "urlopen", lambda url: FakeResponse())
+
+    target = tmp_path / "merged_region.tif"
+    result = zones._download_image_to_path(FakeImage(), geometry, target)
+
+    assert result == target
+    assert target.exists()
+    assert dissolve_called["value"] is True
+    assert "region" in captured
+
+    region_coords = captured["region"]
+    holes = region_coords[1:] if len(region_coords) > 1 else None
+    result_polygon = Polygon(region_coords[0], holes=holes)
+
+    assert result_polygon.equals(merged_polygon)
+    assert result_polygon.contains(polygon_a.centroid)
+    assert result_polygon.contains(polygon_b.centroid)
 
 def test_classify_local_zones_generates_outputs(tmp_path: Path) -> None:
     ndvi_path = tmp_path / "mean_ndvi.tif"
