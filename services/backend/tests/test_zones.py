@@ -64,6 +64,63 @@ def _write_zone_raster(path: Path, data: np.ndarray) -> None:
         dst.write(data, 1)
 
 
+def test_compute_ndvi_preserves_source_mask() -> None:
+    mask = object()
+
+    class FakeNdviBand:
+        def __init__(self):
+            self.renamed: str | None = None
+            self.updated_mask: object | None = None
+
+        def rename(self, name: str):
+            self.renamed = name
+            return self
+
+        def updateMask(self, value: object):
+            self.updated_mask = value
+            return self
+
+    class FakeImage:
+        def __init__(self):
+            self.selected: list[tuple[str, str] | str] = []
+            self.to_float_calls = 0
+            self.normalized_difference_calls: list[tuple[str, str]] = []
+            self.mask_called = False
+            self.band = FakeNdviBand()
+
+        def select(self, bands):
+            if isinstance(bands, (list, tuple)) and len(bands) > 1:
+                entry: tuple[str, str] | str = tuple(bands)
+            else:
+                entry = bands[0] if isinstance(bands, (list, tuple)) else bands
+            self.selected.append(entry)
+            return self
+
+        def toFloat(self):
+            self.to_float_calls += 1
+            return self
+
+        def normalizedDifference(self, bands):
+            self.normalized_difference_calls.append(tuple(bands))
+            return self.band
+
+        def mask(self):
+            self.mask_called = True
+            return mask
+
+    fake_image = FakeImage()
+
+    result = zones._compute_ndvi(fake_image)
+
+    assert fake_image.selected == [("B8", "B4")]
+    assert fake_image.to_float_calls == 1
+    assert fake_image.normalized_difference_calls == [("B8", "B4")]
+    assert fake_image.mask_called is True
+    assert fake_image.band.renamed == "NDVI"
+    assert fake_image.band.updated_mask is mask
+    assert result is fake_image.band
+
+
 def test_download_image_to_path_handles_zipped_payload(monkeypatch, tmp_path: Path) -> None:
     source = tmp_path / "source_ndvi.tif"
     _write_ndvi_raster(source)
