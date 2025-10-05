@@ -2208,11 +2208,13 @@ def build_zone_artifacts(
     if not months:
         raise ValueError("At least one month must be supplied")
 
-    method_key = method.strip().lower()
+    method_key = (method or "").strip().lower()
+    if not method_key:
+        method_key = DEFAULT_METHOD
+    if method_key not in {"ndvi_percentiles", "multiindex_kmeans", "ndvi_kmeans"}:
+        raise ValueError("Unsupported method for production zones")
     if method_key == "ndvi_kmeans":
         method_key = "multiindex_kmeans"
-    if method_key not in {"ndvi_percentiles", "multiindex_kmeans"}:
-        raise ValueError("Unsupported method for production zones")
 
     try:
         gee.initialize()
@@ -2320,7 +2322,7 @@ def export_selected_period_zones(
     include_zonal_stats: bool = True,
     include_stats: bool | None = None,
     apply_stability_mask: bool = True,
-    method: str = DEFAULT_METHOD,
+    method: str | None = None,
 ):
     working_dir = _ensure_working_directory(None)
 
@@ -2358,9 +2360,13 @@ def export_selected_period_zones(
             raise
     geometry = geometry or _resolve_geometry(aoi_geojson)
 
-    method_value = (method or DEFAULT_METHOD).strip().lower()
-    if method_value == "ndvi_kmeans":
-        method_value = "multiindex_kmeans"
+    method_selection = (method or "").strip().lower()
+    if not method_selection:
+        method_selection = DEFAULT_METHOD
+    if method_selection not in {"ndvi_percentiles", "multiindex_kmeans", "ndvi_kmeans"}:
+        raise ValueError("Unsupported method for production zones")
+
+    method_value = "multiindex_kmeans" if method_selection == "ndvi_kmeans" else method_selection
 
     artifacts, metadata = _prepare_selected_period_artifacts(
         aoi_geojson,
@@ -2384,7 +2390,9 @@ def export_selected_period_zones(
         include_stats=include_stats_flag,
     )
 
-    metadata = sanitize_for_json(dict(metadata))
+    metadata = dict(metadata)
+    metadata["zone_method"] = method_selection
+    metadata = sanitize_for_json(metadata)
     used_months: list[str] = list(metadata.get("used_months", []))
     skipped: list[str] = list(metadata.get("skipped_months", []))
     if not used_months:
@@ -2415,9 +2423,9 @@ def export_selected_period_zones(
 
     palette = metadata.get("palette") if isinstance(metadata, dict) else None
     thresholds = metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
-    if palette:
+    if palette is not None:
         result["palette"] = palette
-    if thresholds:
+    if thresholds is not None:
         result["thresholds"] = thresholds
 
     export_target = (export_target or "zip").strip().lower()
