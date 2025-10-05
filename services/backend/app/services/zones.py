@@ -5,11 +5,14 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import calendar
 import csv
+import io
 import os
 import math
 from pathlib import Path
 import re
+import shutil
 import tempfile
+import zipfile
 from typing import Dict, List, Mapping, Sequence, Tuple, Union
 from urllib.request import urlopen
 
@@ -161,6 +164,28 @@ def _geometry_region(geometry: ee.Geometry) -> List[List[List[float]]]:
     raise ValueError("Geometry information missing coordinates")
 
 
+def _is_zip_payload(content_type: str | None, payload: bytes) -> bool:
+    if content_type and "zip" in content_type.lower():
+        return True
+    return payload.startswith(b"PK\x03\x04") or payload.startswith(b"PK\x05\x06") or payload.startswith(
+        b"PK\x07\x08"
+    )
+
+
+def _extract_geotiff_from_zip(payload: bytes, target: Path) -> None:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        members = [
+            info
+            for info in archive.infolist()
+            if not info.is_dir() and info.filename.lower().endswith((".tif", ".tiff"))
+        ]
+        if not members:
+            raise ValueError("Zip archive did not contain a GeoTIFF file")
+        member = members[0]
+        with archive.open(member) as source, target.open("wb") as output:
+            shutil.copyfileobj(source, output)
+
+
 def _download_image_to_path(image: ee.Image, geometry: ee.Geometry, target: Path) -> Path:
     params = {
         "scale": DEFAULT_SCALE,
@@ -170,8 +195,23 @@ def _download_image_to_path(image: ee.Image, geometry: ee.Geometry, target: Path
         "format": "GeoTIFF",
     }
     url = image.getDownloadURL(params)
-    with urlopen(url) as response, target.open("wb") as output:
-        output.write(response.read())
+    with urlopen(url) as response:
+        payload = response.read()
+        headers = getattr(response, "headers", None)
+        content_type = ""
+        if headers is not None and hasattr(headers, "get"):
+            content_type = headers.get("Content-Type", "")
+        else:  # pragma: no cover - fallback for alternative urllib implementations
+            getheader = getattr(response, "getheader", None)
+            if callable(getheader):
+                content_type = getheader("Content-Type", "")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if _is_zip_payload(content_type, payload):
+        _extract_geotiff_from_zip(payload, target)
+    else:
+        with target.open("wb") as output:
+            output.write(payload)
     return target
 
 
@@ -293,7 +333,8 @@ def _classify_local_zones(
     raster_path = working_dir / "zones_classified.tif"
     with rasterio.open(raster_path, "w", **raster_profile) as dst:
         dst.write(classified, 1)
-        dst.write_colormap(1, colormap)
+        if hasattr(dst, "write_colormap"):
+            dst.write_colormap(1, colormap)
 
     records: List[Dict[str, object]] = []
     zonal_stats: List[Dict[str, object]] = []
