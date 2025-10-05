@@ -594,6 +594,7 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
         min_mapping_unit_ha,
         include_stats=True,
         simplify_tolerance_m=5,
+        method=zones.DEFAULT_METHOD,
         **kwargs,
     ):
         captured["aoi_geojson"] = aoi_geojson_or_geom
@@ -602,6 +603,7 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
         captured["min_mapping_unit_ha"] = min_mapping_unit_ha
         captured["include_stats"] = include_stats
         captured["simplify_tolerance_m"] = simplify_tolerance_m
+        captured["method"] = method
         artifacts = _write_artifacts(tmp_path / "mmu_artifacts")
         return {
             "artifacts": artifacts,
