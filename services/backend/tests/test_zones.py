@@ -214,6 +214,7 @@ def test_classify_local_zones_generates_outputs(tmp_path: Path) -> None:
     )
 
     assert Path(artifacts.raster_path).exists()
+    assert Path(artifacts.mean_ndvi_path).exists()
     assert Path(artifacts.vector_path).exists()
     assert artifacts.vector_components
     assert artifacts.zonal_stats_path is not None
@@ -265,6 +266,7 @@ def test_prepare_selected_period_artifacts_percentiles(monkeypatch, tmp_path: Pa
         stats.write_text("")
         artifacts = zones.ZoneArtifacts(
             raster_path=str(raster),
+            mean_ndvi_path=str(ndvi_path),
             vector_path=str(vector),
             vector_components={"shp": str(vector)},
             zonal_stats_path=str(stats),
@@ -319,6 +321,8 @@ def test_prepare_selected_period_artifacts_percentiles(monkeypatch, tmp_path: Pa
     assert metadata["classification_method"] == "percentiles"
     assert metadata["stability_mask_applied"] is True
     assert Path(artifacts.raster_path).exists()
+    assert Path(artifacts.mean_ndvi_path).exists()
+    assert metadata["downloaded_mean_ndvi"] == artifacts.mean_ndvi_path
 
 
 def test_prepare_selected_period_artifacts_ndvi_kmeans(monkeypatch, tmp_path: Path) -> None:
@@ -448,6 +452,8 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(monkeypatch, tmp_path: Pa
     assert metadata["stability_mask_applied"] is True
     assert Path(artifacts.raster_path).exists()
     assert Path(metadata["downloaded_zone_raster"]).exists()
+    assert Path(artifacts.mean_ndvi_path).exists()
+    assert metadata["downloaded_mean_ndvi"] == artifacts.mean_ndvi_path
 
 
 def test_prepare_selected_period_artifacts_multiindex(monkeypatch, tmp_path: Path) -> None:
@@ -562,6 +568,8 @@ def test_prepare_selected_period_artifacts_multiindex(monkeypatch, tmp_path: Pat
     assert metadata["multiindex_sample_size"] == 1234
     assert Path(artifacts.raster_path).exists()
     assert Path(metadata["downloaded_zone_raster"]).exists()
+    assert Path(artifacts.mean_ndvi_path).exists()
+    assert metadata["downloaded_mean_ndvi"] == artifacts.mean_ndvi_path
 
 
 def test_cleanup_helper_rolls_back_min_mapping_unit(monkeypatch) -> None:
@@ -927,6 +935,7 @@ def test_export_selected_period_zones_returns_local_paths(monkeypatch, tmp_path:
 
     paths = result["paths"]
     assert Path(paths["raster"]).exists()
+    assert Path(paths["mean_ndvi"]).exists()
     assert Path(paths["vectors"]).exists()
     if paths["zonal_stats"] is not None:
         assert Path(paths["zonal_stats"]).exists()
