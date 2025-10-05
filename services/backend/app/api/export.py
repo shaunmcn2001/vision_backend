@@ -12,6 +12,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
 from app import exports, index_visualization, indices as sentinel_indices
+from app.services.image_stats import temporal_stats
 from app.services.indices import UnsupportedIndexError, resolve_index
 from app.services.tiles import init_ee
 from app.utils.shapefile import shapefile_zip_to_geojson
@@ -141,7 +142,14 @@ def _index_image_for_range(
         parameters=parameters,
         collection_name=collection_name,
     )
-    mean_image = ee.Image(collection.select(definition.band_name).mean())
+    index_collection = collection.select(definition.band_name)
+    stats = temporal_stats(
+        index_collection,
+        band_name=definition.band_name,
+        rename_prefix=definition.band_name,
+        mean_band_name=definition.band_name,
+    )
+    mean_image = stats["mean"]
     image = mean_image.clip(geom)
     if definition.valid_range is not None:
         low, high = definition.valid_range
