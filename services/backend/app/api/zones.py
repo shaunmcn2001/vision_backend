@@ -45,6 +45,10 @@ class _BaseAOIRequest(BaseModel):
 
 
 class ProductionZonesRequest(_BaseAOIRequest):
+    method: Literal["ndvi_percentiles", "ndvi_kmeans"] = Field(
+        "ndvi_percentiles",
+        description="Classification method for production zones",
+    )
     months: Optional[List[str]] = Field(
         None, description="Months in YYYY-MM format"
     )
@@ -238,6 +242,7 @@ def create_production_zones(request: ProductionZonesRequest):
             months=request.months,
             aoi_name=request.aoi_name,
             destination=destination,
+            method=request.method,
             start_date=request.start_date,
             end_date=request.end_date,
             cloud_prob_max=request.cloud_prob_max,
