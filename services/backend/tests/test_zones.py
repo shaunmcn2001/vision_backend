@@ -618,7 +618,9 @@ def test_cleanup_helper_rolls_back_min_mapping_unit(monkeypatch) -> None:
     assert len(populated) == 3
 
 
-def test_classify_local_zones_downscales_to_available_values(tmp_path: Path) -> None:
+def test_classify_local_zones_quantized_values_expand_to_requested_classes(
+    tmp_path: Path,
+) -> None:
     ndvi_path = tmp_path / "mean_ndvi_two_values.tif"
     data = np.full((6, 6), 0.1, dtype=np.float32)
     data[3:, :] = 0.7
@@ -639,12 +641,13 @@ def test_classify_local_zones_downscales_to_available_values(tmp_path: Path) -> 
         classes = np.unique(classified.read(1))
 
     populated_classes = {int(value) for value in classes if value > 0}
-    assert populated_classes == {1, 2}
+    assert populated_classes == {1, 2, 3, 4, 5}
 
     assert metadata["requested_zone_count"] == 5
-    assert metadata["effective_zone_count"] == 2
-    assert metadata["final_zone_count"] == 2
-    assert len(metadata["percentile_thresholds"]) == 1
+    assert metadata["effective_zone_count"] == 5
+    assert metadata["final_zone_count"] == 5
+    assert metadata["classification_method"] == "kmeans"
+    assert metadata["kmeans_fallback_applied"] is True
 
 
 def test_classify_local_zones_recovers_sparse_percentiles(tmp_path: Path) -> None:
