@@ -281,6 +281,60 @@ def test_classify_local_zones_relaxes_mmu_when_classes_removed(tmp_path: Path) -
     assert metadata["min_mapping_unit_applied"] is False
 
 
+def test_classify_local_zones_uses_kmeans_fallback_for_sparse_bins(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ndvi_path = tmp_path / "mean_ndvi_bimodal.tif"
+    data = np.full((10, 10), 0.1, dtype=np.float32)
+    data[0, :5] = np.array([0.1, 0.11, 0.12, 0.13, 0.14], dtype=np.float32)
+    data[5:, :] = 0.9
+    data[-1, -5:] = np.array([0.86, 0.88, 0.9, 0.92, 0.94], dtype=np.float32)
+
+    original_unique = zones.np.unique
+    trigger_state = {"count": 0}
+
+    def _forced_unique(values, *args, **kwargs):
+        result = original_unique(values, *args, **kwargs)
+        if (
+            isinstance(values, np.ndarray)
+            and values.dtype == np.int16
+            and values.ndim == 1
+            and result.size >= 2
+        ):
+            trigger_state["count"] += 1
+            if trigger_state["count"] >= 2:
+                return np.array([1, 5], dtype=result.dtype)
+        return result
+
+    monkeypatch.setattr(zones.np, "unique", _forced_unique)
+    _write_ndvi_raster(ndvi_path, data=data)
+
+    artifacts, metadata = zones._classify_local_zones(
+        ndvi_path,
+        working_dir=tmp_path,
+        n_classes=5,
+        min_mapping_unit_ha=0.0,
+        smooth_radius_m=0,
+        open_radius_m=0,
+        close_radius_m=0,
+        include_stats=False,
+    )
+
+    assert trigger_state["count"] >= 2
+
+    with rasterio.open(artifacts.raster_path) as classified:
+        classified_data = classified.read(1)
+
+    populated_classes = sorted({int(value) for value in np.unique(classified_data) if value > 0})
+    assert populated_classes == [1, 2, 3, 4, 5]
+
+    assert metadata["kmeans_fallback_applied"] is True
+    assert metadata["classification_method"] == "kmeans"
+    assert metadata["percentile_thresholds"] == []
+    assert len(metadata["kmeans_cluster_centers"]) == 5
+    assert metadata["kmeans_cluster_centers"] == sorted(metadata["kmeans_cluster_centers"])
+
+
 def test_export_selected_period_zones_returns_local_paths(monkeypatch, tmp_path: Path) -> None:
     def fake_prepare(aoi_geojson, **kwargs):
         workdir = kwargs["working_dir"]
