@@ -814,6 +814,64 @@ def test_export_selected_period_zones_returns_local_paths(monkeypatch, tmp_path:
     assert set(zones_in_file) <= set(range(1, 6))
 
 
+def test_export_selected_period_zones_preserves_thresholds_for_kmeans(monkeypatch, tmp_path: Path) -> None:
+    def fake_prepare(aoi_geojson, **kwargs):
+        workdir = kwargs["working_dir"]
+        ndvi_path = workdir / "mean_ndvi.tif"
+        _write_ndvi_raster(ndvi_path)
+        artifacts, local_meta = zones._classify_local_zones(
+            ndvi_path,
+            working_dir=workdir,
+            n_classes=kwargs["n_classes"],
+            min_mapping_unit_ha=kwargs["min_mapping_unit_ha"],
+            smooth_radius_m=kwargs["smooth_radius_m"],
+            open_radius_m=kwargs["open_radius_m"],
+            close_radius_m=kwargs["close_radius_m"],
+            include_stats=kwargs["include_stats"],
+        )
+        metadata = dict(local_meta)
+        metadata.update(
+            {
+                "used_months": list(kwargs["months"]),
+                "skipped_months": [],
+                "zone_method": kwargs["method"],
+                "percentile_thresholds": [],
+            }
+        )
+        return artifacts, metadata
+
+    monkeypatch.setattr(zones, "_prepare_selected_period_artifacts", fake_prepare)
+    monkeypatch.setattr(zones.gee, "initialize", lambda: None)
+    monkeypatch.setattr(zones, "_to_ee_geometry", lambda geom: geom)
+    monkeypatch.setattr(zones, "_resolve_geometry", lambda geom: geom)
+
+    aoi = {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [0.0, 0.0],
+                [0.0, 0.001],
+                [0.001, 0.001],
+                [0.001, 0.0],
+                [0.0, 0.0],
+            ]
+        ],
+    }
+
+    result = zones.export_selected_period_zones(
+        aoi,
+        "test-aoi",
+        ["2024-01"],
+        export_target="local",
+        method="ndvi_kmeans",
+    )
+
+    assert result["metadata"]["zone_method"] == "ndvi_kmeans"
+    assert "palette" in result and result["palette"]
+    assert "thresholds" in result
+    assert result["thresholds"] == []
+
+
 def test_classify_by_percentiles_handles_duplicate_thresholds(monkeypatch) -> None:
     reducer_payload = {
         "cut_01": 0.2,
