@@ -23,6 +23,7 @@ from rasterio.features import shapes
 import shapefile
 from pyproj import CRS
 from shapely.geometry import mapping, shape
+from sklearn.cluster import KMeans
 from scipy import ndimage
 
 from app import gee
@@ -456,18 +457,45 @@ def _classify_local_zones(
 
     classified = stage_results[final_index][1].copy()
     unique_zones = np.unique(classified[classified > 0])
+    kmeans_cluster_centers: list[float] | None = None
+    kmeans_fallback_applied = False
+
     if unique_zones.size < effective_n_classes:
-        raise ValueError(
-            "Zone classification produced fewer zones than requested even after relaxing smoothing "
-            f"operations ({unique_zones.size} < {effective_n_classes}). Final thresholds: {thresholds.tolist()}"
-        )
+        if effective_n_classes <= 0:
+            raise ValueError(
+                "Zone classification produced fewer zones than requested even after relaxing smoothing "
+                f"operations ({unique_zones.size} < {effective_n_classes}). Final thresholds: {thresholds.tolist()}"
+            )
+
+        kmeans = KMeans(n_clusters=effective_n_classes, n_init=10, random_state=0)
+        kmeans.fit(valid_values.reshape(-1, 1))
+        centers = kmeans.cluster_centers_.reshape(-1)
+        center_order = np.argsort(centers)
+        zone_lookup = np.zeros(center_order.size, dtype=np.uint8)
+        for zone_index, cluster_index in enumerate(center_order, start=1):
+            zone_lookup[cluster_index] = np.uint8(zone_index)
+
+        fallback_classified = np.zeros(ndvi_data.shape, dtype=np.uint8)
+        fallback_classified[~combined_mask] = zone_lookup[kmeans.labels_]
+        classified = fallback_classified
+        unique_zones = np.unique(classified[classified > 0])
+        thresholds = np.array([], dtype=float)
+        kmeans_cluster_centers = [float(centers[idx]) for idx in center_order]
+        kmeans_fallback_applied = True
+
+        if unique_zones.size < effective_n_classes:
+            raise ValueError(
+                "Zone classification produced fewer zones than requested even after the K-means fallback "
+                f"({unique_zones.size} < {effective_n_classes})."
+            )
+
+    if classified.dtype != np.uint8:
+        classified = classified.astype(np.uint8)
 
     if np.any(classified == 0):
         filled = _majority_filter(classified, 1)
         zero_mask = classified == 0
         classified[zero_mask] = filled[zero_mask]
-
-    classified = classified.astype(np.uint8)
     unique_zones = np.unique(classified[classified > 0])
 
     def _hex_to_rgba(value: str) -> tuple[int, int, int, int]:
@@ -607,6 +635,12 @@ def _classify_local_zones(
         "effective_zone_count": int(effective_n_classes),
         "final_zone_count": final_zone_count,
     }
+
+    metadata["kmeans_fallback_applied"] = kmeans_fallback_applied
+    metadata["kmeans_cluster_centers"] = (
+        kmeans_cluster_centers if kmeans_cluster_centers is not None else []
+    )
+    metadata["classification_method"] = "kmeans" if kmeans_fallback_applied else "percentiles"
 
     artifacts = ZoneArtifacts(
         raster_path=str(raster_path),
