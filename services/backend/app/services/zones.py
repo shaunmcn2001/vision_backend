@@ -281,7 +281,15 @@ def _classify_local_zones(
     if valid_values.size == 0:
         raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
-    percentiles = np.linspace(0, 100, n_classes + 1)[1:-1]
+    unique_values = np.unique(valid_values)
+    if unique_values.size <= 1:
+        raise ValueError(
+            "Unable to derive distinct NDVI thresholds for zone classification; all pixels share the same value."
+        )
+
+    effective_n_classes = min(n_classes, unique_values.size)
+
+    percentiles = np.linspace(0, 100, effective_n_classes + 1)[1:-1]
     raw_thresholds = np.percentile(valid_values, percentiles) if percentiles.size else np.array([])
 
     thresholds = raw_thresholds
@@ -297,7 +305,7 @@ def _classify_local_zones(
                         "Unable to derive distinct NDVI thresholds for zone classification; "
                         "all pixels share the same value."
                     )
-                thresholds = np.linspace(min_ndvi, max_ndvi, n_classes + 1)[1:-1]
+                thresholds = np.linspace(min_ndvi, max_ndvi, effective_n_classes + 1)[1:-1]
         if thresholds.size != raw_thresholds.size or not np.all(np.diff(thresholds) > 0):
             raise ValueError(
                 "Unable to derive strictly increasing NDVI thresholds for zone classification."
@@ -350,7 +358,7 @@ def _classify_local_zones(
     fallback_removed: list[str] = []
     final_index = len(stage_results) - 1
     unique_zones = np.unique(stage_results[final_index][1][stage_results[final_index][1] > 0])
-    while unique_zones.size < n_classes and final_index > 0:
+    while unique_zones.size < effective_n_classes and final_index > 0:
         stage_name = stage_results[final_index][0]
         if stage_name in applied_operations and applied_operations[stage_name]:
             applied_operations[stage_name] = False
@@ -363,10 +371,10 @@ def _classify_local_zones(
 
     classified = stage_results[final_index][1].copy()
     unique_zones = np.unique(classified[classified > 0])
-    if unique_zones.size < n_classes:
+    if unique_zones.size < effective_n_classes:
         raise ValueError(
             "Zone classification produced fewer zones than requested even after relaxing smoothing "
-            f"operations ({unique_zones.size} < {n_classes}). Final thresholds: {thresholds.tolist()}"
+            f"operations ({unique_zones.size} < {effective_n_classes}). Final thresholds: {thresholds.tolist()}"
         )
 
     if np.any(classified == 0):
@@ -490,9 +498,10 @@ def _classify_local_zones(
 
     skipped_steps = [stage_key_map[name] for name in fallback_removed if name in stage_key_map]
 
+    final_zone_count = int(unique_zones.size)
     metadata: Dict[str, object] = {
         "percentile_thresholds": [float(value) for value in thresholds.tolist()],
-        "palette": list(ZONE_PALETTE[: max(1, min(n_classes, len(ZONE_PALETTE)))]),
+        "palette": list(ZONE_PALETTE[: max(1, min(final_zone_count, len(ZONE_PALETTE)))]),
         "zones": zonal_stats,
         "min_mapping_unit_applied": applied_operations["min_mapping_unit"],
         "mmu_applied": applied_operations["min_mapping_unit"],
@@ -502,6 +511,9 @@ def _classify_local_zones(
             "fallback_applied": fallback_applied,
             "skipped_steps": skipped_steps,
         },
+        "requested_zone_count": int(n_classes),
+        "effective_zone_count": int(effective_n_classes),
+        "final_zone_count": final_zone_count,
     }
 
     artifacts = ZoneArtifacts(
