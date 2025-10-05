@@ -81,12 +81,14 @@ def test_download_image_to_path_handles_zipped_payload(monkeypatch, tmp_path: Pa
 
 def test_classify_local_zones_generates_outputs(tmp_path: Path) -> None:
     ndvi_path = tmp_path / "mean_ndvi.tif"
-    _write_ndvi_raster(ndvi_path)
+    data = np.linspace(0.1, 0.9, 25, dtype=np.float32).reshape(5, 5)
+    data[-1, -1] = np.nan
+    _write_ndvi_raster(ndvi_path, data=data)
 
     artifacts, metadata = zones._classify_local_zones(
         ndvi_path,
         working_dir=tmp_path,
-        n_classes=4,
+        n_classes=5,
         min_mapping_unit_ha=0.0,
         smooth_radius_m=0,
         open_radius_m=0,
@@ -102,10 +104,11 @@ def test_classify_local_zones_generates_outputs(tmp_path: Path) -> None:
 
     with rasterio.open(artifacts.raster_path) as classified:
         classes = np.unique(classified.read(1))
-    assert set(classes) >= {0, 1, 2, 3, 4}
+    assert set(classes) >= {0, 1, 2, 3, 4, 5}
 
     assert "percentile_thresholds" in metadata
-    assert len(metadata["percentile_thresholds"]) == 3
+    assert len(metadata["percentile_thresholds"]) == 4
+    assert all(np.isfinite(metadata["percentile_thresholds"]))
     assert metadata["zones"]
 
     with open(artifacts.zonal_stats_path, newline="") as csv_file:
