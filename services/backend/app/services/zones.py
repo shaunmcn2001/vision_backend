@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 import calendar
 import csv
 import io
+import json
 import logging
 import os
 import math
@@ -32,6 +33,8 @@ from app.exports import sanitize_name
 from app.services.image_stats import temporal_stats
 from app.utils.geometry import area_ha
 from app.utils.sanitization import sanitize_for_json
+
+from fastapi import HTTPException
 
 
 logger = logging.getLogger(__name__)
@@ -216,6 +219,188 @@ def _geometry_region(geometry: ee.Geometry) -> List[List[List[float]]]:
     raise ValueError("Geometry information missing coordinates")
 
 
+def _to_float_image(image: ee.Image) -> ee.Image:
+    try:
+        return ee.Image(image).toFloat()
+    except Exception:  # pragma: no cover - allow fake EE objects
+        logger.debug("Falling back to passthrough image for float conversion", exc_info=True)
+        to_float = getattr(image, "toFloat", None)
+        if callable(to_float):
+            try:
+                return to_float()
+            except Exception:  # pragma: no cover - fake EE fallback
+                logger.debug("Custom toFloat failed; using original image", exc_info=True)
+        return image
+
+
+def _resolve_image_crs(image: ee.Image) -> str:
+    def _crs_from_projection(projection) -> str | None:
+        if projection is None:
+            return None
+        crs_attr = getattr(projection, "crs", None)
+        if callable(crs_attr):
+            try:
+                crs_candidate = crs_attr()
+            except Exception:  # pragma: no cover - fake EE fallback
+                logger.debug("Failed to access CRS from projection", exc_info=True)
+                return None
+        else:
+            crs_candidate = crs_attr
+        if hasattr(crs_candidate, "getInfo"):
+            try:
+                crs_candidate = crs_candidate.getInfo()
+            except Exception:  # pragma: no cover - fake EE fallback
+                logger.debug("Failed to evaluate CRS info", exc_info=True)
+                return None
+        if crs_candidate:
+            return str(crs_candidate)
+        return None
+
+    projection = None
+    projection_attr = getattr(image, "projection", None)
+    if callable(projection_attr):
+        try:
+            projection = projection_attr()
+        except Exception:  # pragma: no cover - fake EE fallback
+            logger.debug("Image projection callable failed", exc_info=True)
+    elif projection_attr is not None:
+        projection = projection_attr
+
+    crs_value = _crs_from_projection(projection)
+    if crs_value:
+        return crs_value
+
+    try:
+        projection = ee.Image(image).projection()
+    except Exception:  # pragma: no cover - best-effort CRS lookup
+        logger.debug("Failed to resolve image CRS via ee.Image", exc_info=True)
+        projection = None
+
+    crs_value = _crs_from_projection(projection)
+    if crs_value:
+        return crs_value
+
+    return DEFAULT_EXPORT_CRS
+
+
+def export_float_geotiff(image: ee.Image, aoi: ee.Geometry, name: str, folder: str) -> ee.batch.Task | None:
+    safe_image = _to_float_image(image)
+    crs = _resolve_image_crs(safe_image)
+
+    clipped_image = safe_image
+    if hasattr(clipped_image, "clip"):
+        try:
+            clipped_image = clipped_image.clip(aoi)
+        except Exception:  # pragma: no cover - fake EE fallback
+            logger.debug("Failed to clip image for export", exc_info=True)
+            clipped_image = safe_image
+
+    base_description = f"zones_{name}" if name else "zones_export"
+    description = base_description[:100]
+
+    try:
+        task = ee.batch.Export.image.toDrive(
+            image=clipped_image,
+            description=description,
+            folder=folder,
+            fileNamePrefix=name,
+            region=aoi,
+            scale=DEFAULT_SCALE,
+            crs=crs,
+            maxPixels=gee.MAX_PIXELS,
+            fileFormat="GeoTIFF",
+            filePerBand=False,
+        )
+        task.start()
+        return task
+    except Exception:  # pragma: no cover - export failures logged
+        logger.exception("Failed to start Drive export for %s", name)
+        return None
+
+
+def ndvi_diagnostics(
+    image: ee.Image, aoi: ee.Geometry, scale_m: int, *, collection_size: int | float | None = None
+) -> Dict[str, float | int | None]:
+    diagnostics: Dict[str, float | int | None] = {
+        "collection_size": int(collection_size) if collection_size is not None else -1,
+    }
+    try:
+        single_band = ee.Image(image).select([0], ["ndvi"])
+        kwargs = {"geometry": aoi, "scale": scale_m, "maxPixels": 1e13}
+        minmax = single_band.reduceRegion(ee.Reducer.minMax(), **kwargs)
+        percentiles = single_band.reduceRegion(
+            ee.Reducer.percentile([5, 25, 50, 75, 95]),
+            **kwargs,
+        )
+        valid = single_band.mask().reduceRegion(ee.Reducer.sum(), **kwargs)
+        payload = ee.Dictionary(
+            {
+                "minmax": minmax,
+                "percentiles": percentiles,
+                "valid": valid,
+            }
+        ).getInfo()
+    except Exception:  # pragma: no cover - diagnostics are best-effort
+        logger.exception("Failed to compute NDVI diagnostics")
+        return diagnostics
+
+    minmax_info = payload.get("minmax") or {}
+    percentiles_info = payload.get("percentiles") or {}
+    valid_info = payload.get("valid") or {}
+
+    def _extract(source: Mapping[str, object], key: str) -> float | int | None:
+        value = source.get(key)
+        if isinstance(value, (int, float)):
+            return value
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    diagnostics.update(
+        {
+            "min": _extract(minmax_info, "ndvi_min"),
+            "max": _extract(minmax_info, "ndvi_max"),
+            "p05": _extract(percentiles_info, "ndvi_p5"),
+            "p25": _extract(percentiles_info, "ndvi_p25"),
+            "p50": _extract(percentiles_info, "ndvi_p50"),
+            "p75": _extract(percentiles_info, "ndvi_p75"),
+            "p95": _extract(percentiles_info, "ndvi_p95"),
+            "valid_pixel_count": _extract(valid_info, "ndvi"),
+        }
+    )
+    return diagnostics
+
+
+def _write_ndvi_diagnostics_files(base_path: Path, diagnostics: Mapping[str, object]) -> tuple[Path, Path]:
+    json_path = base_path.with_name(f"{base_path.stem}_ndvi_diagnostics.json")
+    csv_path = base_path.with_name(f"{base_path.stem}_ndvi_diagnostics.csv")
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+
+    sanitized = {key: sanitize_for_json(value) for key, value in diagnostics.items()}
+    with json_path.open("w", encoding="utf-8") as json_file:
+        json.dump(sanitized, json_file, indent=2, sort_keys=True)
+
+    csv_keys = [
+        "min",
+        "max",
+        "p05",
+        "p25",
+        "p50",
+        "p75",
+        "p95",
+        "valid_pixel_count",
+        "collection_size",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=csv_keys)
+        writer.writeheader()
+        row = {key: sanitized.get(key, "") for key in csv_keys}
+        writer.writerow(row)
+
+    return json_path, csv_path
+
+
 def _is_zip_payload(content_type: str | None, payload: bytes) -> bool:
     if content_type and "zip" in content_type.lower():
         return True
@@ -244,36 +429,30 @@ def _download_image_to_path(
     region_coords = _geometry_region(geometry)
     ee_region = ee.Geometry.Polygon(region_coords)
     sanitized_name = sanitize_name(target.stem or "export")
-    description = f"zones_{sanitized_name}"[:100]
     folder = os.getenv("GEE_DRIVE_FOLDER", "Sentinel2_Zones")
 
-    task: ee.batch.Task | None = None
-    try:
-        task = ee.batch.Export.image.toDrive(
-            image=image,
-            description=description,
-            folder=folder,
-            fileNamePrefix=sanitized_name,
-            region=ee_region,
-            scale=DEFAULT_SCALE,
-            crs=DEFAULT_EXPORT_CRS,
-            fileFormat="GeoTIFF",
-            maxPixels=gee.MAX_PIXELS,
-            filePerBand=False,
-        )
-        task.start()
-    except Exception:  # pragma: no cover - diagnostic logging
-        logger.exception("Failed to start Drive export for %s", sanitized_name)
-        task = None
+    task = export_float_geotiff(image, ee_region, sanitized_name, folder)
 
+    float_image = _to_float_image(image)
+    clipped_image = float_image
+    if hasattr(clipped_image, "clip"):
+        try:
+            clipped_image = clipped_image.clip(ee_region)
+        except Exception:  # pragma: no cover - fake EE fallback
+            logger.debug("Failed to clip image for download", exc_info=True)
+            clipped_image = float_image
+    crs = _resolve_image_crs(clipped_image)
     params = {
         "scale": DEFAULT_SCALE,
-        "crs": DEFAULT_EXPORT_CRS,
+        "crs": crs,
         "region": region_coords,
         "filePerBand": False,
         "format": "GeoTIFF",
     }
-    url = image.getDownloadURL(params)
+    download_source = (
+        clipped_image if hasattr(clipped_image, "getDownloadURL") else image
+    )
+    url = download_source.getDownloadURL(params)
     with urlopen(url) as response:
         payload = response.read()
         headers = getattr(response, "headers", None)
@@ -2295,98 +2474,129 @@ def _prepare_selected_period_artifacts(
         ndvi_collection = base_collection.map(_compute_ndvi)
         ndvi_images: Sequence[ee.Image] | ee.ImageCollection = ndvi_collection
     except Exception:
-        ndvi_collection = None
         ndvi_images = [_compute_ndvi(image) for image in composite_images]
+        ndvi_collection = None
+
+    workdir = _ensure_working_directory(working_dir)
+    ndvi_path = workdir / "mean_ndvi.tif"
+
+    try:
+        ndvi_collection = _as_image_collection(ndvi_images)
+        ndvi_images = ndvi_collection
+    except Exception:  # pragma: no cover - fake EE fallback
+        logger.debug("Failed to convert NDVI images to ImageCollection", exc_info=True)
+        ndvi_collection = None
 
     ndvi_stats = dict(_ndvi_temporal_stats(ndvi_images))
 
-    if ndvi_collection is not None:
-        try:
-            valid_mask = ndvi_collection.count().gt(0)
-            mean_image = ndvi_collection.mean().toFloat().updateMask(valid_mask)
-            neighbors = mean_image.focal_mean(radius=30, units="meters")
-            fill_source = neighbors
-            try:
-                hole_mask = mean_image.mask().Not()
-                small_holes = (
-                    hole_mask.connectedPixelCount(maxSize=9, eightConnected=True)
-                    .gt(0)
-                    .selfMask()
-                )
-                fill_source = neighbors.updateMask(small_holes)
-            except Exception:  # pragma: no cover - logging guard
-                logger.exception("Failed to apply NDVI hole size mask; using full neighbors")
-            mean_image = mean_image.unmask(fill_source)
-            mean_image = mean_image.clip(geometry).rename("NDVI_mean")
-            ndvi_stats["mean"] = mean_image
-            ndvi_stats["valid_mask"] = valid_mask
-        except Exception:  # pragma: no cover - logging guard
-            logger.exception("Failed to compute mean NDVI image from collection")
-    else:
-        try:
-            ndvi_stats["mean"] = ndvi_stats["mean"].toFloat().clip(geometry)
-        except Exception:  # pragma: no cover - logging guard
-            logger.exception("Failed to clip fallback NDVI mean image")
+    collection_size = -1
+    mean_ndvi_raw = ndvi_stats["mean"]
 
-    diag_region = geometry
     if ndvi_collection is not None:
         try:
-            size_value = int(ee.Number(ndvi_collection.size()).getInfo() or 0)
-            logger.info("Zone NDVI collection size: %s", size_value)
+            collection_size = int(ee.Number(ndvi_collection.size()).getInfo() or 0)
         except Exception:  # pragma: no cover - logging guard
             logger.exception("Failed to evaluate NDVI collection size for zone export")
 
-    diag_kwargs = {
-        "geometry": diag_region,
-        "scale": DEFAULT_SCALE,
-        "bestEffort": True,
-        "tileScale": 4,
-        "maxPixels": gee.MAX_PIXELS,
-    }
+        if collection_size == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No valid Sentinel-2 scenes in date range after masking. "
+                    "Widen date or relax cloud threshold."
+                ),
+            )
 
-    try:
-        raw_count = ndvi_stats["mean"].mask().reduce(ee.Reducer.count())
-        raw_stats = raw_count.reduceRegion(reducer=ee.Reducer.sum(), **diag_kwargs)
-        raw_info = raw_stats.getInfo() if hasattr(raw_stats, "getInfo") else raw_stats
-        logger.info("Zone NDVI raw pixel stats: %s", raw_info)
-    except Exception:  # pragma: no cover - logging guard
-        logger.exception("Failed to compute NDVI raw pixel statistics")
+        try:
+            valid_obs_info = ndvi_collection.count().reduceRegion(
+                reducer=ee.Reducer.max(),
+                geometry=geometry,
+                scale=DEFAULT_SCALE,
+                maxPixels=1e13,
+            ).getInfo()
+        except Exception:  # pragma: no cover - logging guard
+            logger.exception("Failed to compute NDVI observation counts")
+            valid_obs_info = {}
 
-    try:
-        minmax = ndvi_stats["mean"].reduceRegion(
-            reducer=ee.Reducer.minMax(),
-            **diag_kwargs,
-        )
-        minmax_info = minmax.getInfo() if hasattr(minmax, "getInfo") else minmax
-        logger.info("Zone NDVI min/max: %s", minmax_info)
-        print("Zone NDVI min/max:", minmax_info)
-    except Exception:  # pragma: no cover - logging guard
-        logger.exception("Failed to compute NDVI min/max diagnostics")
+        max_valid = 0.0
+        if isinstance(valid_obs_info, Mapping):
+            numeric_values = [
+                float(value)
+                for value in valid_obs_info.values()
+                if isinstance(value, (int, float))
+            ]
+            if numeric_values:
+                max_valid = max(numeric_values)
+        elif isinstance(valid_obs_info, (int, float)):
+            max_valid = float(valid_obs_info)
 
-    try:
-        histogram = ndvi_stats["mean"].reduceRegion(
-            reducer=ee.Reducer.histogram(),
-            **diag_kwargs,
-        )
-        histogram_info = (
-            histogram.getInfo() if hasattr(histogram, "getInfo") else histogram
-        )
-        logger.info("Zone NDVI histogram: %s", histogram_info)
-    except Exception:  # pragma: no cover - logging guard
-        logger.exception("Failed to compute NDVI histogram diagnostics")
+        if max_valid <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "All pixels masked out by cloud/SCL filter. Try higher cloud threshold "
+                    "or longer date range."
+                ),
+            )
 
-    try:
-        percentiles = ndvi_stats["mean"].reduceRegion(
-            reducer=ee.Reducer.percentile([5, 25, 50, 75, 95]),
-            **diag_kwargs,
+        valid_mask = ndvi_collection.count().gt(0)
+        mean_ndvi_raw = (
+            ndvi_collection.mean().toFloat().updateMask(valid_mask).clip(geometry)
         )
-        percentile_info = (
-            percentiles.getInfo() if hasattr(percentiles, "getInfo") else percentiles
+        mean_ndvi_raw = mean_ndvi_raw.rename("NDVI_mean")
+
+        neighbors = mean_ndvi_raw.focal_mean(radius=30, units="meters")
+        fill_source = neighbors
+        try:
+            hole_mask = mean_ndvi_raw.mask().Not()
+            small_holes = hole_mask.connectedPixelCount(maxSize=9, eightConnected=True).gt(0)
+            if hasattr(small_holes, "And"):
+                small_holes = small_holes.And(hole_mask)
+            fill_source = neighbors.updateMask(small_holes)
+        except Exception:  # pragma: no cover - logging guard
+            logger.exception("Failed to apply NDVI hole size mask; using neighbor fill")
+
+        mean_ndvi_filled = mean_ndvi_raw.unmask(fill_source).clip(geometry)
+        ndvi_stats["mean_raw"] = mean_ndvi_raw
+        ndvi_stats["mean"] = mean_ndvi_filled
+        ndvi_stats["valid_mask"] = valid_mask
+
+        diagnostics = ndvi_diagnostics(
+            mean_ndvi_raw,
+            geometry,
+            DEFAULT_SCALE,
+            collection_size=collection_size,
         )
-        logger.info("Zone NDVI percentiles: %s", percentile_info)
-        print("Zone NDVI percentiles:", percentile_info)
-    except Exception:  # pragma: no cover - logging guard
-        logger.exception("Failed to compute NDVI percentile diagnostics")
+        diag_json_path, diag_csv_path = _write_ndvi_diagnostics_files(ndvi_path, diagnostics)
+
+        min_val = diagnostics.get("min")
+        max_val = diagnostics.get("max")
+        if (
+            min_val is not None
+            and max_val is not None
+            and abs(float(max_val) - float(min_val)) <= 1e-6
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Computed NDVI is constant. Likely causes: (1) date range too short -> only one image; "
+                    "(2) mask too strict -> zero valid pixels except one; (3) NDVI computed on composite "
+                    "incorrectly. See diagnostics file."
+                ),
+            )
+    else:
+        try:
+            collection_size = int(len(ndvi_images))
+        except Exception:  # pragma: no cover - fake EE fallback
+            collection_size = -1
+        diagnostics = ndvi_diagnostics(
+            mean_ndvi_raw,
+            geometry,
+            DEFAULT_SCALE,
+            collection_size=collection_size,
+        )
+        diag_json_path, diag_csv_path = _write_ndvi_diagnostics_files(ndvi_path, diagnostics)
+        ndvi_stats.setdefault("mean_raw", mean_ndvi_raw)
 
     stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
     if stability_flag:
@@ -2401,10 +2611,8 @@ def _prepare_selected_period_artifacts(
         stability_image = ee.Image(1)
     ndvi_stats["stability"] = stability_image
 
-    mean_image = ndvi_stats["mean"].rename("NDVI_mean")
+    mean_image = mean_ndvi_raw
 
-    workdir = _ensure_working_directory(working_dir)
-    ndvi_path = workdir / "mean_ndvi.tif"
     mean_export = _download_image_to_path(mean_image, geometry, ndvi_path)
     ndvi_path = mean_export.path
 
@@ -2446,6 +2654,8 @@ def _prepare_selected_period_artifacts(
         metadata.update(local_metadata)
         metadata["downloaded_mean_ndvi"] = str(ndvi_path)
         metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
+        metadata["ndvi_diagnostics_json"] = str(diag_json_path)
+        metadata["ndvi_diagnostics_csv"] = str(diag_csv_path)
 
         return artifacts, metadata
 
@@ -2533,6 +2743,8 @@ def _prepare_selected_period_artifacts(
         metadata["downloaded_zone_raster"] = str(zone_raster_path)
         metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
         metadata["zone_raster_export_task"] = _task_payload(zone_export.task)
+        metadata["ndvi_diagnostics_json"] = str(diag_json_path)
+        metadata["ndvi_diagnostics_csv"] = str(diag_csv_path)
 
         return artifacts, metadata
 
@@ -2635,6 +2847,8 @@ def _prepare_selected_period_artifacts(
     metadata["downloaded_zone_raster"] = str(zone_raster_path)
     metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
     metadata["zone_raster_export_task"] = _task_payload(zone_export.task)
+    metadata["ndvi_diagnostics_json"] = str(diag_json_path)
+    metadata["ndvi_diagnostics_csv"] = str(diag_csv_path)
 
     return artifacts, metadata
 
