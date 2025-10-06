@@ -1089,7 +1089,7 @@ def _compute_ndvi(image: ee.Image) -> ee.Image:
     bands = base.select(["B8", "B4"]).toFloat()
     ndvi = bands.normalizedDifference(["B8", "B4"]).rename("NDVI").toFloat()
 
-    ndvi_range_mask = ndvi.gt(0).And(ndvi.lt(1))
+    ndvi_range_mask = ndvi.lt(1)
 
     source_mask = bands.mask()
     combined_mask = ndvi_range_mask
@@ -1099,11 +1099,12 @@ def _compute_ndvi(image: ee.Image) -> ee.Image:
             try:
                 mask_image = mask_image.reduce(ee.Reducer.min())
             except Exception:  # pragma: no cover - defensive guard for fake EE objects
-                mask_image = mask_image
+                pass
         if hasattr(mask_image, "rename"):
             mask_image = mask_image.rename("mask")
         if hasattr(mask_image, "gt"):
             mask_image = mask_image.gt(0)
+
         if hasattr(mask_image, "And"):
             combined_mask = mask_image.And(ndvi_range_mask)
         elif hasattr(ndvi_range_mask, "And"):
