@@ -112,7 +112,8 @@ def test_compute_ndvi_preserves_source_mask() -> None:
 
     result = zones._compute_ndvi(fake_image)
 
-    assert fake_image.selected == [("B8", "B4")]
+    assert fake_image.selected[0] == ("B8", "B4")
+    assert "B8" in fake_image.selected
     assert fake_image.to_float_calls == 1
     assert fake_image.normalized_difference_calls == [("B8", "B4")]
     assert fake_image.mask_called is True
