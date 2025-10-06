@@ -27,6 +27,7 @@ S2_BANDS: Iterable[str] = (
 )
 SERVICE_ACCOUNT_ENV = "GEE_SERVICE_ACCOUNT_JSON"
 FALLBACK_SERVICE_ACCOUNT_ENV = "GOOGLE_APPLICATION_CREDENTIALS"
+EE_TOKEN_ENV = "EE_TOKEN_JSON"
 MAX_PIXELS = int(1e13)
 
 _initialized = False
@@ -97,24 +98,26 @@ def initialize(force: bool = False) -> None:
     if _initialized and not force:
         return
 
+    token = (os.getenv(EE_TOKEN_ENV) or "").strip()
     primary = (os.getenv(SERVICE_ACCOUNT_ENV) or "").strip()
     fallback = (os.getenv(FALLBACK_SERVICE_ACCOUNT_ENV) or "").strip()
-    raw_credentials = primary or fallback
-    if not raw_credentials:
-        raise RuntimeError(
-            "Set GEE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS to a service account credential JSON string, "
-            "base64-encoded JSON, or file path."
-        )
+    raw_credentials = token or primary or fallback
 
-    info = _load_service_account_info(raw_credentials)
-
-    email = info.get("client_email")
-    if not email:
-        raise RuntimeError("Service account JSON is missing client_email")
-
-    credentials = ee.ServiceAccountCredentials(email, key_data=json.dumps(info))
-    ee.Initialize(credentials)
+    if raw_credentials:
+        info = _load_service_account_info(raw_credentials)
+        email = info.get("client_email")
+        if not email:
+            raise RuntimeError("Service account JSON is missing client_email")
+        credentials = ee.ServiceAccountCredentials(email, key_data=json.dumps(info))
+        ee.Initialize(credentials)
+    else:  # pragma: no cover - relies on environment defaults
+        ee.Initialize()
     _initialized = True
+
+
+def init_ee(force: bool = False) -> None:
+    """Public helper that aliases :func:`initialize` for compatibility."""
+    initialize(force=force)
 
 
 def geometry_from_geojson(aoi_geojson: Dict) -> ee.Geometry:

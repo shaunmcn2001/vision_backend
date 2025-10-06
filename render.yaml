@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: vision-backend
+    env: python
+    region: oregon
+    plan: starter
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: >
+      gunicorn -k uvicorn.workers.UvicornWorker app.main:app
+      --workers ${WORKERS:-1} --threads ${THREADS:-2}
+      --timeout ${TIMEOUT:-600} --keep-alive 120
+    autoDeploy: true
+    healthCheckPath: /healthz
+    envVars:
+      - key: WORKERS
+        value: "1"
+      - key: THREADS
+        value: "2"
+      - key: TIMEOUT
+        value: "600"
+      - key: MAX_SAMPLE_PIXELS
+        value: "4000"
+      - key: EE_TILE_SCALE
+        value: "4"
+      - key: EE_MAXPIXELS
+        value: "10000000000000"
+      - key: EXPORT_CHUNK_MB
+        value: "1"
+    scaling:
+      minInstances: 1
+      maxInstances: 1
+    autoScaling:
+      enabled: false
+    disk:
+      name: exports
+      mountPath: /opt/exports
+      sizeGB: 2

@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 def _startup_init_gee() -> None:
     """Initialise Earth Engine once the application starts."""
     try:
-        gee.initialize()
+        gee.init_ee()
         logger.info("Earth Engine initialised for Sentinel-2 exports")
     except Exception as exc:  # pragma: no cover - best effort
         logger.warning("Earth Engine initialisation skipped: %s", exc)
