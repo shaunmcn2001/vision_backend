@@ -49,6 +49,8 @@ DEFAULT_SIMPLIFY_BUFFER_M = 3
 DEFAULT_METHOD = "ndvi_percentiles"
 DEFAULT_SAMPLE_SIZE = 8000
 DEFAULT_SCALE = 10
+# Holes below this threshold (in hectares) are removed during vector cleanup.
+MIN_HOLE_AREA_HA = 0.1
 # IMPORTANT: processing uses the native S2 projection (meters).
 # Exports use a metric CRS so scale=10 means 10 meters.
 DEFAULT_EXPORT_CRS = "EPSG:3857"
@@ -1781,6 +1783,32 @@ def _simplify_vectors(
     return ee.FeatureCollection(vectors.map(_simplify))
 
 
+def _dissolve_vectors(
+    vectors: ee.FeatureCollection, *, min_hole_area_ha: float
+) -> ee.FeatureCollection:
+    histogram = ee.Dictionary(vectors.aggregate_histogram("zone"))
+    zone_ids = ee.List(histogram.keys())
+    hole_area_m2 = ee.Number(min_hole_area_ha).multiply(10_000)
+
+    def _dissolve(zone_value: ee.ComputedObject) -> ee.Feature:
+        zone_num = ee.Number(zone_value)
+        zone_vectors = vectors.filter(ee.Filter.eq("zone", zone_num))
+        base_feature = ee.Feature(zone_vectors.first())
+        dissolved_geom = zone_vectors.geometry(maxError=1).dissolve()
+        cleaned_geom = ee.Geometry(
+            ee.Algorithms.If(
+                hole_area_m2.gt(0),
+                ee.Geometry(dissolved_geom).removeInteriorHoles(hole_area_m2),
+                ee.Geometry(dissolved_geom),
+            )
+        )
+        return base_feature.setGeometry(cleaned_geom).set(
+            {"zone": zone_num, "zone_id": zone_num}
+        )
+
+    return ee.FeatureCollection(zone_ids.map(_dissolve))
+
+
 def _prepare_vectors(
     zone_image: ee.Image,
     geometry: ee.Geometry,
@@ -1803,6 +1831,7 @@ def _prepare_vectors(
         return feature.set({"zone": zone_value, "zone_id": zone_value})
 
     vectors = vectors.map(_set_zone)
+    vectors = _dissolve_vectors(vectors, min_hole_area_ha=MIN_HOLE_AREA_HA)
 
     return _simplify_vectors(vectors, tolerance_m, buffer_m)
 
@@ -2274,13 +2303,11 @@ def _prepare_selected_period_artifacts(
     if ndvi_collection is not None:
         try:
             valid_mask = ndvi_collection.count().gt(0)
-            mean_image = (
-                ndvi_collection.mean()
-                .toFloat()
-                .updateMask(valid_mask)
-                .clip(geometry)
-                .rename("NDVI_mean")
+            mean_image = ndvi_collection.mean().toFloat().updateMask(valid_mask)
+            mean_image = mean_image.focal_mean(radius=30, units="meters").unmask(
+                mean_image
             )
+            mean_image = mean_image.clip(geometry).rename("NDVI_mean")
             ndvi_stats["mean"] = mean_image
             ndvi_stats["valid_mask"] = valid_mask
         except Exception:  # pragma: no cover - logging guard
