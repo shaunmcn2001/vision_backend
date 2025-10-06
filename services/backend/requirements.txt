@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-pydantic
+pydantic<2
 pydantic-settings
 earthengine-api
 numpy
