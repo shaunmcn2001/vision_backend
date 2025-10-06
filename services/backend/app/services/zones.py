@@ -1094,12 +1094,22 @@ def _compute_ndvi(image: ee.Image) -> ee.Image:
     source_mask = bands.mask()
     combined_mask = ndvi_range_mask
     if source_mask is not None:
-        if hasattr(source_mask, "And"):
-            combined_mask = source_mask.And(ndvi_range_mask)
+        mask_image = source_mask
+        if hasattr(mask_image, "reduce"):
+            try:
+                mask_image = mask_image.reduce(ee.Reducer.min())
+            except Exception:  # pragma: no cover - defensive guard for fake EE objects
+                mask_image = mask_image
+        if hasattr(mask_image, "rename"):
+            mask_image = mask_image.rename("mask")
+        if hasattr(mask_image, "gt"):
+            mask_image = mask_image.gt(0)
+        if hasattr(mask_image, "And"):
+            combined_mask = mask_image.And(ndvi_range_mask)
         elif hasattr(ndvi_range_mask, "And"):
-            combined_mask = ndvi_range_mask.And(source_mask)
+            combined_mask = ndvi_range_mask.And(mask_image)
         else:
-            combined_mask = source_mask
+            combined_mask = mask_image
 
     return ndvi.updateMask(combined_mask)
 
