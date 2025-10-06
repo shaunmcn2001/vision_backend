@@ -284,38 +284,296 @@ def _resolve_image_crs(image: ee.Image) -> str:
 
 
 def export_float_geotiff(image: ee.Image, aoi: ee.Geometry, name: str, folder: str) -> ee.batch.Task | None:
+    """Export a float32 GeoTIFF in the image's native projection."""
+
     safe_image = _to_float_image(image)
-    crs = _resolve_image_crs(safe_image)
-
-    clipped_image = safe_image
-    if hasattr(clipped_image, "clip"):
+    if hasattr(safe_image, "toFloat"):
         try:
-            clipped_image = clipped_image.clip(aoi)
+            safe_image = safe_image.toFloat()
         except Exception:  # pragma: no cover - fake EE fallback
-            logger.debug("Failed to clip image for export", exc_info=True)
-            clipped_image = safe_image
-
-    base_description = f"zones_{name}" if name else "zones_export"
-    description = base_description[:100]
+            logger.debug("Failed to force float conversion for export", exc_info=True)
 
     try:
+        projection = safe_image.projection()
+        crs = projection.crs().getInfo()
+    except Exception:  # pragma: no cover - best effort CRS lookup
+        logger.debug("Falling back to default CRS for export", exc_info=True)
+        crs = DEFAULT_EXPORT_CRS
+
+    try:
+        clipped = safe_image.clip(aoi)
+    except Exception:  # pragma: no cover - fake EE fallback
+        logger.debug("Failed to clip image for export", exc_info=True)
+        clipped = safe_image
+
+    description = name or "zones_export"
+    task: ee.batch.Task | None = None
+    try:
         task = ee.batch.Export.image.toDrive(
-            image=clipped_image,
+            image=clipped,
             description=description,
             folder=folder,
-            fileNamePrefix=name,
+            fileNamePrefix=name or "zones_export",
             region=aoi,
-            scale=DEFAULT_SCALE,
+            scale=10,
             crs=crs,
-            maxPixels=gee.MAX_PIXELS,
-            fileFormat="GeoTIFF",
-            filePerBand=False,
+            maxPixels=1e13,
         )
         task.start()
-        return task
     except Exception:  # pragma: no cover - export failures logged
         logger.exception("Failed to start Drive export for %s", name)
         return None
+
+    return task
+
+
+def _fetch_s2_sr(aoi: ee.Geometry, start: Union[str, ee.Date], end: Union[str, ee.Date]) -> ee.ImageCollection:
+    """Return the Sentinel-2 SR collection filtered by AOI and date."""
+
+    return (
+        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+        .filterBounds(aoi)
+        .filterDate(start, end)
+    )
+
+
+def _s2_mask_scl_only(img: ee.Image) -> ee.Image:
+    """Mask clouds, shadows, snow/ice, and cirrus based on the SCL band."""
+
+    scl = img.select("SCL")
+    ok = (
+        scl.neq(3)
+        .And(scl.neq(8))
+        .And(scl.neq(9))
+        .And(scl.neq(10))
+        .And(scl.neq(11))
+    )
+    return img.updateMask(ok)
+
+
+def _s2_mask_scl_plus_qa(img: ee.Image) -> ee.Image:
+    """Combine SCL masking with QA60 cloud/cirrus bits."""
+
+    qa60 = img.select("QA60")
+    no_cloud = qa60.bitwiseAnd(1 << 10).eq(0)
+    no_cirrus = qa60.bitwiseAnd(1 << 11).eq(0)
+    scl_ok = _s2_mask_scl_only(img).mask().rename("m")
+    return img.updateMask(scl_ok.And(no_cloud).And(no_cirrus))
+
+
+def _compute_ndvi(image: ee.Image) -> ee.Image:
+    try:
+        base = ee.Image(image)
+    except Exception:  # pragma: no cover - fake EE fallback
+        base = image
+    bands = base.select(["B8", "B4"])
+    if hasattr(bands, "toFloat"):
+        bands = bands.toFloat()
+
+    ndvi = bands.normalizedDifference(["B8", "B4"]).rename("NDVI")
+    if hasattr(ndvi, "toFloat"):
+        ndvi = ndvi.toFloat()
+
+    ndvi_range_mask = None
+    if hasattr(ndvi, "lt"):
+        try:
+            ndvi_range_mask = ndvi.lt(1)
+        except Exception:  # pragma: no cover - defensive guard for fake EE objects
+            ndvi_range_mask = None
+
+    mask_source = bands if hasattr(bands, "mask") else base
+    mask_image = mask_source.mask() if hasattr(mask_source, "mask") else None
+
+    def _safe_constant(value: float):
+        constant = getattr(ee.Image, "constant", None)
+        if callable(constant):
+            try:
+                return ee.Image.constant(value)
+            except Exception:  # pragma: no cover - fake EE fallback
+                pass
+        return value
+
+    if mask_image is None:
+        if ndvi_range_mask is not None:
+            try:
+                combined_mask = ee.Image(ndvi_range_mask)
+            except Exception:  # pragma: no cover - fake EE fallback
+                combined_mask = ndvi_range_mask
+        else:
+            combined_mask = _safe_constant(1)
+    else:
+        if hasattr(mask_image, "reduce"):
+            try:
+                mask_image = mask_image.reduce(ee.Reducer.min())
+            except Exception:  # pragma: no cover - defensive guard for fake EE objects
+                pass
+        combined_mask = mask_image
+        if ndvi_range_mask is not None:
+            try:
+                range_mask = ee.Image(ndvi_range_mask)
+            except Exception:  # pragma: no cover - fake EE fallback
+                range_mask = ndvi_range_mask
+            if hasattr(combined_mask, "And"):
+                try:
+                    combined_mask = combined_mask.And(range_mask)
+                except Exception:  # pragma: no cover - defensive fallback
+                    combined_mask = range_mask
+            elif hasattr(range_mask, "And"):
+                try:
+                    combined_mask = range_mask.And(combined_mask)
+                except Exception:  # pragma: no cover - defensive fallback
+                    combined_mask = range_mask
+        if hasattr(combined_mask, "rename"):
+            try:
+                combined_mask = combined_mask.rename("mask")
+            except Exception:  # pragma: no cover - defensive guard for fake EE objects
+                pass
+
+    if combined_mask is None:
+        combined_mask = _safe_constant(1)
+
+    if hasattr(combined_mask, "gt"):
+        try:
+            boolean_mask = combined_mask.gt(0)
+        except Exception:  # pragma: no cover - defensive fallback
+            boolean_mask = combined_mask
+    else:  # pragma: no cover - defensive fallback
+        boolean_mask = _safe_constant(1)
+
+    return ndvi.updateMask(boolean_mask) if hasattr(ndvi, "updateMask") else ndvi
+
+
+def _ndvi_collection_scene(
+    aoi: ee.Geometry,
+    start: Union[str, ee.Date],
+    end: Union[str, ee.Date],
+    mask_fn,
+) -> ee.ImageCollection:
+    col = _fetch_s2_sr(aoi, start, end).map(mask_fn)
+    ndvi_col = col.map(_compute_ndvi)
+
+    def keep_if_has_data(im: ee.Image) -> ee.Image:
+        count = (
+            im.mask()
+            .reduceRegion(ee.Reducer.sum(), aoi, 10, maxPixels=1e13)
+            .values()
+            .reduce(ee.Reducer.sum())
+        )
+        return ee.Image(ee.Algorithms.If(count.gt(0), im, None))
+
+    ndvi_col = ndvi_col.map(keep_if_has_data).filter(ee.Filter.notNull(["NDVI"]))
+    return ee.ImageCollection(ndvi_col)
+
+
+def _mean_and_diag(
+    ndvi_col: ee.ImageCollection, aoi: ee.Geometry
+) -> tuple[ee.Image, ee.Dictionary, ee.Dictionary, ee.Number]:
+    valid = ndvi_col.count().gt(0)
+    mean = ndvi_col.mean().updateMask(valid).clip(aoi).rename("NDVI_mean").toFloat()
+    stats_minmax = mean.reduceRegion(ee.Reducer.minMax(), aoi, 10, maxPixels=1e13)
+    stats_pct = mean.reduceRegion(
+        ee.Reducer.percentile([5, 25, 50, 75, 95]), aoi, 10, maxPixels=1e13
+    )
+    size = ndvi_col.size()
+    return mean, stats_minmax, stats_pct, size
+
+
+def _ndvi_collection_for_strategy(
+    aoi: ee.Geometry,
+    start: Union[str, ee.Date],
+    end: Union[str, ee.Date],
+    strategy: str | None,
+) -> ee.ImageCollection:
+    mask_fn = _s2_mask_scl_only
+    start_param: Union[str, ee.Date] = start
+    end_param: Union[str, ee.Date] = end
+
+    if strategy in {"scene_scl_qa60", "scene_scl_qa60_wide"}:
+        mask_fn = _s2_mask_scl_plus_qa
+    if strategy in {"scene_scl_only_wide", "scene_scl_qa60_wide"}:
+        start_param = ee.Date(start).advance(-30, "day")
+        end_param = ee.Date(end).advance(30, "day")
+
+    return _ndvi_collection_scene(aoi, start_param, end_param, mask_fn)
+
+
+def build_mean_ndvi_self_heal(
+    aoi: ee.Geometry, start: Union[str, ee.Date], end: Union[str, ee.Date]
+) -> tuple[ee.Image, dict[str, object]]:
+    strategies = [
+        ("scene_scl_only", start, end, _s2_mask_scl_only),
+        ("scene_scl_qa60", start, end, _s2_mask_scl_plus_qa),
+    ]
+
+    start_wide = ee.Date(start).advance(-30, "day")
+    end_wide = ee.Date(end).advance(30, "day")
+    strategies.extend(
+        [
+            ("scene_scl_only_wide", start_wide, end_wide, _s2_mask_scl_only),
+            ("scene_scl_qa60_wide", start_wide, end_wide, _s2_mask_scl_plus_qa),
+        ]
+    )
+
+    last_diag: dict[str, object] = {}
+
+    for label, start_param, end_param, mask_fn in strategies:
+        ndvi_col = _ndvi_collection_scene(aoi, start_param, end_param, mask_fn)
+        mean, mm, pct, size = _mean_and_diag(ndvi_col, aoi)
+
+        try:
+            mm_info = mm.getInfo() if hasattr(mm, "getInfo") else mm
+        except Exception:  # pragma: no cover - diagnostics best effort
+            logger.exception("Failed to fetch min/max diagnostics for %s", label)
+            mm_info = None
+
+        try:
+            pct_info = pct.getInfo() if hasattr(pct, "getInfo") else pct
+        except Exception:  # pragma: no cover - diagnostics best effort
+            logger.exception("Failed to fetch percentile diagnostics for %s", label)
+            pct_info = None
+
+        try:
+            size_value = int(ee.Number(size).getInfo() or 0)
+        except Exception:  # pragma: no cover - diagnostics best effort
+            logger.exception("Failed to fetch NDVI collection size for %s", label)
+            size_value = 0
+
+        diag_payload: dict[str, object] = {
+            "try": label,
+            "n": size_value,
+        }
+
+        if isinstance(mm_info, Mapping):
+            min_val = mm_info.get("NDVI_mean_min")
+            max_val = mm_info.get("NDVI_mean_max")
+            diag_payload.update({"min": min_val, "max": max_val})
+        else:
+            min_val = max_val = None
+
+        if isinstance(pct_info, Mapping):
+            diag_payload.update(
+                {
+                    "p05": pct_info.get("NDVI_mean_p5"),
+                    "p25": pct_info.get("NDVI_mean_p25"),
+                    "p50": pct_info.get("NDVI_mean_p50"),
+                    "p75": pct_info.get("NDVI_mean_p75"),
+                    "p95": pct_info.get("NDVI_mean_p95"),
+                }
+            )
+
+        last_diag = diag_payload
+
+        if min_val is not None and max_val is not None and float(min_val) != float(max_val):
+            return mean, diag_payload
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "NDVI constant after retries. Tried 4 strategies. "
+            "Check AOI/date; clouds; tiny AOI; or band names. "
+            f"Last attempt n={last_diag.get('n')}, min={last_diag.get('min')}, max={last_diag.get('max')}"
+        ),
+    )
 
 
 def ndvi_diagnostics(
@@ -1264,93 +1522,6 @@ def _build_composite_series(
 
     return composites, skipped, metadata
 
-
-def _compute_ndvi(image: ee.Image) -> ee.Image:
-    try:
-        base = ee.Image(image)
-    except Exception:  # pragma: no cover - fake EE fallback
-        base = image
-    bands = base.select(["B8", "B4"])
-    if hasattr(bands, "toFloat"):
-        bands = bands.toFloat()
-
-    ndvi = bands.normalizedDifference(["B8", "B4"]).rename("NDVI")
-    if hasattr(ndvi, "toFloat"):
-        ndvi = ndvi.toFloat()
-
-    ndvi_range_mask = None
-    if hasattr(ndvi, "lt"):
-        try:
-            ndvi_range_mask = ndvi.lt(1)
-        except Exception:  # pragma: no cover - defensive guard for fake EE objects
-            ndvi_range_mask = None
-
-    mask_source = bands if hasattr(bands, "mask") else base
-    mask_image = mask_source.mask() if hasattr(mask_source, "mask") else None
-
-    def _safe_constant(value: float):
-        constant = getattr(ee.Image, "constant", None)
-        if callable(constant):
-            try:
-                return ee.Image.constant(value)
-            except Exception:  # pragma: no cover - fake EE fallback
-                pass
-        return value
-
-    if mask_image is None:
-        if ndvi_range_mask is not None:
-            try:
-                combined_mask = ee.Image(ndvi_range_mask)
-            except Exception:  # pragma: no cover - fake EE fallback
-                combined_mask = ndvi_range_mask
-        else:
-            combined_mask = _safe_constant(1)
-    else:
-        if hasattr(mask_image, "reduce"):
-            try:
-                mask_image = mask_image.reduce(ee.Reducer.min())
-            except Exception:  # pragma: no cover - defensive guard for fake EE objects
-                pass
-        if hasattr(mask_image, "rename"):
-            try:
-                mask_image = mask_image.rename("mask")
-            except Exception:  # pragma: no cover - defensive guard for fake EE objects
-                pass
-        combined_mask = mask_image
-        if ndvi_range_mask is not None:
-            try:
-                range_mask = ee.Image(ndvi_range_mask)
-            except Exception:  # pragma: no cover - fake EE fallback
-                range_mask = ndvi_range_mask
-            if hasattr(combined_mask, "And"):
-                try:
-                    combined_mask = combined_mask.And(range_mask)
-                except Exception:  # pragma: no cover - defensive fallback
-                    combined_mask = range_mask
-            elif hasattr(range_mask, "And"):
-                try:
-                    combined_mask = range_mask.And(combined_mask)
-                except Exception:  # pragma: no cover - defensive fallback
-                    combined_mask = combined_mask
-            else:
-                combined_mask = range_mask
-        try:
-            combined_mask = ee.Image(combined_mask)
-        except Exception:  # pragma: no cover - fake EE fallback
-            pass
-
-    if combined_mask is None:
-        combined_mask = _safe_constant(1)
-
-    if hasattr(combined_mask, "gt"):
-        try:
-            boolean_mask = combined_mask.gt(0)
-        except Exception:  # pragma: no cover - defensive fallback
-            boolean_mask = combined_mask
-    else:  # pragma: no cover - defensive fallback
-        boolean_mask = _safe_constant(1)
-
-    return ndvi.updateMask(boolean_mask)
 
 
 def _compute_ndre(image: ee.Image) -> ee.Image:
@@ -2468,35 +2639,48 @@ def _prepare_selected_period_artifacts(
 
     composite_images = [image for _, image in composites]
 
-    ndvi_collection: ee.ImageCollection | None = None
-    try:
-        base_collection = ee.ImageCollection(composite_images)
-        ndvi_collection = base_collection.map(_compute_ndvi)
-        ndvi_images: Sequence[ee.Image] | ee.ImageCollection = ndvi_collection
-    except Exception:
-        ndvi_images = [_compute_ndvi(image) for image in composite_images]
-        ndvi_collection = None
-
     workdir = _ensure_working_directory(working_dir)
     ndvi_path = workdir / "mean_ndvi.tif"
 
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+
+    ndvi_collection: ee.ImageCollection | None = None
+    ndvi_images: Sequence[ee.Image] | ee.ImageCollection
+    ndvi_stats: Dict[str, ee.Image]
+    diagnostics: Dict[str, object]
+    self_heal_diag: Mapping[str, object] | dict[str, object] = {}
+
     try:
-        ndvi_collection = _as_image_collection(ndvi_images)
+        mean_ndvi_raw, self_heal_diag = build_mean_ndvi_self_heal(geometry, start_iso, end_iso)
+        ndvi_collection = _ndvi_collection_for_strategy(
+            geometry,
+            start_iso,
+            end_iso,
+            self_heal_diag.get("try") if isinstance(self_heal_diag, Mapping) else None,
+        )
         ndvi_images = ndvi_collection
-    except Exception:  # pragma: no cover - fake EE fallback
-        logger.debug("Failed to convert NDVI images to ImageCollection", exc_info=True)
-        ndvi_collection = None
-
-    ndvi_stats = dict(_ndvi_temporal_stats(ndvi_images))
-
-    collection_size = -1
-    mean_ndvi_raw = ndvi_stats["mean"]
-
-    if ndvi_collection is not None:
         try:
-            collection_size = int(ee.Number(ndvi_collection.size()).getInfo() or 0)
-        except Exception:  # pragma: no cover - logging guard
-            logger.exception("Failed to evaluate NDVI collection size for zone export")
+            ndvi_collection = _as_image_collection(ndvi_images)
+            ndvi_images = ndvi_collection
+        except Exception:  # pragma: no cover - fake EE fallback
+            logger.debug("Failed to normalise NDVI collection", exc_info=True)
+
+        ndvi_stats = dict(_ndvi_temporal_stats(ndvi_images))
+        ndvi_stats["mean"] = mean_ndvi_raw
+        ndvi_stats["mean_raw"] = mean_ndvi_raw
+
+        try:
+            collection_size = int(self_heal_diag.get("n")) if isinstance(self_heal_diag, Mapping) else -1
+        except Exception:
+            collection_size = -1
+
+        if collection_size < 0:
+            try:
+                collection_size = int(ee.Number(ndvi_collection.size()).getInfo() or 0)
+            except Exception:  # pragma: no cover - logging guard
+                logger.exception("Failed to evaluate NDVI collection size for zone export")
+                collection_size = -1
 
         if collection_size == 0:
             raise HTTPException(
@@ -2540,25 +2724,6 @@ def _prepare_selected_period_artifacts(
             )
 
         valid_mask = ndvi_collection.count().gt(0)
-        mean_ndvi_raw = (
-            ndvi_collection.mean().toFloat().updateMask(valid_mask).clip(geometry)
-        )
-        mean_ndvi_raw = mean_ndvi_raw.rename("NDVI_mean")
-
-        neighbors = mean_ndvi_raw.focal_mean(radius=30, units="meters")
-        fill_source = neighbors
-        try:
-            hole_mask = mean_ndvi_raw.mask().Not()
-            small_holes = hole_mask.connectedPixelCount(maxSize=9, eightConnected=True).gt(0)
-            if hasattr(small_holes, "And"):
-                small_holes = small_holes.And(hole_mask)
-            fill_source = neighbors.updateMask(small_holes)
-        except Exception:  # pragma: no cover - logging guard
-            logger.exception("Failed to apply NDVI hole size mask; using neighbor fill")
-
-        mean_ndvi_filled = mean_ndvi_raw.unmask(fill_source).clip(geometry)
-        ndvi_stats["mean_raw"] = mean_ndvi_raw
-        ndvi_stats["mean"] = mean_ndvi_filled
         ndvi_stats["valid_mask"] = valid_mask
 
         diagnostics = ndvi_diagnostics(
@@ -2567,28 +2732,37 @@ def _prepare_selected_period_artifacts(
             DEFAULT_SCALE,
             collection_size=collection_size,
         )
+        if isinstance(self_heal_diag, Mapping):
+            diagnostics.update(self_heal_diag)
         diag_json_path, diag_csv_path = _write_ndvi_diagnostics_files(ndvi_path, diagnostics)
 
-        min_val = diagnostics.get("min")
-        max_val = diagnostics.get("max")
-        if (
-            min_val is not None
-            and max_val is not None
-            and abs(float(max_val) - float(min_val)) <= 1e-6
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Computed NDVI is constant. Likely causes: (1) date range too short -> only one image; "
-                    "(2) mask too strict -> zero valid pixels except one; (3) NDVI computed on composite "
-                    "incorrectly. See diagnostics file."
-                ),
-            )
-    else:
+        self_heal_payload: Dict[str, object]
+        if isinstance(self_heal_diag, Mapping):
+            self_heal_payload = {
+                key: sanitize_for_json(value) for key, value in self_heal_diag.items()
+            }
+        else:
+            self_heal_payload = {}
+
+    except HTTPException:
+        raise
+    except Exception:  # pragma: no cover - fallback for tests and offline scenarios
+        logger.debug("Self-healing NDVI pipeline unavailable; using composite fallback", exc_info=True)
+        self_heal_diag = {}
+        ndvi_images = [_compute_ndvi(image) for image in composite_images]
+        try:
+            ndvi_collection = _as_image_collection(ndvi_images)
+            ndvi_images = ndvi_collection
+        except Exception:  # pragma: no cover - fake EE fallback
+            ndvi_collection = None
+
+        ndvi_stats = dict(_ndvi_temporal_stats(ndvi_images))
+        mean_ndvi_raw = ndvi_stats["mean"]
         try:
             collection_size = int(len(ndvi_images))
         except Exception:  # pragma: no cover - fake EE fallback
             collection_size = -1
+
         diagnostics = ndvi_diagnostics(
             mean_ndvi_raw,
             geometry,
@@ -2597,6 +2771,7 @@ def _prepare_selected_period_artifacts(
         )
         diag_json_path, diag_csv_path = _write_ndvi_diagnostics_files(ndvi_path, diagnostics)
         ndvi_stats.setdefault("mean_raw", mean_ndvi_raw)
+        self_heal_payload = {}
 
     stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
     if stability_flag:
@@ -2656,6 +2831,7 @@ def _prepare_selected_period_artifacts(
         metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
         metadata["ndvi_diagnostics_json"] = str(diag_json_path)
         metadata["ndvi_diagnostics_csv"] = str(diag_csv_path)
+        metadata["ndvi_self_heal"] = self_heal_payload
 
         return artifacts, metadata
 
@@ -2735,6 +2911,7 @@ def _prepare_selected_period_artifacts(
             "kmeans_sample_size": int(sample_size),
             "stability_thresholds": list(STABILITY_THRESHOLD_SEQUENCE),
             "stability_mask_applied": stability_flag,
+            "ndvi_self_heal": self_heal_payload,
         }
 
         metadata.update(composite_metadata)
@@ -2839,6 +3016,7 @@ def _prepare_selected_period_artifacts(
         "multiindex_sample_size": int(sample_size),
         "stability_thresholds": list(STABILITY_THRESHOLD_SEQUENCE),
         "stability_mask_applied": stability_flag,
+        "ndvi_self_heal": self_heal_payload,
     }
 
     metadata.update(composite_metadata)
