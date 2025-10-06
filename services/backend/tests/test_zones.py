@@ -65,61 +65,102 @@ def _write_zone_raster(path: Path, data: np.ndarray) -> None:
 
 
 def test_compute_ndvi_preserves_source_mask() -> None:
-    mask = object()
+    class FakeCombinedMask:
+        def __init__(self, left, right):
+            self.left = left
+            self.right = right
+
+    class FakeCondition:
+        def __init__(self, label):
+            self.label = label
+            self.and_args: list[object] = []
+
+        def And(self, other):
+            self.and_args.append(other)
+            return FakeCombinedMask(self.label, other)
 
     class FakeNdviBand:
         def __init__(self):
             self.renamed: str | None = None
-            self.updated_mask: object | None = None
+            self.to_float_calls = 0
+            self.gt_calls: list[float] = []
+            self.lt_calls: list[float] = []
+            self.update_mask_arg: object | None = None
 
         def rename(self, name: str):
             self.renamed = name
-            return self
-
-        def updateMask(self, value: object):
-            self.updated_mask = value
-            return self
-
-    class FakeImage:
-        def __init__(self):
-            self.selected: list[tuple[str, str] | str] = []
-            self.to_float_calls = 0
-            self.normalized_difference_calls: list[tuple[str, str]] = []
-            self.mask_called = False
-            self.band = FakeNdviBand()
-
-        def select(self, bands):
-            if isinstance(bands, (list, tuple)) and len(bands) > 1:
-                entry: tuple[str, str] | str = tuple(bands)
-            else:
-                entry = bands[0] if isinstance(bands, (list, tuple)) else bands
-            self.selected.append(entry)
             return self
 
         def toFloat(self):
             self.to_float_calls += 1
             return self
 
+        def gt(self, value: float):
+            self.gt_calls.append(value)
+            return FakeCondition(("gt", value))
+
+        def lt(self, value: float):
+            self.lt_calls.append(value)
+            return FakeCondition(("lt", value))
+
+        def updateMask(self, value: object):
+            self.update_mask_arg = value
+            return self
+
+    class FakeMask:
+        def __init__(self):
+            self.and_args: list[object] = []
+
+        def And(self, other):
+            self.and_args.append(other)
+            return self
+
+    class FakeBands:
+        def __init__(self, mask_obj: FakeMask, ndvi_band: FakeNdviBand):
+            self.mask_obj = mask_obj
+            self.ndvi_band = ndvi_band
+            self.to_float_calls = 0
+            self.normalized_diff_calls: list[tuple[str, str]] = []
+
+        def toFloat(self):
+            self.to_float_calls += 1
+            return self
+
         def normalizedDifference(self, bands):
-            self.normalized_difference_calls.append(tuple(bands))
-            return self.band
+            self.normalized_diff_calls.append(tuple(bands))
+            return self.ndvi_band
 
         def mask(self):
-            self.mask_called = True
-            return mask
+            return self.mask_obj
+
+    class FakeImage:
+        def __init__(self):
+            self.selected: list[tuple[str, str] | str] = []
+            self.mask_obj = FakeMask()
+            self.ndvi_band = FakeNdviBand()
+            self.band_selection = FakeBands(self.mask_obj, self.ndvi_band)
+
+        def select(self, bands):
+            entry = tuple(bands) if isinstance(bands, (list, tuple)) else bands
+            self.selected.append(entry)
+            return self.band_selection
 
     fake_image = FakeImage()
 
     result = zones._compute_ndvi(fake_image)
 
     assert fake_image.selected[0] == ("B8", "B4")
-    assert "B8" in fake_image.selected
-    assert fake_image.to_float_calls == 1
-    assert fake_image.normalized_difference_calls == [("B8", "B4")]
-    assert fake_image.mask_called is True
-    assert fake_image.band.renamed == "NDVI"
-    assert fake_image.band.updated_mask is mask
-    assert result is fake_image.band
+    assert fake_image.band_selection.to_float_calls == 1
+    assert fake_image.band_selection.normalized_diff_calls == [("B8", "B4")]
+    assert fake_image.ndvi_band.renamed == "NDVI"
+    assert fake_image.ndvi_band.to_float_calls == 1
+    assert fake_image.mask_obj.and_args, "Expected NDVI mask to include the source mask"
+    combined_mask = fake_image.mask_obj.and_args[0]
+    assert isinstance(combined_mask, FakeCombinedMask)
+    assert combined_mask.left == ("gt", 0)
+    assert getattr(combined_mask.right, "label", None) == ("lt", 1)
+    assert fake_image.ndvi_band.update_mask_arg is fake_image.mask_obj
+    assert result is fake_image.ndvi_band
 
 
 def test_download_image_to_path_handles_zipped_payload(monkeypatch, tmp_path: Path) -> None:
