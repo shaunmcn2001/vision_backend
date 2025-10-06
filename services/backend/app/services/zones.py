@@ -1087,7 +1087,37 @@ def _build_composite_series(
 def _compute_ndvi(image: ee.Image) -> ee.Image:
     bands = image.select(["B8", "B4"]).toFloat()
     ndvi = bands.normalizedDifference(["B8", "B4"]).rename("NDVI")
-    return ndvi.updateMask(image.mask())
+    band_names = getattr(image, "bandNames", None)
+    if callable(band_names):
+        try:
+            has_b8 = band_names().contains("B8")
+        except Exception:  # pragma: no cover - defensive guard for EE errors
+            has_b8 = False
+    else:
+        has_b8 = False
+
+    fallback_mask = image.mask()
+    if hasattr(fallback_mask, "reduce"):
+        fallback_mask = fallback_mask.reduce(ee.Reducer.min())
+
+    algorithms = getattr(ee, "Algorithms", None)
+    algorithms_if = getattr(algorithms, "If", None) if algorithms is not None else None
+
+    if algorithms_if is None:
+        def _local_if(condition, true_case, false_case):
+            return true_case if bool(condition) else false_case
+
+        chosen_mask = _local_if(has_b8, image.select("B8").mask(), fallback_mask)
+        single_mask = chosen_mask
+    else:
+        chosen_mask = algorithms_if(
+            has_b8,
+            image.select("B8").mask(),
+            fallback_mask,
+        )
+        single_mask = ee.Image(chosen_mask)
+
+    return ndvi.updateMask(single_mask)
 
 
 def _compute_ndre(image: ee.Image) -> ee.Image:
