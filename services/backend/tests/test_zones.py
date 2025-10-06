@@ -64,7 +64,8 @@ def _write_zone_raster(path: Path, data: np.ndarray) -> None:
         dst.write(data, 1)
 
 
-def test_compute_ndvi_preserves_source_mask() -> None:
+def test_compute_ndvi_preserves_source_mask(monkeypatch) -> None:
+    monkeypatch.setattr(zones.ee.Reducer, "min", staticmethod(lambda: "min_reducer"))
     class FakeCombinedMask:
         def __init__(self, left, right):
             self.left = left
@@ -110,6 +111,21 @@ def test_compute_ndvi_preserves_source_mask() -> None:
     class FakeMask:
         def __init__(self):
             self.and_args: list[object] = []
+            self.reduce_calls: list[object] = []
+            self.rename_calls: list[str] = []
+            self.gt_calls: list[float] = []
+
+        def reduce(self, reducer):
+            self.reduce_calls.append(reducer)
+            return self
+
+        def rename(self, name: str):
+            self.rename_calls.append(name)
+            return self
+
+        def gt(self, value: float):
+            self.gt_calls.append(value)
+            return self
 
         def And(self, other):
             self.and_args.append(other)
@@ -159,6 +175,9 @@ def test_compute_ndvi_preserves_source_mask() -> None:
     assert isinstance(combined_mask, FakeCombinedMask)
     assert combined_mask.left == ("gt", 0)
     assert getattr(combined_mask.right, "label", None) == ("lt", 1)
+    assert len(fake_image.mask_obj.reduce_calls) == 1
+    assert fake_image.mask_obj.rename_calls == ["mask"]
+    assert fake_image.mask_obj.gt_calls == [0]
     assert fake_image.ndvi_band.update_mask_arg is fake_image.mask_obj
     assert result is fake_image.ndvi_band
 
