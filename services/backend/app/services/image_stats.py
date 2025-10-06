@@ -41,9 +41,9 @@ def temporal_stats(
     valid_mask = raw_count.gt(0)
     safe_count = raw_count.where(raw_count.eq(0), 1)
 
-    mean_unmasked = raw_sum.divide(safe_count)
     mean_name = mean_band_name or f"{rename_base}_mean"
-    mean = mean_unmasked.updateMask(valid_mask).rename(mean_name)
+    mean_unmasked = raw_sum.divide(safe_count).rename(mean_name)
+    mean = mean_unmasked.updateMask(valid_mask)
 
     median = raw_median.updateMask(valid_mask).rename(f"{rename_base}_median")
     std = raw_std.updateMask(valid_mask).rename(f"{rename_base}_stdDev")
