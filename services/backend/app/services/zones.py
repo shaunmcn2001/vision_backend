@@ -11,11 +11,11 @@ import logging
 import os
 import math
 from pathlib import Path
-import re
 import shutil
 import tempfile
 import zipfile
 from typing import Any, Dict, List, Mapping, Sequence, Tuple, Union
+import re
 from urllib.request import urlopen
 
 import ee
@@ -52,6 +52,7 @@ DEFAULT_SIMPLIFY_BUFFER_M = 3
 DEFAULT_METHOD = "ndvi_percentiles"
 DEFAULT_SAMPLE_SIZE = 8000
 DEFAULT_SCALE = 10
+EPS = 1e-4
 # Holes below this threshold (in hectares) are removed during vector cleanup.
 MIN_HOLE_AREA_HA = 0.1
 # IMPORTANT: processing uses the native S2 projection (meters).
@@ -1680,26 +1681,140 @@ def _pixel_count(
     return int(max(numeric, 0))
 
 
+def _robust_thresholds(
+    ndvi_mean_img: ee.Image, aoi: ee.Geometry, num_zones: int = 5
+) -> ee.List:
+    # 1) Try percentiles first
+    pct_list = [int(100 * i / num_zones) for i in range(1, num_zones)]
+    stats = ndvi_mean_img.reduceRegion(
+        reducer=ee.Reducer.percentile(
+            pct_list, maxBuckets=2_048, minBucketWidth=1e-4, maxRaw=1e7
+        ),
+        geometry=aoi,
+        scale=10,
+        maxPixels=1e13,
+        bestEffort=True,
+    )
+    vals = ee.Dictionary(stats).values()
+    cond_has_vals = ee.List(vals).indexOf(None).eq(-1)
+    numeric_vals = ee.List(vals).map(lambda v: ee.Number(v))
+
+    def _use_pcts():
+        # Ensure strictly increasing thresholds; if any equals previous, bump by EPS
+        def _enforce_increasing(seq):
+            seq = ee.List(seq)
+
+            def _step(i, acc):
+                acc = ee.List(acc)
+                cur = ee.Number(seq.get(i))
+                prev = ee.Number(
+                    ee.Algorithms.If(acc.size().gt(0), acc.get(-1), cur.subtract(10))
+                )
+                fixed = ee.Algorithms.If(cur.lte(prev), prev.add(EPS), cur)
+                return acc.add(fixed)
+
+            return ee.List(
+                ee.List.sequence(0, seq.size().subtract(1)).iterate(
+                    _step, ee.List([])
+                )
+            )
+
+        return _enforce_increasing(numeric_vals)
+
+    def _fallback_fixed_bins():
+        # 2) Fallback: use min/max from image; if min==max, widen by ±0.1 (clamped)
+        mm = ndvi_mean_img.reduceRegion(
+            reducer=ee.Reducer.minMax(),
+            geometry=aoi,
+            scale=10,
+            maxPixels=1e13,
+            bestEffort=True,
+        )
+        vmin = ee.Number(mm.get("NDVI_mean_min"))
+        vmax = ee.Number(mm.get("NDVI_mean_max"))
+
+        # If either is null, force a generic band [-0.1, 0.7]
+        vmin = ee.Number(ee.Algorithms.If(vmin, vmin, -0.1))
+        vmax = ee.Number(ee.Algorithms.If(vmax, vmax, 0.7))
+
+        same = vmin.eq(vmax)
+        vmin = ee.Number(ee.Algorithms.If(same, vmin.subtract(0.1), vmin))
+        vmax = ee.Number(ee.Algorithms.If(same, vmax.add(0.1), vmax))
+
+        # Clamp to NDVI domain [-1, 1]
+        vmin = vmin.max(-1)
+        vmax = vmax.min(1)
+
+        # Build equal-interval thresholds between vmin..vmax
+        step = vmax.subtract(vmin).divide(num_zones)
+        thr = ee.List.sequence(1, num_zones - 1).map(
+            lambda k: vmin.add(step.multiply(k))
+        )
+
+        # Enforce strictly increasing with EPS
+        def _fix(seq):
+            seq = ee.List(seq)
+
+            def _step(i, acc):
+                acc = ee.List(acc)
+                cur = ee.Number(seq.get(i))
+                prev = ee.Number(
+                    ee.Algorithms.If(acc.size().gt(0), acc.get(-1), cur.subtract(10))
+                )
+                fixed = ee.Algorithms.If(cur.lte(prev), prev.add(EPS), cur)
+                return acc.add(fixed)
+
+            return ee.List(
+                ee.List.sequence(0, seq.size().subtract(1)).iterate(
+                    _step, ee.List([])
+                )
+            )
+
+        return _fix(thr)
+
+    return ee.List(ee.Algorithms.If(cond_has_vals, _use_pcts(), _fallback_fixed_bins()))
+
+
+def _classify_from_thresholds(
+    img: ee.Image, thrs: ee.List, num_zones: int | None = None
+) -> ee.Image:
+    thresholds = ee.List(thrs)
+    threshold_count = thresholds.size()
+    zone_count = (
+        ee.Number(num_zones)
+        if num_zones is not None
+        else ee.Number(threshold_count.add(1))
+    )
+
+    def _iterate(indices: ee.List) -> ee.Image:
+        start = ee.Image.constant(zone_count)
+
+        def _assign(idx, current):
+            current_img = ee.Image(current)
+            index = ee.Number(idx)
+            threshold = ee.Number(thresholds.get(index))
+            zone_id = index.add(1)
+            mask = img.lt(threshold)
+            return current_img.where(mask, zone_id)
+
+        return ee.Image(
+            indices.iterate(_assign, start)
+        )
+
+    seq = ee.List.sequence(thresholds.size().subtract(1), 0, -1)
+    classified = ee.Algorithms.If(
+        threshold_count.gt(0),
+        _iterate(ee.List.sequence(threshold_count.subtract(1), 0, -1)),
+        ee.Image.constant(zone_count),
+    )
+    return ee.Image(classified).rename("zone").toInt()
+
+
 def _percentile_thresholds(
     reducer_dict: Mapping[str, float], percentiles: Sequence[float], label: str
 ) -> List[float]:
-    """
-    Build the list of percentile thresholds for NDVI zoning.
+    """Build the list of percentile thresholds for NDVI zoning."""
 
-    Accepts reducer outputs where percentile keys are either:
-      - 'cut_01', 'cut_02', ... (bare keys)
-      - '<label>_cut_01', '<label>_cut_02', ... (band-prefixed keys from EE)
-      - 'p20', 'p40', ... (Earth Engine defaults)
-      - '<label>_p20', ... (Earth Engine defaults with band prefix)
-
-    Args:
-        reducer_dict: dictionary returned by EE reduceRegion with percentiles
-        percentiles: ordered list of requested percentile values (0..100)
-        label: band name prefix (e.g. 'ndvi_mean')
-
-    Returns:
-        A list of thresholds in ascending order
-    """
     if not percentiles:
         raise ValueError("percentiles must be a non-empty sequence")
 
@@ -1764,20 +1879,18 @@ def _percentile_thresholds(
         thresholds.append(value)
 
     return thresholds
-    
+
+
 def _classify_by_percentiles(
     image: ee.Image, geometry: ee.Geometry, n_classes: int
 ) -> tuple[ee.Image, List[float]]:
-    """
-    Classify an NDVI image into percentile-based zones.
+    """Classify an NDVI image into percentile-based zones.
 
-    Steps:
-    - ReduceRegion computes percentile thresholds (n_classes - 1 cuts).
-    - _percentile_thresholds interprets both bare 'cut_XX' and band-prefixed keys.
-    - Classify pixels by counting how many thresholds their value exceeds.
+    This compatibility helper mirrors the legacy percentile approach and is
+    retained for tests and backward compatibility. Production code now uses
+    :func:`_robust_thresholds` and :func:`_classify_from_thresholds`.
     """
 
-    # Ensure image has a known band name
     band_name_obj = ee.String(image.bandNames().get(0))
     image = image.rename(band_name_obj)
     if hasattr(band_name_obj, "getInfo"):
@@ -1785,13 +1898,11 @@ def _classify_by_percentiles(
     else:
         band_label = str(band_name_obj)
 
-    # Percentile cuts to request
     step = 100 / n_classes
     percentile_sequence = [step * i for i in range(1, n_classes)]
     pct_breaks = ee.List(percentile_sequence)
     output_names = [f"cut_{i:02d}" for i in range(1, n_classes)]
 
-    # Compute percentiles for this band
     reducer_dict = image.reduceRegion(
         reducer=ee.Reducer.percentile(pct_breaks, outputNames=output_names),
         geometry=geometry,
@@ -1801,17 +1912,11 @@ def _classify_by_percentiles(
         maxPixels=gee.MAX_PIXELS,
     )
 
-    # Convert reducer result into Python dict (safe)
     reducer_info = reducer_dict.getInfo() or {}
 
-    # Extract thresholds with robust handling of bare/prefixed keys
-    thresholds: List[float]
-    try:
-        thresholds = _percentile_thresholds(
-            reducer_info, percentile_sequence, band_label
-        )
-    except ValueError as exc:
-        raise ValueError(STABILITY_MASK_EMPTY_ERROR) from exc
+    thresholds = _percentile_thresholds(
+        reducer_info, percentile_sequence, band_label
+    )
 
     adjusted_thresholds: List[float] = []
     previous = -math.inf
@@ -1837,7 +1942,6 @@ def _classify_by_percentiles(
 
     thresholds = adjusted_thresholds
 
-    # Now classify pixels relative to thresholds
     zero = image.multiply(0)
 
     def _accumulate(current, threshold):
@@ -2282,24 +2386,25 @@ def _build_percentile_zones(
     close_radius_m: float,
     min_mapping_unit_ha: float,
 ) -> tuple[ee.Image, List[float]]:
-    # Cap NDVI for percentile breaks only (0..0.6)
-    pct_source = ndvi_stats["mean"].clamp(NDVI_PERCENTILE_MIN, NDVI_PERCENTILE_MAX)
+    mean_ndvi = ndvi_stats["mean"].toFloat().rename("NDVI_mean")
+    pct_source = mean_ndvi.clamp(NDVI_PERCENTILE_MIN, NDVI_PERCENTILE_MAX)
 
-    # Robust thresholds: compute on mean mask (not stability) to avoid empty stats
-    thresholds_image = pct_source.updateMask(ndvi_stats["mean"].mask())
-    ranked_for_thresh, thresholds = _classify_by_percentiles(
-        thresholds_image, geometry, n_classes
-    )
-    # Now classify the full pct_source, then apply stability mask afterwards
-    ranked_full, _ = _classify_by_percentiles(
-        pct_source, geometry, n_classes
-    )
+    thresholds_image = pct_source.updateMask(mean_ndvi.mask())
+    try:
+        thresholds = _robust_thresholds(thresholds_image, geometry, n_classes)
+    except Exception as exc:  # pragma: no cover - Earth Engine errors
+        raise ValueError(STABILITY_MASK_EMPTY_ERROR) from exc
+
+    ranked_full = _classify_from_thresholds(pct_source, thresholds, n_classes)
     ranked = ranked_full.updateMask(ndvi_stats["stability"])
 
     try:
-        percentile_thresholds = [float(value) for value in thresholds]
-    except (TypeError, ValueError) as exc:  # pragma: no cover
-        raise RuntimeError(f"Failed to evaluate NDVI percentile thresholds: {exc}") from exc
+        threshold_values = ee.List(thresholds).getInfo() or []
+        percentile_thresholds = [float(value) for value in threshold_values]
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            f"Failed to evaluate NDVI percentile thresholds: {exc}"
+        ) from exc
 
     cleaned = _apply_cleanup(
         ranked,
