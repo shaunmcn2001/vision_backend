@@ -84,6 +84,10 @@ class FakeMappedCollection:
         self._func(FakeImage(month, self._capture))
         return FakeFilteredCollection(month, self._capture)
 
+    def select(self, band):
+        self._capture.setdefault("collection_selects", []).append(band)
+        return self
+
 
 class FakeImageCollection:
     def __init__(self, name, capture):
@@ -103,13 +107,17 @@ class FakeImageCollection:
         self._capture["map_func"] = func
         return FakeMappedCollection(func, self._capture)
 
+    def select(self, band):
+        self._capture.setdefault("collection_selects", []).append(band)
+        return self
+
 
 def make_fake_ee(capture):
     return SimpleNamespace(
         ImageCollection=lambda name: FakeImageCollection(name, capture),
         Geometry=lambda geom: geom,
         Filter=SimpleNamespace(calendarRange=lambda start, end, unit: start),
-        Reducer=SimpleNamespace(mean=lambda: "mean"),
+        Reducer=SimpleNamespace(mean=lambda: "mean", count=lambda: "count"),
         Image=SimpleNamespace(constant=lambda value: value),
     )
 
