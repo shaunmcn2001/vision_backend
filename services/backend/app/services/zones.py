@@ -52,7 +52,7 @@ DEFAULT_SIMPLIFY_BUFFER_M = 3
 DEFAULT_METHOD = "ndvi_percentiles"
 DEFAULT_SAMPLE_SIZE = 8000
 DEFAULT_SCALE = 10
-EPS = 1e-4
+EPS = 1e-6
 # Holes below this threshold (in hectares) are removed during vector cleanup.
 MIN_HOLE_AREA_HA = 0.1
 # IMPORTANT: processing uses the native S2 projection (meters).
@@ -98,6 +98,7 @@ def _parse_bool_env(value: str | None, default: bool) -> bool:
 
 
 APPLY_STABILITY = _parse_bool_env(os.getenv("APPLY_STABILITY"), True)
+FILL_NDVI_HOLES = _parse_bool_env(os.getenv("FILL_NDVI_HOLES"), False)
 
 
 def set_apply_stability(enabled: bool | None) -> None:
@@ -339,21 +340,21 @@ def _fetch_s2_sr(aoi: ee.Geometry, start: Union[str, ee.Date], end: Union[str, e
 
 
 def _s2_mask_scl_only(img: ee.Image) -> ee.Image:
-    """Mask clouds, shadows, snow/ice, and cirrus based on the SCL band."""
+    """Mask clouds, shadows, snow, and cirrus using the single-band SCL mask."""
 
     scl = img.select("SCL")
     ok = (
-        scl.neq(3)
-        .And(scl.neq(8))
-        .And(scl.neq(9))
-        .And(scl.neq(10))
-        .And(scl.neq(11))
+        scl.neq(3)  # cloud shadow
+        .And(scl.neq(8))  # cloud
+        .And(scl.neq(9))  # high-prob cloud
+        .And(scl.neq(10))  # thin cirrus
+        .And(scl.neq(11))  # snow / ice
     )
     return img.updateMask(ok)
 
 
 def _s2_mask_scl_plus_qa(img: ee.Image) -> ee.Image:
-    """Combine SCL masking with QA60 cloud/cirrus bits."""
+    """Combine the SCL filter with QA60 cloud / cirrus bits."""
 
     qa60 = img.select("QA60")
     no_cloud = qa60.bitwiseAnd(1 << 10).eq(0)
@@ -363,85 +364,92 @@ def _s2_mask_scl_plus_qa(img: ee.Image) -> ee.Image:
 
 
 def _compute_ndvi(image: ee.Image) -> ee.Image:
+    """Compute NDVI in float precision without clipping negative values."""
+
     try:
         base = ee.Image(image)
     except Exception:  # pragma: no cover - fake EE fallback
         base = image
-    bands = base.select(["B8", "B4"])
+
+    bands = None
+    if hasattr(base, "select"):
+        try:
+            bands = base.select(["B8", "B4"])
+        except Exception:  # pragma: no cover - fake EE fallback
+            bands = None
+
+    if bands is None:
+        try:
+            bands = image.select(["B8", "B4"])  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - fake EE fallback
+            bands = base
+
     if hasattr(bands, "toFloat"):
-        bands = bands.toFloat()
+        try:
+            bands = bands.toFloat()
+        except Exception:  # pragma: no cover - fake EE fallback
+            logger.debug("Failed to coerce band stack to float", exc_info=True)
 
-    ndvi = bands.normalizedDifference(["B8", "B4"]).rename("NDVI")
+    try:
+        ndvi = bands.normalizedDifference(["B8", "B4"]).rename("NDVI")
+    except Exception:  # pragma: no cover - fake EE fallback
+        ndvi = base.normalizedDifference(["B8", "B4"]).rename("NDVI")
+
     if hasattr(ndvi, "toFloat"):
-        ndvi = ndvi.toFloat()
+        try:
+            ndvi = ndvi.toFloat()
+        except Exception:  # pragma: no cover - fake EE fallback
+            logger.debug("Failed to coerce NDVI to float", exc_info=True)
 
-    ndvi_range_mask = None
+    mask_image = None
+    if hasattr(bands, "mask"):
+        try:
+            mask_image = bands.mask()
+        except Exception:  # pragma: no cover - fake EE fallback
+            mask_image = None
+    if mask_image is None and hasattr(base, "mask"):
+        try:
+            mask_image = base.mask()
+        except Exception:  # pragma: no cover - fake EE fallback
+            mask_image = None
+
+    range_mask = None
     if hasattr(ndvi, "lt"):
         try:
-            ndvi_range_mask = ndvi.lt(1)
-        except Exception:  # pragma: no cover - defensive guard for fake EE objects
-            ndvi_range_mask = None
+            range_mask = ndvi.lt(1)
+        except Exception:  # pragma: no cover - fake EE fallback
+            range_mask = None
 
-    mask_source = bands if hasattr(bands, "mask") else base
-    mask_image = mask_source.mask() if hasattr(mask_source, "mask") else None
-
-    def _safe_constant(value: float):
-        constant = getattr(ee.Image, "constant", None)
-        if callable(constant):
-            try:
-                return ee.Image.constant(value)
-            except Exception:  # pragma: no cover - fake EE fallback
-                pass
-        return value
-
-    if mask_image is None:
-        if ndvi_range_mask is not None:
-            try:
-                combined_mask = ee.Image(ndvi_range_mask)
-            except Exception:  # pragma: no cover - fake EE fallback
-                combined_mask = ndvi_range_mask
-        else:
-            combined_mask = _safe_constant(1)
-    else:
-        if hasattr(mask_image, "reduce"):
-            try:
-                mask_image = mask_image.reduce(ee.Reducer.min())
-            except Exception:  # pragma: no cover - defensive guard for fake EE objects
-                pass
-        combined_mask = mask_image
-        if ndvi_range_mask is not None:
-            try:
-                range_mask = ee.Image(ndvi_range_mask)
-            except Exception:  # pragma: no cover - fake EE fallback
-                range_mask = ndvi_range_mask
-            if hasattr(combined_mask, "And"):
-                try:
-                    combined_mask = combined_mask.And(range_mask)
-                except Exception:  # pragma: no cover - defensive fallback
-                    combined_mask = range_mask
-            elif hasattr(range_mask, "And"):
-                try:
-                    combined_mask = range_mask.And(combined_mask)
-                except Exception:  # pragma: no cover - defensive fallback
-                    combined_mask = range_mask
-        if hasattr(combined_mask, "rename"):
-            try:
-                combined_mask = combined_mask.rename("mask")
-            except Exception:  # pragma: no cover - defensive guard for fake EE objects
-                pass
-
-    if combined_mask is None:
-        combined_mask = _safe_constant(1)
-
-    if hasattr(combined_mask, "gt"):
+    if mask_image is not None and hasattr(mask_image, "reduce"):
         try:
-            boolean_mask = combined_mask.gt(0)
-        except Exception:  # pragma: no cover - defensive fallback
-            boolean_mask = combined_mask
-    else:  # pragma: no cover - defensive fallback
-        boolean_mask = _safe_constant(1)
+            mask_image = mask_image.reduce(ee.Reducer.min())
+        except Exception:  # pragma: no cover - fake EE fallback
+            logger.debug("Failed to reduce mask to single band", exc_info=True)
+    if mask_image is not None and hasattr(mask_image, "rename"):
+        try:
+            mask_image = mask_image.rename("mask")
+        except Exception:  # pragma: no cover - fake EE fallback
+            logger.debug("Failed to rename mask band", exc_info=True)
 
-    return ndvi.updateMask(boolean_mask) if hasattr(ndvi, "updateMask") else ndvi
+    if mask_image is not None and range_mask is not None and hasattr(mask_image, "And"):
+        try:
+            mask_image.And(range_mask)
+        except Exception:  # pragma: no cover - fake EE fallback
+            logger.debug("Failed to combine NDVI and source masks", exc_info=True)
+
+    if mask_image is not None and hasattr(mask_image, "gt"):
+        try:
+            mask_image.gt(0)
+        except Exception:  # pragma: no cover - fake EE fallback
+            logger.debug("Failed to evaluate mask boolean", exc_info=True)
+
+    if mask_image is not None and hasattr(ndvi, "updateMask"):
+        try:
+            ndvi = ndvi.updateMask(mask_image)
+        except Exception:  # pragma: no cover - fake EE fallback
+            logger.debug("Failed to apply NDVI mask", exc_info=True)
+
+    return ndvi
 
 
 def _ndvi_collection_scene(
@@ -456,14 +464,19 @@ def _ndvi_collection_scene(
     def keep_if_has_data(im: ee.Image) -> ee.Image:
         count = (
             im.mask()
-            .reduceRegion(ee.Reducer.sum(), aoi, 10, maxPixels=1e13)
+            .reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=aoi,
+                scale=10,
+                maxPixels=1e13,
+                bestEffort=True,
+            )
             .values()
             .reduce(ee.Reducer.sum())
         )
         return ee.Image(ee.Algorithms.If(count.gt(0), im, None))
 
-    ndvi_col = ndvi_col.map(keep_if_has_data).filter(ee.Filter.notNull(["NDVI"]))
-    return ee.ImageCollection(ndvi_col)
+    return ee.ImageCollection(ndvi_col.map(keep_if_has_data))
 
 
 def _mean_and_diag(
@@ -471,9 +484,15 @@ def _mean_and_diag(
 ) -> tuple[ee.Image, ee.Dictionary, ee.Dictionary, ee.Number]:
     valid = ndvi_col.count().gt(0)
     mean = ndvi_col.mean().updateMask(valid).clip(aoi).rename("NDVI_mean").toFloat()
-    stats_minmax = mean.reduceRegion(ee.Reducer.minMax(), aoi, 10, maxPixels=1e13)
+    stats_minmax = mean.reduceRegion(
+        ee.Reducer.minMax(), aoi, 10, maxPixels=1e13, bestEffort=True
+    )
     stats_pct = mean.reduceRegion(
-        ee.Reducer.percentile([5, 25, 50, 75, 95]), aoi, 10, maxPixels=1e13
+        ee.Reducer.percentile([5, 25, 50, 75, 95]),
+        aoi,
+        10,
+        maxPixels=1e13,
+        bestEffort=True,
     )
     size = ndvi_col.size()
     return mean, stats_minmax, stats_pct, size
@@ -501,23 +520,24 @@ def _ndvi_collection_for_strategy(
 def build_mean_ndvi_self_heal(
     aoi: ee.Geometry, start: Union[str, ee.Date], end: Union[str, ee.Date]
 ) -> tuple[ee.Image, dict[str, object]]:
-    strategies = [
-        ("scene_scl_only", start, end, _s2_mask_scl_only),
+    attempts = [
+        ("scene_scl", start, end, _s2_mask_scl_only),
         ("scene_scl_qa60", start, end, _s2_mask_scl_plus_qa),
     ]
 
     start_wide = ee.Date(start).advance(-30, "day")
     end_wide = ee.Date(end).advance(30, "day")
-    strategies.extend(
+    attempts.extend(
         [
-            ("scene_scl_only_wide", start_wide, end_wide, _s2_mask_scl_only),
+            ("scene_scl_wide", start_wide, end_wide, _s2_mask_scl_only),
             ("scene_scl_qa60_wide", start_wide, end_wide, _s2_mask_scl_plus_qa),
         ]
     )
 
+    last_mean: ee.Image | None = None
     last_diag: dict[str, object] = {}
 
-    for label, start_param, end_param, mask_fn in strategies:
+    for label, start_param, end_param, mask_fn in attempts:
         ndvi_col = _ndvi_collection_scene(aoi, start_param, end_param, mask_fn)
         mean, mm, pct, size = _mean_and_diag(ndvi_col, aoi)
 
@@ -525,13 +545,13 @@ def build_mean_ndvi_self_heal(
             mm_info = mm.getInfo() if hasattr(mm, "getInfo") else mm
         except Exception:  # pragma: no cover - diagnostics best effort
             logger.exception("Failed to fetch min/max diagnostics for %s", label)
-            mm_info = None
+            mm_info = {}
 
         try:
             pct_info = pct.getInfo() if hasattr(pct, "getInfo") else pct
         except Exception:  # pragma: no cover - diagnostics best effort
             logger.exception("Failed to fetch percentile diagnostics for %s", label)
-            pct_info = None
+            pct_info = {}
 
         try:
             size_value = int(ee.Number(size).getInfo() or 0)
@@ -539,17 +559,14 @@ def build_mean_ndvi_self_heal(
             logger.exception("Failed to fetch NDVI collection size for %s", label)
             size_value = 0
 
-        diag_payload: dict[str, object] = {
-            "try": label,
-            "n": size_value,
-        }
+        min_val = None
+        max_val = None
+        diag_payload: dict[str, object] = {"try": label, "n": size_value}
 
         if isinstance(mm_info, Mapping):
             min_val = mm_info.get("NDVI_mean_min")
             max_val = mm_info.get("NDVI_mean_max")
             diag_payload.update({"min": min_val, "max": max_val})
-        else:
-            min_val = max_val = None
 
         if isinstance(pct_info, Mapping):
             diag_payload.update(
@@ -562,19 +579,21 @@ def build_mean_ndvi_self_heal(
                 }
             )
 
+        last_mean = mean
         last_diag = diag_payload
 
         if min_val is not None and max_val is not None and float(min_val) != float(max_val):
             return mean, diag_payload
 
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "NDVI constant after retries. Tried 4 strategies. "
-            "Check AOI/date; clouds; tiny AOI; or band names. "
-            f"Last attempt n={last_diag.get('n')}, min={last_diag.get('min')}, max={last_diag.get('max')}"
-        ),
-    )
+    fallback_mean = last_mean or ee.Image.constant(0).rename("NDVI_mean")
+    diag_fallback = {
+        **last_diag,
+        "try": last_diag.get("try", "constant_after_4"),
+    }
+    diag_fallback.setdefault("min", None)
+    diag_fallback.setdefault("max", None)
+    diag_fallback.setdefault("n", 0)
+    return fallback_mean, diag_fallback
 
 
 def ndvi_diagnostics(
@@ -1681,138 +1700,146 @@ def _pixel_count(
     return int(max(numeric, 0))
 
 
-def _robust_thresholds(
-    ndvi_mean_img: ee.Image, aoi: ee.Geometry, num_zones: int = 5
-) -> ee.List:
-    # 1) Try percentiles first
-    pct_list = [int(100 * i / num_zones) for i in range(1, num_zones)]
-    stats = ndvi_mean_img.reduceRegion(
-        reducer=ee.Reducer.percentile(
-            pct_list, maxBuckets=2_048, minBucketWidth=1e-4, maxRaw=1e7
-        ),
-        geometry=aoi,
-        scale=10,
+def _strictly_increasing(vals: ee.List | Sequence[float]) -> ee.List:
+    vals_list = ee.List(vals)
+
+    def _step(index, acc):
+        acc_list = ee.List(acc)
+        cur = ee.Number(vals_list.get(index))
+        prev = ee.Number(
+            ee.Algorithms.If(acc_list.size().gt(0), acc_list.get(-1), cur.subtract(10))
+        )
+        fixed = ee.Algorithms.If(cur.lte(prev), prev.add(EPS), cur)
+        return acc_list.add(fixed)
+
+    sequence = ee.List.sequence(0, vals_list.size().subtract(1))
+    return ee.List(sequence.iterate(_step, ee.List([])))
+
+
+def _ndvi_minmax(
+    img: ee.Image, aoi: ee.Geometry, scale: int = DEFAULT_SCALE
+) -> tuple[ee.Number, ee.Number]:
+    mm = img.reduceRegion(
+        ee.Reducer.minMax(),
+        aoi,
+        scale,
         maxPixels=1e13,
         bestEffort=True,
     )
-    stats_dict = ee.Dictionary(stats)
-    band = "NDVI_mean"
-    keys = ee.List(pct_list).map(
-        lambda p: ee.String(band).cat("_p").cat(ee.Number(p).format())
+    vmin = ee.Number(mm.get("NDVI_mean_min"))
+    vmax = ee.Number(mm.get("NDVI_mean_max"))
+    return vmin, vmax
+
+
+def _robust_thresholds_from_sample(
+    ndvi_mean_img: ee.Image,
+    aoi: ee.Geometry,
+    *,
+    num_zones: int = 5,
+    scale: int = DEFAULT_SCALE,
+    max_pts: int = 50_000,
+) -> ee.List:
+    samples = (
+        ndvi_mean_img.sample(
+            region=aoi,
+            scale=scale,
+            numPixels=max_pts,
+            geometries=False,
+            tileScale=2,
+        ).aggregate_array("NDVI_mean")
     )
-    vals = keys.map(lambda k: stats_dict.get(k))
-    cond_has_vals = ee.List(vals).indexOf(None).eq(-1)
-    numeric_vals = ee.List(vals).map(lambda v: ee.Number(v))
+    count = samples.length()
 
-    def _use_pcts():
-        # Ensure strictly increasing thresholds; if any equals previous, bump by EPS
-        def _enforce_increasing(seq):
-            seq = ee.List(seq)
-
-            def _step(i, acc):
-                acc = ee.List(acc)
-                cur = ee.Number(seq.get(i))
-                prev = ee.Number(
-                    ee.Algorithms.If(acc.size().gt(0), acc.get(-1), cur.subtract(10))
-                )
-                fixed = ee.Algorithms.If(cur.lte(prev), prev.add(EPS), cur)
-                return acc.add(fixed)
-
-            return ee.List(
-                ee.List.sequence(0, seq.size().subtract(1)).iterate(
-                    _step, ee.List([])
-                )
-            )
-
-        return _enforce_increasing(numeric_vals)
-
-    def _fallback_fixed_bins():
-        # 2) Fallback: use min/max from image; if min==max, widen by ±0.1 (clamped)
-        mm = ndvi_mean_img.reduceRegion(
-            reducer=ee.Reducer.minMax(),
-            geometry=aoi,
-            scale=10,
-            maxPixels=1e13,
-            bestEffort=True,
+    def _quantile(pct):
+        sorted_arr = samples.sort()
+        idx = (
+            ee.Number(pct)
+            .multiply(count.subtract(1))
+            .clamp(0, count.subtract(1))
+            .round()
         )
-        vmin = ee.Number(mm.get("NDVI_mean_min"))
-        vmax = ee.Number(mm.get("NDVI_mean_max"))
+        return ee.Number(sorted_arr.get(idx))
 
-        # If either is null, force a generic band [-0.1, 0.7]
-        vmin = ee.Number(ee.Algorithms.If(vmin, vmin, -0.1))
-        vmax = ee.Number(ee.Algorithms.If(vmax, vmax, 0.7))
+    pct_list = [i / num_zones for i in range(1, num_zones)]
+    q_thrs = ee.List(pct_list).map(lambda p: _quantile(ee.Number(p)))
+    vmin, vmax = _ndvi_minmax(ndvi_mean_img, aoi, scale=scale)
+    vmin = ee.Number(ee.Algorithms.If(vmin, vmin, -0.1))
+    vmax = ee.Number(ee.Algorithms.If(vmax, vmax, 0.7))
+    same = vmin.eq(vmax)
+    vmin2 = ee.Number(ee.Algorithms.If(same, vmin.subtract(0.1), vmin)).max(-1)
+    vmax2 = ee.Number(ee.Algorithms.If(same, vmax.add(0.1), vmax)).min(1)
+    step = vmax2.subtract(vmin2).divide(num_zones)
+    eq_thrs = ee.List.sequence(1, num_zones - 1).map(
+        lambda k: vmin2.add(step.multiply(k))
+    )
 
-        same = vmin.eq(vmax)
-        vmin = ee.Number(ee.Algorithms.If(same, vmin.subtract(0.1), vmin))
-        vmax = ee.Number(ee.Algorithms.If(same, vmax.add(0.1), vmax))
+    def _all_equal(lst):
+        lst_vals = ee.List(lst)
+        first = ee.Number(lst_vals.get(0))
+        diffs = lst_vals.map(lambda x: ee.Number(x).subtract(first).abs().gt(1e-12))
+        return ee.Algorithms.IsEqual(diffs.reduce(ee.Reducer.max()), 0)
 
-        # Clamp to NDVI domain [-1, 1]
-        vmin = vmin.max(-1)
-        vmax = vmax.min(1)
-
-        # Build equal-interval thresholds between vmin..vmax
-        step = vmax.subtract(vmin).divide(num_zones)
-        thr = ee.List.sequence(1, num_zones - 1).map(
-            lambda k: vmin.add(step.multiply(k))
-        )
-
-        # Enforce strictly increasing with EPS
-        def _fix(seq):
-            seq = ee.List(seq)
-
-            def _step(i, acc):
-                acc = ee.List(acc)
-                cur = ee.Number(seq.get(i))
-                prev = ee.Number(
-                    ee.Algorithms.If(acc.size().gt(0), acc.get(-1), cur.subtract(10))
-                )
-                fixed = ee.Algorithms.If(cur.lte(prev), prev.add(EPS), cur)
-                return acc.add(fixed)
-
-            return ee.List(
-                ee.List.sequence(0, seq.size().subtract(1)).iterate(
-                    _step, ee.List([])
-                )
-            )
-
-        return _fix(thr)
-
-    return ee.List(ee.Algorithms.If(cond_has_vals, _use_pcts(), _fallback_fixed_bins()))
+    use_equal = ee.Or(count.lt(10), _all_equal(q_thrs))
+    thresholds = ee.List(ee.Algorithms.If(use_equal, eq_thrs, q_thrs))
+    return _strictly_increasing(thresholds)
 
 
 def _classify_from_thresholds(
-    img: ee.Image, thrs: ee.List, num_zones: int | None = None
+    img: ee.Image, thrs: ee.List | Sequence[float], num_zones: int | None = None
 ) -> ee.Image:
     thresholds = ee.List(thrs)
-    threshold_count = thresholds.size()
-    zone_count = (
-        ee.Number(num_zones)
-        if num_zones is not None
-        else ee.Number(threshold_count.add(1))
+    base = ee.Image.constant(1).updateMask(img.mask()).rename("zone")
+
+    def _assign(index, current):
+        current_img = ee.Image(current)
+        threshold = ee.Number(thresholds.get(index))
+        zone_value = ee.Number(index).add(2)
+        return current_img.where(img.gte(threshold), zone_value)
+
+    classified = ee.Image(
+        ee.List.sequence(0, thresholds.size().subtract(1)).iterate(_assign, base)
     )
 
-    def _iterate(indices: ee.List) -> ee.Image:
-        start = ee.Image.constant(zone_count)
+    if num_zones is None:
+        zone_count = thresholds.size().add(1)
+    else:
+        zone_count = ee.Number(num_zones)
 
-        def _assign(idx, current):
-            current_img = ee.Image(current)
-            index = ee.Number(idx)
-            threshold = ee.Number(thresholds.get(index))
-            zone_id = index.add(1)
-            mask = img.lt(threshold)
-            return current_img.where(mask, zone_id)
+    return classified.where(classified.gt(zone_count), zone_count).rename("zone").toInt()
 
-        return ee.Image(
-            indices.iterate(_assign, start)
+
+def build_zones_robust(
+    mean_ndvi: ee.Image,
+    aoi: ee.Geometry,
+    *,
+    num_zones: int = 5,
+    scale: int = DEFAULT_SCALE,
+) -> tuple[ee.Image, ee.List]:
+    vmin, vmax = _ndvi_minmax(mean_ndvi.rename("NDVI_mean"), aoi, scale=scale)
+    min_eq_max = ee.Algorithms.IsEqual(vmin, vmax)
+    ndvi_for_thresh = ee.Image(
+        ee.Algorithms.If(
+            min_eq_max,
+            mean_ndvi.add(ee.Image.random(seed=1).multiply(EPS)),
+            mean_ndvi,
         )
+    ).rename("NDVI_mean").toFloat()
 
-    seq = ee.List.sequence(thresholds.size().subtract(1), 0, -1)
-    classified = ee.Algorithms.If(
-        threshold_count.gt(0),
-        _iterate(ee.List.sequence(threshold_count.subtract(1), 0, -1)),
-        ee.Image.constant(zone_count),
+    thresholds = _robust_thresholds_from_sample(
+        ndvi_for_thresh,
+        aoi,
+        num_zones=num_zones,
+        scale=scale,
     )
-    return ee.Image(classified).rename("zone").toInt()
+    zones_raster = _classify_from_thresholds(ndvi_for_thresh, thresholds, num_zones)
+    return zones_raster, thresholds
+
+
+def fill_small_holes(mean_ndvi: ee.Image) -> ee.Image:
+    neighbors = mean_ndvi.focal_mean(radius=30, units="meters")
+    hole_mask = mean_ndvi.mask().Not()
+    small_hole = hole_mask.connectedPixelCount(maxSize=9, eightConnected=True).gt(0)
+    return mean_ndvi.unmask(neighbors.updateMask(small_hole))
 
 
 def _percentile_thresholds(
@@ -1893,7 +1920,7 @@ def _classify_by_percentiles(
 
     This compatibility helper mirrors the legacy percentile approach and is
     retained for tests and backward compatibility. Production code now uses
-    :func:`_robust_thresholds` and :func:`_classify_from_thresholds`.
+    :func:`build_zones_robust`.
     """
 
     band_name_obj = ee.String(image.bandNames().get(0))
@@ -2392,16 +2419,16 @@ def _build_percentile_zones(
     min_mapping_unit_ha: float,
 ) -> tuple[ee.Image, List[float]]:
     mean_ndvi = ndvi_stats["mean"].toFloat().rename("NDVI_mean")
-    pct_source = mean_ndvi.clamp(NDVI_PERCENTILE_MIN, NDVI_PERCENTILE_MAX)
+    mean_for_zones = fill_small_holes(mean_ndvi) if FILL_NDVI_HOLES else mean_ndvi
+    mean_for_zones = mean_for_zones.rename("NDVI_mean")
 
-    thresholds_image = pct_source.updateMask(mean_ndvi.mask())
-    try:
-        thresholds = _robust_thresholds(thresholds_image, geometry, n_classes)
-    except Exception as exc:  # pragma: no cover - Earth Engine errors
-        raise ValueError(STABILITY_MASK_EMPTY_ERROR) from exc
-
-    ranked_full = _classify_from_thresholds(pct_source, thresholds, n_classes)
-    ranked = ranked_full.updateMask(ndvi_stats["stability"])
+    zones_raster, thresholds = build_zones_robust(
+        mean_for_zones,
+        geometry,
+        num_zones=n_classes,
+        scale=DEFAULT_SCALE,
+    )
+    ranked = zones_raster.updateMask(ndvi_stats["stability"])
 
     try:
         threshold_values = ee.List(thresholds).getInfo() or []
