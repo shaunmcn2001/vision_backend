@@ -53,7 +53,7 @@ DEFAULT_SCALE = 10
 MIN_HOLE_AREA_HA = 0.1
 # IMPORTANT: processing uses the native S2 projection (meters).
 # Exports use a metric CRS so scale=10 means 10 meters.
-DEFAULT_EXPORT_CRS = "EPSG:3857"
+DEFAULT_EXPORT_CRS = "EPSG:32756"
 DEFAULT_CRS = DEFAULT_EXPORT_CRS
 
 
@@ -2304,9 +2304,19 @@ def _prepare_selected_period_artifacts(
         try:
             valid_mask = ndvi_collection.count().gt(0)
             mean_image = ndvi_collection.mean().toFloat().updateMask(valid_mask)
-            mean_image = mean_image.focal_mean(radius=30, units="meters").unmask(
-                mean_image
-            )
+            neighbors = mean_image.focal_mean(radius=30, units="meters")
+            fill_source = neighbors
+            try:
+                hole_mask = mean_image.mask().Not()
+                small_holes = (
+                    hole_mask.connectedPixelCount(maxSize=9, eightConnected=True)
+                    .gt(0)
+                    .selfMask()
+                )
+                fill_source = neighbors.updateMask(small_holes)
+            except Exception:  # pragma: no cover - logging guard
+                logger.exception("Failed to apply NDVI hole size mask; using full neighbors")
+            mean_image = mean_image.unmask(fill_source)
             mean_image = mean_image.clip(geometry).rename("NDVI_mean")
             ndvi_stats["mean"] = mean_image
             ndvi_stats["valid_mask"] = valid_mask
@@ -2349,6 +2359,7 @@ def _prepare_selected_period_artifacts(
         )
         minmax_info = minmax.getInfo() if hasattr(minmax, "getInfo") else minmax
         logger.info("Zone NDVI min/max: %s", minmax_info)
+        print("Zone NDVI min/max:", minmax_info)
     except Exception:  # pragma: no cover - logging guard
         logger.exception("Failed to compute NDVI min/max diagnostics")
 
@@ -2373,6 +2384,7 @@ def _prepare_selected_period_artifacts(
             percentiles.getInfo() if hasattr(percentiles, "getInfo") else percentiles
         )
         logger.info("Zone NDVI percentiles: %s", percentile_info)
+        print("Zone NDVI percentiles:", percentile_info)
     except Exception:  # pragma: no cover - logging guard
         logger.exception("Failed to compute NDVI percentile diagnostics")
 
