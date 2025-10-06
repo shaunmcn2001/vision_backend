@@ -1695,7 +1695,12 @@ def _robust_thresholds(
         maxPixels=1e13,
         bestEffort=True,
     )
-    vals = ee.Dictionary(stats).values()
+    stats_dict = ee.Dictionary(stats)
+    band = "NDVI_mean"
+    keys = ee.List(pct_list).map(
+        lambda p: ee.String(band).cat("_p").cat(ee.Number(p).format())
+    )
+    vals = keys.map(lambda k: stats_dict.get(k))
     cond_has_vals = ee.List(vals).indexOf(None).eq(-1)
     numeric_vals = ee.List(vals).map(lambda v: ee.Number(v))
 
