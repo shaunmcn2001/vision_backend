@@ -1085,39 +1085,23 @@ def _build_composite_series(
 
 
 def _compute_ndvi(image: ee.Image) -> ee.Image:
-    bands = image.select(["B8", "B4"]).toFloat()
-    ndvi = bands.normalizedDifference(["B8", "B4"]).rename("NDVI")
-    band_names = getattr(image, "bandNames", None)
-    if callable(band_names):
-        try:
-            has_b8 = band_names().contains("B8")
-        except Exception:  # pragma: no cover - defensive guard for EE errors
-            has_b8 = False
-    else:
-        has_b8 = False
+    base = image
+    bands = base.select(["B8", "B4"]).toFloat()
+    ndvi = bands.normalizedDifference(["B8", "B4"]).rename("NDVI").toFloat()
 
-    fallback_mask = image.mask()
-    if hasattr(fallback_mask, "reduce"):
-        fallback_mask = fallback_mask.reduce(ee.Reducer.min())
+    ndvi_range_mask = ndvi.gt(0).And(ndvi.lt(1))
 
-    algorithms = getattr(ee, "Algorithms", None)
-    algorithms_if = getattr(algorithms, "If", None) if algorithms is not None else None
+    source_mask = bands.mask()
+    combined_mask = ndvi_range_mask
+    if source_mask is not None:
+        if hasattr(source_mask, "And"):
+            combined_mask = source_mask.And(ndvi_range_mask)
+        elif hasattr(ndvi_range_mask, "And"):
+            combined_mask = ndvi_range_mask.And(source_mask)
+        else:
+            combined_mask = source_mask
 
-    if algorithms_if is None:
-        def _local_if(condition, true_case, false_case):
-            return true_case if bool(condition) else false_case
-
-        chosen_mask = _local_if(has_b8, image.select("B8").mask(), fallback_mask)
-        single_mask = chosen_mask
-    else:
-        chosen_mask = algorithms_if(
-            has_b8,
-            image.select("B8").mask(),
-            fallback_mask,
-        )
-        single_mask = ee.Image(chosen_mask)
-
-    return ndvi.updateMask(single_mask)
+    return ndvi.updateMask(combined_mask)
 
 
 def _compute_ndre(image: ee.Image) -> ee.Image:
@@ -2192,15 +2176,36 @@ def _prepare_selected_period_artifacts(
         raise ValueError("No valid Sentinel-2 scenes were found for the selected months")
 
     ndvi_images = [_compute_ndvi(image) for _, image in composites]
-    ndvi_stats = dict(_ndvi_temporal_stats(ndvi_images))
+
+    try:
+        ndvi_collection = ee.ImageCollection(ndvi_images)
+    except Exception:
+        ndvi_collection = None
+
+    stats_source = ndvi_collection if ndvi_collection is not None else ndvi_images
+    ndvi_stats = dict(_ndvi_temporal_stats(stats_source))
+
+    if ndvi_collection is not None:
+        try:
+            valid_mask = ndvi_collection.count().gt(0)
+            mean_image = (
+                ndvi_collection.mean()
+                .toFloat()
+                .updateMask(valid_mask)
+                .clip(geometry)
+                .rename("NDVI_mean")
+            )
+            ndvi_stats["mean"] = mean_image
+        except Exception:  # pragma: no cover - logging guard
+            logger.exception("Failed to compute mean NDVI image from collection")
 
     diag_region = geometry
-    try:
-        collection = ee.ImageCollection(ndvi_images)
-        size_value = int(ee.Number(collection.size()).getInfo() or 0)
-        logger.info("Zone NDVI collection size: %s", size_value)
-    except Exception:  # pragma: no cover - logging guard
-        logger.exception("Failed to evaluate NDVI collection size for zone export")
+    if ndvi_collection is not None:
+        try:
+            size_value = int(ee.Number(ndvi_collection.size()).getInfo() or 0)
+            logger.info("Zone NDVI collection size: %s", size_value)
+        except Exception:  # pragma: no cover - logging guard
+            logger.exception("Failed to evaluate NDVI collection size for zone export")
 
     diag_kwargs = {
         "geometry": diag_region,
