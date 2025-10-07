@@ -2,32 +2,33 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
 import calendar
 import csv
 import io
 import json
 import logging
-import os
 import math
-from pathlib import Path
+import os
 import re
 import shutil
 import tempfile
 import zipfile
-from typing import Any, Dict, List, Mapping, Sequence, Tuple, Union
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any
 from urllib.request import urlopen
 
 import ee
 import numpy as np
 import rasterio
-from rasterio.features import shapes
 import shapefile
 from pyproj import CRS
+from rasterio.features import shapes
+from scipy import ndimage
 from shapely.geometry import mapping, shape
 from sklearn.cluster import KMeans
-from scipy import ndimage
 
 from app import gee
 from app.exports import sanitize_name
@@ -36,7 +37,6 @@ from app.utils.diag import Guard, PipelineError
 from app.utils.geometry import area_ha
 from app.utils.logging_colors import install_color_handler
 from app.utils.sanitization import sanitize_for_json
-
 
 logger = logging.getLogger(__name__)
 install_color_handler(logger)
@@ -178,7 +178,7 @@ def _as_lists(value: Any) -> Any:
     return value
 
 
-def _geometry_region(geometry: ee.Geometry) -> List[List[List[float]]]:
+def _geometry_region(geometry: ee.Geometry) -> list[list[list[float]]]:
     info = geometry.getInfo()
     if not info:
         raise ValueError("Unable to resolve geometry information for download")
@@ -392,7 +392,7 @@ def _assemble_zone_artifacts(
     thresholds: Sequence[float],
     kmeans_fallback_applied: bool,
     kmeans_cluster_centers: Sequence[float],
-) -> tuple[ZoneArtifacts, Dict[str, object]]:
+) -> tuple[ZoneArtifacts, dict[str, object]]:
     pixel_size_x = abs(transform.a)
     pixel_size_y = abs(transform.e)
     pixel_area = pixel_size_x * pixel_size_y
@@ -403,8 +403,8 @@ def _assemble_zone_artifacts(
 
     unique_zones = np.unique(classified_array[classified_array > 0])
 
-    records: List[Dict[str, object]] = []
-    zonal_stats: List[Dict[str, object]] = []
+    records: list[dict[str, object]] = []
+    zonal_stats: list[dict[str, object]] = []
     for geom, value in shapes(
         classified_array, mask=classified_array > 0, transform=transform
     ):
@@ -512,7 +512,7 @@ def _assemble_zone_artifacts(
         ZONE_PALETTE[: max(1, min(final_zone_count, len(ZONE_PALETTE)))]
     )
 
-    metadata: Dict[str, object] = {
+    metadata: dict[str, object] = {
         "percentile_thresholds": [float(value) for value in thresholds],
         "palette": palette,
         "zones": zonal_stats,
@@ -559,7 +559,7 @@ def _classify_local_zones(
     open_radius_m: float,
     close_radius_m: float,
     include_stats: bool,
-) -> tuple[ZoneArtifacts, Dict[str, object]]:
+) -> tuple[ZoneArtifacts, dict[str, object]]:
     with rasterio.open(ndvi_raster) as src:
         ndvi = src.read(1, masked=True)
         transform = src.transform
@@ -856,7 +856,7 @@ def _classify_local_zones(
     return artifacts, metadata
 
 
-def _ordered_months(months: Sequence[str]) -> List[str]:
+def _ordered_months(months: Sequence[str]) -> list[str]:
     unique: dict[str, datetime] = {}
     for raw in months:
         month_str = str(raw).strip()
@@ -884,10 +884,10 @@ def _month_range_dates(months: Sequence[str]) -> tuple[date, date]:
     return start_day, end_day
 
 
-def _months_from_dates(start_date: date, end_date: date) -> List[str]:
+def _months_from_dates(start_date: date, end_date: date) -> list[str]:
     if end_date < start_date:
         raise ValueError("end_date must be on or after start_date")
-    months: List[str] = []
+    months: list[str] = []
     cursor = date(start_date.year, start_date.month, 1)
     end_cursor = date(end_date.year, end_date.month, 1)
     while cursor <= end_cursor:
@@ -933,7 +933,7 @@ def resolve_export_bucket(explicit: str | None = None) -> str:
     return bucket
 
 
-def _resolve_geometry(aoi: Union[dict, ee.Geometry]) -> ee.Geometry:
+def _resolve_geometry(aoi: dict | ee.Geometry) -> ee.Geometry:
     try:
         geometry_type = ee.Geometry
         if isinstance(geometry_type, type) and isinstance(aoi, geometry_type):
@@ -1088,10 +1088,10 @@ def _build_composite_series(
     start_date: date,
     end_date: date,
     cloud_prob_max: int,
-) -> Tuple[List[tuple[str, ee.Image]], List[str], Dict[str, object]]:
-    composites: List[tuple[str, ee.Image]] = []
-    skipped: List[str] = []
-    metadata: Dict[str, object] = {}
+) -> tuple[list[tuple[str, ee.Image]], list[str], dict[str, object]]:
+    composites: list[tuple[str, ee.Image]] = []
+    skipped: list[str] = []
+    metadata: dict[str, object] = {}
     ordered = _ordered_months(months)
     month_span = len(ordered)
 
@@ -1443,7 +1443,7 @@ def _pixel_count(
 
 def _percentile_thresholds(
     reducer_dict: Mapping[str, float], percentiles: Sequence[float], label: str
-) -> List[float]:
+) -> list[float]:
     """
     Build the list of percentile thresholds for NDVI zoning.
 
@@ -1465,8 +1465,8 @@ def _percentile_thresholds(
         raise ValueError("percentiles must be a non-empty sequence")
 
     label_prefix = f"{label}_" if label else ""
-    cut_lookup: Dict[int, float] = {}
-    percentile_lookup: List[tuple[float, float]] = []
+    cut_lookup: dict[int, float] = {}
+    percentile_lookup: list[tuple[float, float]] = []
 
     cut_pattern = re.compile(r"^cut_(\d+)$")
     pct_pattern = re.compile(r"^p(\d+(?:_\d+)*)$")
@@ -1500,7 +1500,7 @@ def _percentile_thresholds(
 
     percentile_lookup.sort(key=lambda item: item[0])
 
-    thresholds: List[float] = []
+    thresholds: list[float] = []
     remaining_pct = percentile_lookup
     for ordinal, pct in enumerate(percentiles, start=1):
         try:
@@ -1529,7 +1529,7 @@ def _percentile_thresholds(
 
 def _classify_by_percentiles(
     image: ee.Image, geometry: ee.Geometry, n_classes: int
-) -> tuple[ee.Image, List[float]]:
+) -> tuple[ee.Image, list[float]]:
     """
     Classify an NDVI image into percentile-based zones.
 
@@ -1567,7 +1567,7 @@ def _classify_by_percentiles(
     reducer_info = reducer_dict.getInfo() or {}
 
     # Extract thresholds with robust handling of bare/prefixed keys
-    thresholds: List[float]
+    thresholds: list[float]
     try:
         thresholds = _percentile_thresholds(
             reducer_info, percentile_sequence, band_label
@@ -1575,7 +1575,7 @@ def _classify_by_percentiles(
     except ValueError as exc:
         raise ValueError(STABILITY_MASK_EMPTY_ERROR) from exc
 
-    adjusted_thresholds: List[float] = []
+    adjusted_thresholds: list[float] = []
     previous = -math.inf
     for raw_value in thresholds:
         try:
@@ -1688,10 +1688,10 @@ def _apply_cleanup(
 @dataclass
 class CleanupResult:
     image: ee.Image
-    applied_operations: Dict[str, bool]
-    executed_operations: Dict[str, bool]
+    applied_operations: dict[str, bool]
+    executed_operations: dict[str, bool]
     fallback_applied: bool
-    fallback_removed: List[str]
+    fallback_removed: list[str]
 
 
 def _unique_zone_count(image: ee.Image, geometry: ee.Geometry) -> int:
@@ -1749,7 +1749,7 @@ def _apply_cleanup_with_fallback_tracking(
 ) -> CleanupResult:
     mmu_value = max(float(min_mapping_unit_ha), 0.0)
 
-    applied_operations: Dict[str, bool] = {
+    applied_operations: dict[str, bool] = {
         "smooth": bool(smooth_radius_m > 0),
         "open": bool(open_radius_m > 0),
         "close": bool(close_radius_m > 0),
@@ -1757,9 +1757,9 @@ def _apply_cleanup_with_fallback_tracking(
     }
     executed_operations = dict(applied_operations)
 
-    stage_names: List[str] = []
-    stage_images: List[ee.Image] = []
-    stage_counts: List[int] = []
+    stage_names: list[str] = []
+    stage_images: list[ee.Image] = []
+    stage_counts: list[int] = []
 
     def _append_stage(name: str, image: ee.Image) -> None:
         stage_names.append(name)
@@ -1825,7 +1825,7 @@ def _apply_cleanup_with_fallback_tracking(
         )
         _append_stage("min_mapping_unit", mmu_image)
 
-    fallback_removed: List[str] = []
+    fallback_removed: list[str] = []
     final_index = len(stage_images) - 1
     while final_index > 0 and stage_counts[final_index] < n_classes:
         stage_name = stage_names[final_index]
@@ -1953,8 +1953,8 @@ def _prepare_vectors(
 def _collect_stats_images(
     ndvi_stats: Mapping[str, ee.Image],
     extra_means: Mapping[str, ee.Image] | None = None,
-) -> Dict[str, ee.Image]:
-    stats: Dict[str, ee.Image] = {
+) -> dict[str, ee.Image]:
+    stats: dict[str, ee.Image] = {
         "NDVI_mean": ndvi_stats["mean"],
         "NDVI_median": ndvi_stats["median"],
         "NDVI_stdDev": ndvi_stats["std"],
@@ -2049,7 +2049,7 @@ def _build_percentile_zones(
     open_radius_m: float,
     close_radius_m: float,
     min_mapping_unit_ha: float,
-) -> tuple[ee.Image, List[float]]:
+) -> tuple[ee.Image, list[float]]:
     # Cap NDVI for percentile breaks only (0..0.6)
     pct_source = ndvi_stats["mean"].clamp(NDVI_PERCENTILE_MIN, NDVI_PERCENTILE_MAX)
 
@@ -2165,7 +2165,7 @@ def _rank_zones(
 def _build_ndvi_feature_images(
     ndvi_images: Sequence[ee.Image] | ee.ImageCollection,
     ndvi_stats: Mapping[str, ee.Image],
-) -> Dict[str, ee.Image]:
+) -> dict[str, ee.Image]:
     base_collection = _as_image_collection(ndvi_images)
 
     def _prepare(image: ee.Image) -> ee.Image:
@@ -2219,7 +2219,7 @@ def _build_ndvi_kmeans_zones(
     min_mapping_unit_ha: float,
     sample_size: int,
     rank_by_mean: bool = True,
-) -> tuple[ee.Image, Dict[str, ee.Image], CleanupResult]:
+) -> tuple[ee.Image, dict[str, ee.Image], CleanupResult]:
     stability = ndvi_stats["stability"]
     feature_images = _build_ndvi_feature_images(ndvi_images, ndvi_stats)
     stack = ee.Image.cat(
@@ -2268,7 +2268,7 @@ def _build_multiindex_zones(
     close_radius_m: float,
     min_mapping_unit_ha: float,
     sample_size: int,
-) -> tuple[ee.Image, Dict[str, ee.Image], CleanupResult]:
+) -> tuple[ee.Image, dict[str, ee.Image], CleanupResult]:
     indices = {
         "NDVI": [
             image.normalizedDifference(["B8", "B4"]).rename("NDVI")
@@ -2296,7 +2296,7 @@ def _build_multiindex_zones(
         ],
     }
 
-    mean_images: Dict[str, ee.Image] = {}
+    mean_images: dict[str, ee.Image] = {}
     for name, stack in indices.items():
         collection = ee.ImageCollection(stack)
         mean_images[name] = collection.mean().rename(f"{name}_mean")
@@ -2346,9 +2346,9 @@ def _build_multiindex_zones_with_features(
     close_radius_m: float,
     min_mapping_unit_ha: float,
     sample_size: int,
-) -> tuple[ee.Image, Dict[str, ee.Image], CleanupResult]:
+) -> tuple[ee.Image, dict[str, ee.Image], CleanupResult]:
     stability = ndvi_stats["stability"]
-    masked_features: Dict[str, ee.Image] = {}
+    masked_features: dict[str, ee.Image] = {}
     for name, image in feature_images.items():
         masked_features[name] = image.updateMask(stability)
 
@@ -2384,7 +2384,7 @@ def _build_multiindex_zones_with_features(
 
 
 def _prepare_selected_period_artifacts(
-    aoi_geojson: Union[dict, ee.Geometry],
+    aoi_geojson: dict | ee.Geometry,
     *,
     geometry: ee.Geometry,
     working_dir: Path,
@@ -2405,7 +2405,7 @@ def _prepare_selected_period_artifacts(
     sample_size: int,
     include_stats: bool,
     guard: Guard | None = None,
-) -> tuple[ZoneArtifacts, Dict[str, object]]:
+) -> tuple[ZoneArtifacts, dict[str, object]]:
     _ = (
         cv_mask_threshold,
         apply_stability_mask,
@@ -2825,7 +2825,7 @@ def _prepare_selected_period_artifacts(
             )
 
         mmu_was_applied = mmu_value > 0 and mmu_applied
-        metadata: Dict[str, object] = {
+        metadata: dict[str, object] = {
             "used_months": ordered_months,
             "skipped_months": skipped_months,
             "min_mapping_unit_applied": mmu_was_applied,
@@ -3130,7 +3130,7 @@ def _prepare_selected_period_artifacts(
 
 
 def build_zone_artifacts(
-    aoi_geojson: Union[dict, ee.Geometry],
+    aoi_geojson: dict | ee.Geometry,
     *,
     months: Sequence[str],
     cloud_prob_max: int = DEFAULT_CLOUD_PROB_MAX,
@@ -3204,7 +3204,7 @@ def start_zone_exports(
     bucket: str,
     include_stats: bool = True,
     prefix_override: str | None = None,
-) -> Dict[str, ee.batch.Task]:
+) -> dict[str, ee.batch.Task]:
     raise RuntimeError(
         "Cloud exports are not supported for locally generated zone artifacts"
     )
@@ -3216,16 +3216,16 @@ def start_zone_exports_drive(
     folder: str,
     prefix: str,
     include_stats: bool = True,
-) -> Dict[str, ee.batch.Task]:
+) -> dict[str, ee.batch.Task]:
     raise RuntimeError(
         "Drive exports are not supported for locally generated zone artifacts"
     )
 
 
-def _task_payload(task: ee.batch.Task | None) -> Dict[str, object]:
+def _task_payload(task: ee.batch.Task | None) -> dict[str, object]:
     if task is None:
         return {}
-    payload: Dict[str, object] = {"id": getattr(task, "id", None)}
+    payload: dict[str, object] = {"id": getattr(task, "id", None)}
     try:
         status = task.status() or {}
     except Exception:  # pragma: no cover
@@ -3396,7 +3396,7 @@ def export_selected_period_zones(
         }
     )
 
-    result: Dict[str, object] = {
+    result: dict[str, object] = {
         "paths": {
             "raster": artifacts.raster_path,
             "mean_ndvi": artifacts.mean_ndvi_path,
