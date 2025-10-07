@@ -290,10 +290,10 @@ def create_production_zones(
         )
     except PipelineError as exc:
         logger.warning(
-            "Pipeline error for AOI %s (target %s): %s",
+            "Pipeline error: %s (aoi=%s target=%s)",
+            exc,
             request.aoi_name,
             request.export_target,
-            exc,
             exc_info=True,
         )
         raise HTTPException(
@@ -323,6 +323,9 @@ def create_production_zones(
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    diagnostics_payload = result.get("diagnostics") if diagnostics else None
+    if diagnostics_payload is not None:
+        result.pop("diagnostics", None)
     result.pop("artifacts", None)
     metadata = result.get("metadata", {}) or {}
     used_months: List[str] = metadata.get("used_months") or request.months
@@ -346,6 +349,9 @@ def create_production_zones(
         "tasks": result.get("tasks", {}),
         "metadata": metadata,
     }
+
+    if diagnostics and diagnostics_payload is not None:
+        response["diagnostics"] = diagnostics_payload
 
     if palette is not None:
         response["palette"] = palette
