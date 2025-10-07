@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 import calendar
 import csv
 import io
+import json
 import logging
 import os
 import math
@@ -31,11 +32,14 @@ from scipy import ndimage
 from app import gee
 from app.exports import sanitize_name
 from app.services.image_stats import temporal_stats
+from app.utils.diag import Guard, PipelineError
 from app.utils.geometry import area_ha
+from app.utils.logging_colors import install_color_handler
 from app.utils.sanitization import sanitize_for_json
 
 
 logger = logging.getLogger(__name__)
+install_color_handler(logger)
 
 
 DEFAULT_CLOUD_PROB_MAX = 40
@@ -2343,6 +2347,7 @@ def _prepare_selected_period_artifacts(
     method: str,
     sample_size: int,
     include_stats: bool,
+    guard: Guard | None = None,
 ) -> tuple[ZoneArtifacts, Dict[str, object]]:
     _ = (
         cv_mask_threshold,
@@ -2352,6 +2357,7 @@ def _prepare_selected_period_artifacts(
         method,
         sample_size,
     )
+    diag_guard = guard
     ordered_months = _ordered_months(months)
     composites, skipped_months, composite_metadata = _build_composite_series(
         geometry,
@@ -2360,12 +2366,61 @@ def _prepare_selected_period_artifacts(
         end_date,
         cloud_prob_max,
     )
+    if diag_guard is not None:
+        image_count = len(composites)
+        diag_guard.record("monthly_stack", images=image_count)
+        logger.info("zones:monthly_stack images=%s", image_count)
+        diag_guard.require(
+            image_count > 0,
+            "E_NO_MONTHS",
+            "No monthly composites built.",
+            "Widen dates; relax clouds.",
+            images=image_count,
+        )
     if not composites:
         raise ValueError(
             "No valid Sentinel-2 scenes were found for the selected months"
         )
 
     composite_images = [image for _, image in composites]
+
+    if diag_guard is not None and composite_images:
+        try:
+            first_image = _compute_ndvi(composite_images[0])
+            first_stats = first_image.reduceRegion(
+                reducer=ee.Reducer.minMax(),
+                geometry=geometry,
+                scale=DEFAULT_SCALE,
+                maxPixels=gee.MAX_PIXELS,
+                bestEffort=True,
+                tileScale=4,
+            )
+            first_info = (
+                first_stats.getInfo()
+                if hasattr(first_stats, "getInfo")
+                else first_stats
+            )
+        except Exception:
+            first_info = {}
+        ndvi_min = None
+        ndvi_max = None
+        if isinstance(first_info, Mapping):
+            ndvi_min = first_info.get("NDVI_min")
+            ndvi_max = first_info.get("NDVI_max")
+            if ndvi_min is None:
+                ndvi_min = first_info.get("NDVI")
+            if ndvi_max is None:
+                ndvi_max = first_info.get("NDVI")
+        diag_guard.record("first_month_ndvi", ndvi_min=ndvi_min, ndvi_max=ndvi_max)
+        logger.info("zones:first_month_ndvi min=%s max=%s", ndvi_min, ndvi_max)
+        diag_guard.require(
+            ndvi_min is not None and ndvi_max is not None,
+            "E_FIRST_MONTH_EMPTY",
+            "First month NDVI has no valid pixels.",
+            "Relax cloud mask.",
+            ndvi_min=ndvi_min,
+            ndvi_max=ndvi_max,
+        )
 
     ndvi_collection: ee.ImageCollection | None = None
     try:
@@ -2407,6 +2462,49 @@ def _prepare_selected_period_artifacts(
             ndvi_stats["mean"] = ndvi_stats["mean"].toFloat().clip(geometry)
         except Exception:  # pragma: no cover - logging guard
             logger.exception("Failed to clip fallback NDVI mean image")
+
+    if diag_guard is not None:
+        mean_image = ndvi_stats.get("mean")
+        mm_min = None
+        mm_max = None
+        try:
+            if mean_image is not None:
+                mm_stats = mean_image.reduceRegion(
+                    reducer=ee.Reducer.minMax(),
+                    geometry=geometry,
+                    scale=DEFAULT_SCALE,
+                    maxPixels=gee.MAX_PIXELS,
+                    bestEffort=True,
+                    tileScale=4,
+                )
+                mm_info = (
+                    mm_stats.getInfo() if hasattr(mm_stats, "getInfo") else mm_stats
+                )
+                if isinstance(mm_info, Mapping):
+                    mm_min = mm_info.get("NDVI_min")
+                    mm_max = mm_info.get("NDVI_max")
+        except Exception:  # pragma: no cover - diagnostics guard
+            mm_min = None
+            mm_max = None
+        diag_guard.record("ndvi_stats", mean_min=mm_min, mean_max=mm_max)
+        logger.info("zones:mean_ndvi min=%s max=%s", mm_min, mm_max)
+        diag_guard.require(
+            mm_min is not None and mm_max is not None,
+            "E_MEAN_EMPTY",
+            "Mean NDVI empty.",
+            "Check masks/date coverage.",
+            mean_min=mm_min,
+            mean_max=mm_max,
+        )
+        if mm_min is not None and mm_max is not None:
+            diag_guard.require(
+                mm_min < mm_max,
+                "E_MEAN_CONSTANT",
+                "Mean NDVI constant.",
+                "Fix NDVI bands/float; ensure variability.",
+                mean_min=mm_min,
+                mean_max=mm_max,
+            )
 
     diag_region = geometry
     if ndvi_collection is not None:
@@ -2483,6 +2581,78 @@ def _prepare_selected_period_artifacts(
         stability_image = ee.Image(1)
     ndvi_stats["stability"] = stability_image
 
+    if diag_guard is not None:
+
+        def _extract_count(payload: Mapping[str, object] | None) -> int:
+            if not isinstance(payload, Mapping):
+                return 0
+            for key in ("NDVI", "NDVI_mask"):
+                value = payload.get(key)
+                if value is not None:
+                    try:
+                        return int(value)
+                    except Exception:
+                        continue
+            values = [payload.get(key) for key in payload]
+            for candidate in values:
+                if candidate is not None:
+                    try:
+                        return int(candidate)
+                    except Exception:
+                        continue
+            return 0
+
+        vb_cnt = 0
+        va_cnt = 0
+        try:
+            base_mask = ndvi_stats["mean"].mask()
+            vb_stats = base_mask.reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=geometry,
+                scale=DEFAULT_SCALE,
+                maxPixels=gee.MAX_PIXELS,
+                bestEffort=True,
+                tileScale=4,
+            )
+            vb_info = vb_stats.getInfo() if hasattr(vb_stats, "getInfo") else vb_stats
+            vb_cnt = _extract_count(vb_info)
+        except Exception:
+            vb_cnt = 0
+        try:
+            stable_mask = ndvi_stats["mean"].updateMask(stability_image).mask()
+            va_stats = stable_mask.reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=geometry,
+                scale=DEFAULT_SCALE,
+                maxPixels=gee.MAX_PIXELS,
+                bestEffort=True,
+                tileScale=4,
+            )
+            va_info = va_stats.getInfo() if hasattr(va_stats, "getInfo") else va_stats
+            va_cnt = _extract_count(va_info)
+        except Exception:
+            va_cnt = 0
+        diag_guard.record(
+            "stability",
+            cv_thresh=cv_mask_threshold,
+            valid_before=vb_cnt,
+            valid_after=va_cnt,
+        )
+        logger.info(
+            "zones:stability cv=%.3f before=%s after=%s",
+            cv_mask_threshold,
+            vb_cnt,
+            va_cnt,
+        )
+        diag_guard.require(
+            va_cnt > 0,
+            "E_STABILITY_EMPTY",
+            "All pixels removed by stability mask.",
+            "Increase CV; relax mask; widen dates.",
+            before=vb_cnt,
+            after=va_cnt,
+        )
+
     mean_image = ndvi_stats["mean"].rename("NDVI_mean")
 
     workdir = _ensure_working_directory(working_dir)
@@ -2513,6 +2683,26 @@ def _prepare_selected_period_artifacts(
             include_stats=include_stats,
         )
 
+        percentile_breaks: list[float] | None = None
+        raw_breaks = local_metadata.get("percentile_thresholds")
+        if isinstance(raw_breaks, Sequence):
+            percentile_breaks = [float(value) for value in raw_breaks]
+        if diag_guard is not None:
+            diag_guard.record(
+                "classification",
+                method=method,
+                breaks=percentile_breaks,
+            )
+            logger.info("zones:classification method=%s", method)
+            diag_guard.require(
+                percentile_breaks is not None
+                and len(percentile_breaks) == max(n_classes - 1, 0),
+                "E_BREAKS_COLLAPSED",
+                "Quantile breaks collapsed.",
+                "Switch to k-means; reduce smoothing/MMU.",
+                breaks=percentile_breaks,
+            )
+
         mmu_was_applied = mmu_value > 0 and mmu_applied
         metadata: Dict[str, object] = {
             "used_months": ordered_months,
@@ -2529,6 +2719,33 @@ def _prepare_selected_period_artifacts(
         metadata["downloaded_mean_ndvi"] = str(ndvi_path)
         metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
 
+        area_stats = (
+            local_metadata.get("zones") if isinstance(local_metadata, Mapping) else None
+        )
+        area_list = area_stats if isinstance(area_stats, list) else []
+        if diag_guard is not None:
+            diag_guard.record(
+                "cartography",
+                open_m=open_radius_m,
+                close_m=close_radius_m,
+                mmu_ha=mmu_value,
+                area_stats=area_stats,
+            )
+            logger.info(
+                "zones:cartography open=%s close=%s mmu_ha=%s polys=%s",
+                open_radius_m,
+                close_radius_m,
+                mmu_value,
+                len(area_list),
+            )
+            diag_guard.require(
+                bool(area_list),
+                "E_VECT_EMPTY",
+                "Vectorization produced no polygons.",
+                "Loosen MMU; reduce smoothing.",
+                area_stats=area_stats,
+            )
+
         return artifacts, metadata
 
     if method == "ndvi_kmeans":
@@ -2543,6 +2760,11 @@ def _prepare_selected_period_artifacts(
             min_mapping_unit_ha=mmu_value,
             sample_size=sample_size,
         )
+
+        if diag_guard is not None:
+            diag_guard.record("classification", method=method, breaks=None)
+            logger.info("zones:classification method=%s", method)
+            logger.info("zones:classification kmeans seed=42")
 
         zone_raster_path = workdir / "zones_classified.tif"
         zone_export = _download_image_to_path(zone_image, geometry, zone_raster_path)
@@ -2618,6 +2840,33 @@ def _prepare_selected_period_artifacts(
         metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
         metadata["zone_raster_export_task"] = _task_payload(zone_export.task)
 
+        area_stats = (
+            local_metadata.get("zones") if isinstance(local_metadata, Mapping) else None
+        )
+        area_list = area_stats if isinstance(area_stats, list) else []
+        if diag_guard is not None:
+            diag_guard.record(
+                "cartography",
+                open_m=open_radius_m,
+                close_m=close_radius_m,
+                mmu_ha=mmu_value,
+                area_stats=area_stats,
+            )
+            logger.info(
+                "zones:cartography open=%s close=%s mmu_ha=%s polys=%s",
+                open_radius_m,
+                close_radius_m,
+                mmu_value,
+                len(area_list),
+            )
+            diag_guard.require(
+                bool(area_list),
+                "E_VECT_EMPTY",
+                "Vectorization produced no polygons.",
+                "Loosen MMU; reduce smoothing.",
+                area_stats=area_stats,
+            )
+
         return artifacts, metadata
 
     # Multi-index K-means branch
@@ -2650,6 +2899,11 @@ def _prepare_selected_period_artifacts(
             min_mapping_unit_ha=mmu_value,
             sample_size=sample_size,
         )
+
+    if diag_guard is not None:
+        diag_guard.record("classification", method=method, breaks=None)
+        logger.info("zones:classification method=%s", method)
+        logger.info("zones:classification kmeans seed=42")
 
     zone_raster_path = workdir / "zones_classified.tif"
     zone_export = _download_image_to_path(
@@ -2723,6 +2977,33 @@ def _prepare_selected_period_artifacts(
     metadata["downloaded_zone_raster"] = str(zone_raster_path)
     metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
     metadata["zone_raster_export_task"] = _task_payload(zone_export.task)
+
+    area_stats = (
+        local_metadata.get("zones") if isinstance(local_metadata, Mapping) else None
+    )
+    area_list = area_stats if isinstance(area_stats, list) else []
+    if diag_guard is not None:
+        diag_guard.record(
+            "cartography",
+            open_m=open_radius_m,
+            close_m=close_radius_m,
+            mmu_ha=mmu_value,
+            area_stats=area_stats,
+        )
+        logger.info(
+            "zones:cartography open=%s close=%s mmu_ha=%s polys=%s",
+            open_radius_m,
+            close_radius_m,
+            mmu_value,
+            len(area_list),
+        )
+        diag_guard.require(
+            bool(area_list),
+            "E_VECT_EMPTY",
+            "Vectorization produced no polygons.",
+            "Loosen MMU; reduce smoothing.",
+            area_stats=area_stats,
+        )
 
     return artifacts, metadata
 
@@ -2868,10 +3149,51 @@ def export_selected_period_zones(
     method: str | None = None,
     diagnostics: bool = False,
 ):
+    g = Guard()
+    logger.info(
+        "zones:start aoi=%s n_classes=%s diagnostics=%s",
+        aoi_name or "NA",
+        n_classes,
+        diagnostics,
+    )
     working_dir = _ensure_working_directory(None)
 
     aoi = _to_ee_geometry(aoi_geojson)
     geometry = geometry or aoi
+    area_m2: float | None = None
+    try:
+        area_value = geometry.area(maxError=1)
+        if hasattr(area_value, "getInfo"):
+            area_m2 = float(ee.Number(area_value).getInfo() or 0)
+        else:
+            area_m2 = float(area_value)
+    except Exception:
+        try:
+            if isinstance(aoi_geojson, dict):
+                area_m2 = float(area_ha(aoi_geojson) * 10_000)
+        except Exception:
+            area_m2 = None
+    g.record(
+        "inputs",
+        area_m2=area_m2,
+        start=str(start_date) if start_date is not None else None,
+        end=str(end_date) if end_date is not None else None,
+        n_classes=n_classes,
+    )
+    logger.info(
+        "zones:inputs area_m2=%.2f start=%s end=%s n=%s",
+        area_m2 if area_m2 is not None else -1,
+        start_date,
+        end_date,
+        n_classes,
+    )
+    g.require(
+        bool(area_m2) and area_m2 > 1000,
+        "E_INPUT_AOI",
+        "AOI is empty or too small.",
+        "Fix geometry/CRS; buffer.",
+        area_m2=area_m2,
+    )
     if start_date is not None and end_date is not None and end_date < start_date:
         raise ValueError("end_date must be on or after start_date")
 
@@ -2910,27 +3232,31 @@ def export_selected_period_zones(
     if method_selection not in {"ndvi_percentiles", "multiindex_kmeans", "ndvi_kmeans"}:
         raise ValueError("Unsupported method for production zones")
 
-    artifacts, metadata = _prepare_selected_period_artifacts(
-        aoi_geojson,
-        geometry=geometry,
-        working_dir=working_dir,
-        months=ordered_months,
-        start_date=start_date,
-        end_date=end_date,
-        cloud_prob_max=cloud_prob_max,
-        n_classes=n_classes,
-        cv_mask_threshold=cv_mask_threshold,
-        apply_stability_mask=apply_stability_mask,
-        min_mapping_unit_ha=mmu_ha,
-        smooth_radius_m=smooth_radius_m,
-        open_radius_m=open_radius_m,
-        close_radius_m=close_radius_m,
-        simplify_tol_m=simplify_tol_m,
-        simplify_buffer_m=simplify_buffer_m,
-        method=method_selection,
-        sample_size=DEFAULT_SAMPLE_SIZE,
-        include_stats=include_stats_flag,
-    )
+    try:
+        artifacts, metadata = _prepare_selected_period_artifacts(
+            aoi_geojson,
+            geometry=geometry,
+            working_dir=working_dir,
+            months=ordered_months,
+            start_date=start_date,
+            end_date=end_date,
+            cloud_prob_max=cloud_prob_max,
+            n_classes=n_classes,
+            cv_mask_threshold=cv_mask_threshold,
+            apply_stability_mask=apply_stability_mask,
+            min_mapping_unit_ha=mmu_ha,
+            smooth_radius_m=smooth_radius_m,
+            open_radius_m=open_radius_m,
+            close_radius_m=close_radius_m,
+            simplify_tol_m=simplify_tol_m,
+            simplify_buffer_m=simplify_buffer_m,
+            method=method_selection,
+            sample_size=DEFAULT_SAMPLE_SIZE,
+            include_stats=include_stats_flag,
+            guard=g,
+        )
+    except PipelineError:
+        raise
 
     metadata = dict(metadata)
     metadata["zone_method"] = method_selection
@@ -2976,5 +3302,15 @@ def export_selected_period_zones(
     export_target = (export_target or "zip").strip().lower()
     if export_target not in {"zip", "local"}:
         raise ValueError("Only local zone exports are supported in this workflow")
+
+    diag = g.diagnostics_payload()
+    if diagnostics:
+        result = dict(result)
+        result["ok"] = True
+        result["diagnostics"] = diag
+        try:
+            logger.debug("zones:diagnostics payload=%s", json.dumps(diag))
+        except Exception:  # pragma: no cover - diagnostics logging guard
+            logger.debug("zones:diagnostics payload serialization failed")
 
     return result
