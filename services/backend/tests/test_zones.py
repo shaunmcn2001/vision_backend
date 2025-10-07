@@ -79,7 +79,13 @@ def test_compute_ndvi_preserves_source_mask(monkeypatch) -> None:
             return self
 
     class FakeMask:
-        pass
+        def __init__(self, label: str):
+            self.label = label
+            self.and_args: list["FakeMask"] = []
+
+        def And(self, other: "FakeMask"):
+            self.and_args.append(other)
+            return self
 
     class FakeAddResult:
         def __init__(self, parent: "FakeBands"):
@@ -125,15 +131,18 @@ def test_compute_ndvi_preserves_source_mask(monkeypatch) -> None:
 
     class FakeImage:
         def __init__(self):
-            self.mask_obj = FakeMask()
+            self.mask_obj = FakeMask("image")
             self.ndvi_band = FakeNdviBand()
             self.selected: list[str] = []
             self.bands: dict[str, FakeBands] = {}
             self.mask_calls = 0
+            self.band_masks: dict[str, FakeMask] = {}
 
         def select(self, band: str):
             self.selected.append(band)
-            band_obj = FakeBands(band, self.mask_obj, self.ndvi_band)
+            band_mask = FakeMask(band)
+            self.band_masks[band] = band_mask
+            band_obj = FakeBands(band, band_mask, self.ndvi_band)
             self.bands[band] = band_obj
             return band_obj
 
@@ -152,11 +161,11 @@ def test_compute_ndvi_preserves_source_mask(monkeypatch) -> None:
     assert fake_image.bands["B8"].add_args == ["B4"]
     assert fake_image.bands["B8"].add_constants == [1e-6]
     assert fake_image.bands["B8"].divide_args
-    assert fake_image.mask_calls == 1
+    assert fake_image.mask_calls == 0
     assert fake_image.ndvi_band.renamed == "NDVI"
-    assert fake_image.ndvi_band.update_mask_arg is fake_image.mask_obj
+    assert fake_image.ndvi_band.update_mask_arg is fake_image.bands["B8"].mask_obj
+    assert fake_image.bands["B8"].mask_obj.and_args == [fake_image.bands["B4"].mask_obj]
     assert result is fake_image.ndvi_band
-
 
 
 def test_download_image_to_path_handles_zipped_payload(

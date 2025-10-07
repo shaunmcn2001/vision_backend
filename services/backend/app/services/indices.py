@@ -52,12 +52,11 @@ def _normalized_difference(band_pair: Tuple[str, str], name: str) -> IndexComput
 
 
 def compute_ndvi(img: ee.Image) -> ee.Image:
-    # Sentinel-2 SR Harmonized: use B8 (NIR) and B4 (Red). Cast to float FIRST.
     b8 = img.select("B8").toFloat()
     b4 = img.select("B4").toFloat()
     ndvi = b8.subtract(b4).divide(b8.add(b4).add(1e-6)).rename("NDVI")
-    # Preserve the upstream mask (e.g., from cloud/shadow filtering)
-    return ndvi.updateMask(img.mask())
+    # Use a single-band mask compatible with 1-band NDVI
+    return ndvi.updateMask(b8.mask().And(b4.mask()))
 
 
 def _compute_evi(image: ee.Image, params: Mapping[str, Any]) -> ee.Image:
