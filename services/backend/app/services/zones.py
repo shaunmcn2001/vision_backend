@@ -2778,6 +2778,7 @@ def export_selected_period_zones(
     include_stats: bool | None = None,
     apply_stability_mask: bool = True,
     method: str | None = None,
+    diagnostics: bool = False,
 ):
     working_dir = _ensure_working_directory(None)
 

@@ -6,9 +6,19 @@ import logging
 from datetime import date, datetime
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, root_validator, validator
 from shapely.geometry import shape
+
+try:
+    from app.utils.diag import PipelineError  # structured pipeline errors
+except Exception:  # defensive shim; do not break if helper not present
+    class PipelineError(Exception):
+        def __init__(self, code: str, msg: str, hints: str | None = None, ctx: dict | None = None):
+            super().__init__(msg)
+            self.code = code
+            self.hints = hints
+            self.ctx = ctx or {}
 
 from app.services import zones as zone_service
 from app.utils.sanitization import sanitize_for_json
@@ -219,7 +229,7 @@ class ProductionZonesRequest(_BaseAOIRequest):
 
 
 @router.post("/production")
-def create_production_zones(request: ProductionZonesRequest):
+def create_production_zones(request: ProductionZonesRequest, diagnostics: bool = Query(False)):
     resolved_bucket: Optional[str] = request.gcs_bucket
     if request.export_target == "gcs":
         resolved_bucket = (
@@ -258,7 +268,19 @@ def create_production_zones(request: ProductionZonesRequest):
             gcs_prefix=request.gcs_prefix,
             include_stats=request.include_zonal_stats,
             apply_stability_mask=request.apply_stability_mask,
+            diagnostics=diagnostics,
         )
+    except PipelineError as exc:
+        logger.warning(
+            "Pipeline error for AOI %s (target %s): %s",
+            request.aoi_name, request.export_target, exc, exc_info=True,
+        )
+        raise HTTPException(status_code=422, detail={
+            "code": getattr(exc, "code", "E_PIPELINE"),
+            "message": str(exc),
+            "hints": getattr(exc, "hints", None),
+            "context": getattr(exc, "ctx", {}),
+        }) from exc
     except ValueError as exc:
         logger.warning(
             "Zone production request validation failed for AOI %s (target %s): %s",
