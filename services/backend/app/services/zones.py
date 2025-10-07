@@ -1190,7 +1190,7 @@ def compute_ndvi(img: ee.Image) -> ee.Image:
     b8 = img.select("B8").toFloat()
     b4 = img.select("B4").toFloat()
     ndvi = b8.subtract(b4).divide(b8.add(b4).add(1e-6)).rename("NDVI")
-    return ndvi.updateMask(img.mask())
+    return ndvi.updateMask(b8.mask().And(b4.mask()))
 
 
 # --- Adaptive monthly composite ---------------------------------------------
