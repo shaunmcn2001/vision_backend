@@ -621,6 +621,7 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
         artifacts = result.get("artifacts")
         metadata = result.get("metadata", {}) or {}
         prefix = result.get("prefix") or prefix
+        diagnostics_payload = result.get("diagnostics")
     except Exception as exc:
         logger.exception(
             "Failed to build zone artifacts for job %s (AOI %s): %s",
@@ -643,6 +644,8 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
         job.zone_state.error = None
         job.zone_state.prefix = prefix
         job.zone_state.metadata = metadata  # type: ignore[attr-defined]
+        if diagnostics_payload:
+            job.zone_state.metadata["diagnostics"] = diagnostics_payload
         job.touch()
 
 
@@ -760,6 +763,22 @@ def _download_zone_artifacts(
         files.append((shapefile_zip_path, shapefile_zip_name))
     if stats_name and stats_path:
         files.append((stats_path, stats_name))
+
+    diagnostics_payload = None
+    if job.zone_state and isinstance(job.zone_state.metadata, dict):
+        diagnostics_payload = job.zone_state.metadata.get("diagnostics")
+    if diagnostics_payload:
+        try:
+            diag_dir = temp_dir / "diagnostics"
+            diag_dir.mkdir(parents=True, exist_ok=True)
+            diag_path = diag_dir / "diagnostics.json"
+            diag_path.write_text(
+                json.dumps(diagnostics_payload, ensure_ascii=False, indent=2)
+            )
+            files.append((diag_path, "diagnostics/diagnostics.json"))
+            logger.info("zones:export added diagnostics.json to zip")
+        except Exception as exc:
+            logger.warning("zones:export diagnostics.json failed: %s", exc)
 
     paths = {
         "raster": raster_name,
