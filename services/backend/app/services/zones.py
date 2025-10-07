@@ -987,11 +987,8 @@ def _mask_sentinel2_scene(image: ee.Image, cloud_prob_max: int) -> ee.Image:
 
 
 def apply_s2_cloud_mask(img: ee.Image) -> ee.Image:
-    # Prefer SCL over QA60 to avoid nuking valid pixels.
-    # Keep veg (4), bare (5), water (6). Optionally keep cloud shadow (3 or 7) relaxed in tough scenes.
     scl = img.select("SCL")
-    # Map: keep=1 for 4,5,6; you may toggle 3 or 7 to 1 if scenes are too strict
-    keep = scl.remap([4, 5, 6], [1, 1, 1], 0)
+    keep = scl.remap([4, 5, 6], [1, 1, 1], 0)  # veg/bare/water
     return img.updateMask(keep)
 
 
@@ -1002,9 +999,8 @@ def monthly_ndvi_composite(aoi, start, end) -> ee.Image:
         .filterDate(start, end)
         .map(apply_s2_cloud_mask)
         .map(compute_ndvi)
-    )  # ensures an 'NDVI' band exists on every image
+    )
     ndvi_median = col.median().select("NDVI").rename("NDVI")
-    # Keep mask where at least one pixel contributed
     return ndvi_median.updateMask(ndvi_median.mask())
 
 
@@ -1179,11 +1175,9 @@ def _build_composite_series(
 
 
 def compute_ndvi(img: ee.Image) -> ee.Image:
-    # Sentinel-2 SR Harmonized: use B8 (NIR) and B4 (Red). Cast to float FIRST.
     b8 = img.select("B8").toFloat()
     b4 = img.select("B4").toFloat()
     ndvi = b8.subtract(b4).divide(b8.add(b4).add(1e-6)).rename("NDVI")
-    # Preserve the upstream mask (e.g., from cloud/shadow filtering)
     return ndvi.updateMask(img.mask())
 
 
@@ -2321,13 +2315,16 @@ def _prepare_selected_period_artifacts(
         sample_size,
     )
     diag_guard = guard
-    ordered_months = _ordered_months(months)
+    ordered_months = list(_ordered_months(months))
+    logger.info("zones:ordered_months=%s", ordered_months)
+    if guard is not None:
+        guard.record("ordered_months", months=ordered_months)
     monthly_ndvi_collection: ee.ImageCollection | None = None
     first_band_names: list[str] = []
     if diag_guard is not None:
         try:
             monthly_ndvi_collection = build_monthly_ndvi_collection(
-                geometry, list(ordered_months)
+                geometry, ordered_months
             )
         except Exception:
             monthly_ndvi_collection = None
@@ -2342,6 +2339,23 @@ def _prepare_selected_period_artifacts(
             elif band_info:
                 first_band_names = [band_info]
         diag_guard.record("first_month_bandnames", bands=first_band_names)
+
+        # If the first image lacks NDVI, try to reconstruct it defensively
+        if "NDVI" not in first_band_names:
+            try:
+                # Defensive re-map: ensure NDVI is computed even if upstream mapping was skipped
+                first_fixed = ee.Image(first_image).addBands(
+                    compute_ndvi(first_image).select("NDVI"), overwrite=True
+                )
+                fixed_bands = first_fixed.bandNames().getInfo() or []
+            except Exception:
+                fixed_bands = []
+
+            diag_guard.record("first_month_bands_after_fix", bands=fixed_bands)
+            # Prefer fixed bands if they contain NDVI
+            if "NDVI" in fixed_bands:
+                first_band_names = fixed_bands
+
         diag_guard.require(
             "NDVI" in first_band_names,
             "E_MEAN_EMPTY",
