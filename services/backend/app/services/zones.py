@@ -986,9 +986,11 @@ def _mask_sentinel2_scene(image: ee.Image, cloud_prob_max: int) -> ee.Image:
     return selected.copyProperties(image, ["system:time_start"])
 
 
+# --- NDVI & SCL helpers (strict) --------------------------------------------
 def apply_s2_cloud_mask(img: ee.Image) -> ee.Image:
+    # Keep vegetation/bare/water; strict baseline
     scl = img.select("SCL")
-    keep = scl.remap([4, 5, 6], [1, 1, 1], 0)  # veg/bare/water
+    keep = scl.remap([4, 5, 6], [1, 1, 1], 0)
     return img.updateMask(keep)
 
 
@@ -1014,10 +1016,19 @@ def build_monthly_ndvi_collection(aoi, months: list[str]) -> ee.ImageCollection:
     images = []
     for ym in months:
         s, e = _range(ym)
-        comp = monthly_ndvi_composite(aoi, s, e)  # must contain 'NDVI'
+        comp = monthly_ndvi_adaptive(
+            aoi,
+            s,
+            e,
+            valid_ratio_min=0.35,
+            spread_min=0.08,
+            have_cloudprob=False,  # flip to True if you add the prob band
+        ).set({"ym": ym})
         images.append(comp)
 
-    return ee.ImageCollection(images)
+    ic = ee.ImageCollection(images)
+    # Server-side filter: keep only images that truly have an NDVI band
+    return ic.filter(ee.Filter.listContains("system:band_names", "NDVI"))
 
 
 def _native_reproject(img: ee.Image) -> ee.Image:
@@ -1180,6 +1191,94 @@ def compute_ndvi(img: ee.Image) -> ee.Image:
     b4 = img.select("B4").toFloat()
     ndvi = b8.subtract(b4).divide(b8.add(b4).add(1e-6)).rename("NDVI")
     return ndvi.updateMask(img.mask())
+
+
+# --- Adaptive monthly composite ---------------------------------------------
+def monthly_ndvi_adaptive(
+    aoi, start, end, valid_ratio_min=0.35, spread_min=0.08, have_cloudprob=False
+) -> ee.Image:
+    # Base monthly S2 SR Harmonized
+    base = (
+        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+        .filterBounds(aoi)
+        .filterDate(start, end)
+    )
+
+    # Variant 1: strict SCL
+    col1 = base.map(apply_s2_cloud_mask).map(compute_ndvi)
+
+    # Variant 2: relaxed SCL (allow shadows/uncertainty)
+    def _apply_relaxed(img):
+        scl = img.select("SCL")
+        keep = scl.remap([3, 4, 5, 6, 7], [1, 1, 1, 1, 1], 0)
+        return img.updateMask(keep)
+
+    col2 = base.map(_apply_relaxed).map(compute_ndvi)
+
+    # Variant 3: cloud probability (optional) – requires a joined prob band named 'cloud_probability'
+    def _apply_prob(img):
+        prob = img.select("cloud_probability")
+        return img.updateMask(prob.lte(40))
+
+    col3 = base.map(_apply_prob).map(compute_ndvi) if have_cloudprob else None
+
+    # Variant 4: no SCL/prob mask – last resort
+    col4 = base.map(compute_ndvi)
+
+    # Order: strict -> relaxed -> prob -> none
+    variants = [col1, col2] + ([col3] if col3 else []) + [col4]
+
+    def _composite(ic: ee.ImageCollection) -> ee.Image:
+        med = ee.Image(ic.median()).select("NDVI").rename("NDVI")
+        return med.updateMask(med.mask())
+
+    def _metrics(img: ee.Image, region) -> ee.Image:
+        valid = img.mask().reduceRegion(
+            ee.Reducer.sum(), region, 10, maxPixels=1e9, bestEffort=True, tileScale=4
+        )
+        stats = img.reduceRegion(
+            ee.Reducer.minMax(), region, 10, maxPixels=1e9, bestEffort=True, tileScale=4
+        )
+        valid_sum = ee.Number(valid.values().reduce(ee.Reducer.sum()))
+        return (
+            img.set("NDVI_min", stats.get("NDVI_min"))
+            .set("NDVI_max", stats.get("NDVI_max"))
+            .set("VALID_SUM", valid_sum)
+        )
+
+    region = ee.FeatureCollection(aoi).geometry().buffer(5).bounds(1)
+    total_px = region.area(1).divide(ee.Number(10).pow(2))
+
+    cands = []
+    for i, ic in enumerate(variants, start=1):
+        comp = _composite(ic).set("MASK_TIER", i)
+        comp = _metrics(comp, region)
+        valid_ratio = ee.Number(comp.get("VALID_SUM")).divide(total_px)
+        spread = ee.Number(comp.get("NDVI_max")).subtract(
+            ee.Number(comp.get("NDVI_min"))
+        )
+        comp = comp.set("VALID_RATIO", valid_ratio).set("NDVI_SPREAD", spread)
+        cands.append(comp)
+
+    cand_ic = ee.ImageCollection(cands)
+
+    good = (
+        cand_ic.filter(ee.Filter.gte("VALID_RATIO", valid_ratio_min))
+        .filter(ee.Filter.gte("NDVI_SPREAD", spread_min))
+        .sort("MASK_TIER")
+        .first()
+    )
+
+    # Fallback: best by VALID_RATIO * NDVI_SPREAD
+    scored = cand_ic.map(
+        lambda im: im.set(
+            "SCORE",
+            ee.Number(im.get("VALID_RATIO")).multiply(ee.Number(im.get("NDVI_SPREAD"))),
+        )
+    )
+    best = ee.Image(scored.sort("SCORE", False).first())
+
+    return ee.Image(ee.Algorithms.If(good, good, best))
 
 
 # Backwards compatibility for callers still referencing the private helper
@@ -2321,48 +2420,31 @@ def _prepare_selected_period_artifacts(
     if guard is not None:
         guard.record("ordered_months", months=ordered_months)
     monthly_ndvi_collection: ee.ImageCollection | None = None
-    first_band_names: list[str] = []
+
     if diag_guard is not None:
-        try:
-            monthly_ndvi_collection = build_monthly_ndvi_collection(
-                geometry, ordered_months
-            )
-        except Exception:
-            monthly_ndvi_collection = None
-        if monthly_ndvi_collection is not None:
-            try:
-                first_image = ee.Image(monthly_ndvi_collection.first())
-                band_info = first_image.bandNames().getInfo()
-            except Exception:
-                band_info = []
-            if isinstance(band_info, (list, tuple)):
-                first_band_names = list(band_info)
-            elif band_info:
-                first_band_names = [band_info]
-        diag_guard.record("first_month_bandnames", bands=first_band_names)
+        monthly_ndvi_collection = build_monthly_ndvi_collection(
+            geometry, list(ordered_months)
+        )
+        # After server-side NDVI filter
+        col_size = monthly_ndvi_collection.size().getInfo()
+        diag_guard.record("monthly_stack_size_after_filter", images=col_size)
+        diag_guard.require(
+            col_size and col_size > 0,
+            "E_NO_MONTHS",
+            "No monthly NDVI composites contain the NDVI band.",
+            "Relax mask or widen date range.",
+        )
 
-        # If the first image lacks NDVI, try to reconstruct it defensively
-        if "NDVI" not in first_band_names:
-            try:
-                # Defensive re-map: ensure NDVI is computed even if upstream mapping was skipped
-                first_fixed = ee.Image(first_image).addBands(
-                    compute_ndvi(first_image).select("NDVI"), overwrite=True
-                )
-                fixed_bands = first_fixed.bandNames().getInfo() or []
-            except Exception:
-                fixed_bands = []
-
-            diag_guard.record("first_month_bands_after_fix", bands=fixed_bands)
-            # Prefer fixed bands if they contain NDVI
-            if "NDVI" in fixed_bands:
-                first_band_names = fixed_bands
+        first_image = ee.Image(monthly_ndvi_collection.first())
+        first_band_names = first_image.bandNames().getInfo() or []
+        first_ym = first_image.get("ym").getInfo() if first_image.get("ym") else None
+        diag_guard.record("first_valid_month", ym=first_ym, bands=first_band_names)
 
         diag_guard.require(
             "NDVI" in first_band_names,
             "E_MEAN_EMPTY",
-            "First monthly composite lacks NDVI band.",
-            "Ensure compute_ndvi() returns a band named 'NDVI'.",
-            bands=first_band_names,
+            "First valid monthly composite lacks NDVI band.",
+            "Ensure compute_ndvi() returns 'NDVI' and masks aren't over-aggressive.",
         )
     composites, skipped_months, composite_metadata = _build_composite_series(
         geometry,
@@ -2468,50 +2550,43 @@ def _prepare_selected_period_artifacts(
         except Exception:  # pragma: no cover - logging guard
             logger.exception("Failed to clip fallback NDVI mean image")
 
-    if diag_guard is not None:
+    if diag_guard is not None and monthly_ndvi_collection is not None:
+        region = ee.FeatureCollection(geometry).geometry().buffer(5).bounds(1)
+        valid_mask_sum = (
+            monthly_ndvi_collection.map(lambda im: ee.Image(im).select("NDVI").mask())
+            .sum()
+            .reduceRegion(
+                ee.Reducer.sum(),
+                region,
+                10,
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=4,
+            )
+            .getInfo()
+        )
+        diag_guard.record("pre_mean_valid_mask_sum", total=valid_mask_sum)
+        diag_guard.require(
+            valid_mask_sum
+            and any(
+                isinstance(v, (int, float)) and v > 0
+                for v in (
+                    valid_mask_sum.values()
+                    if isinstance(valid_mask_sum, dict)
+                    else [valid_mask_sum]
+                )
+            ),
+            "E_MEAN_EMPTY",
+            "All NDVI pixels masked before mean().",
+            "Relax cloud mask; verify date range; ensure AOI intersects imagery.",
+            mask_sum=valid_mask_sum,
+        )
         collection_for_stats = monthly_ndvi_collection or ndvi_collection
         if collection_for_stats is None:
             try:
                 collection_for_stats = ee.ImageCollection(ndvi_images)
             except Exception:
                 collection_for_stats = None
-        region = (
-            ee.FeatureCollection(ee.Feature(geometry)).geometry().buffer(5).bounds(1)
-        )
-        valid_mask_sum: dict | int | float | None = None
-        if collection_for_stats is not None:
-            try:
-                valid_mask_sum = (
-                    collection_for_stats.map(lambda im: im.select("NDVI").mask())
-                    .sum()
-                    .reduceRegion(
-                        ee.Reducer.sum(),
-                        region,
-                        10,
-                        maxPixels=1e9,
-                        bestEffort=True,
-                        tileScale=4,
-                    )
-                    .getInfo()
-                )
-            except Exception:
-                valid_mask_sum = None
-        diag_guard.record("pre_mean_valid_mask_sum", total=valid_mask_sum)
-        has_valid_pixels = False
-        if isinstance(valid_mask_sum, dict):
-            for value in valid_mask_sum.values():
-                if isinstance(value, (int, float)) and value > 0:
-                    has_valid_pixels = True
-                    break
-        elif isinstance(valid_mask_sum, (int, float)) and valid_mask_sum > 0:
-            has_valid_pixels = True
-        diag_guard.require(
-            has_valid_pixels,
-            "E_MEAN_EMPTY",
-            "All NDVI pixels masked before mean().",
-            "Relax cloud mask; verify date range; check AOI intersects imagery.",
-            mask_sum=valid_mask_sum,
-        )
         ndvi_mean_image = None
         if collection_for_stats is not None:
             try:
