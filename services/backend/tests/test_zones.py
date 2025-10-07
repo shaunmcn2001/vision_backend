@@ -1,24 +1,23 @@
 import csv
 import io
-from pathlib import Path
-from types import SimpleNamespace
 import sys
 import zipfile
+from datetime import date
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import rasterio
+import shapefile
+from rasterio.transform import from_origin
+from shapely.geometry import Polygon, mapping
 
 TEST_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = TEST_DIR.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from datetime import date
-
-import numpy as np
-import rasterio
-from rasterio.transform import from_origin
-import shapefile
-from shapely.geometry import Polygon, mapping
-
-from app.services import zones
+from app.services import zones  # noqa: E402
 
 
 def _write_ndvi_raster(path: Path, *, data: np.ndarray | None = None) -> None:
