@@ -12,7 +12,9 @@ FAKE_RASTERIO_PATH = TESTS_DIR / "fakes" / "fake_rasterio.py"
 if "tests.fake_rasterio" in sys.modules:
     fake_rasterio = sys.modules["tests.fake_rasterio"]
 else:
-    spec = importlib.util.spec_from_file_location("tests.fake_rasterio", FAKE_RASTERIO_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "tests.fake_rasterio", FAKE_RASTERIO_PATH
+    )
     if spec is None or spec.loader is None:
         raise ImportError("Unable to load fake_rasterio module")
     fake_rasterio = importlib.util.module_from_spec(spec)

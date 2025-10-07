@@ -176,7 +176,10 @@ def test_create_job_generates_all_exports(monkeypatch):
     monkeypatch.setattr(exports.gee, "geometry_from_geojson", lambda geojson: geojson)
 
     job = exports.create_job(
-        aoi_geojson={"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]},
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+        },
         months=["2024-01"],
         index_names=["NDVI"],
         export_target="zip",
@@ -328,7 +331,9 @@ def test_get_job_evicts_expired_jobs(tmp_path):
     job.temp_dir = None
 
     job.state = "completed"
-    job.updated_at = datetime.utcnow() - exports.JOB_RETENTION_TTL - timedelta(seconds=1)
+    job.updated_at = (
+        datetime.utcnow() - exports.JOB_RETENTION_TTL - timedelta(seconds=1)
+    )
 
     with exports.JOB_LOCK:
         exports.JOB_REGISTRY[job.job_id] = job
@@ -391,7 +396,9 @@ def test_download_index_to_path_uses_visualized_format(tmp_path, monkeypatch):
         is_visualized=True,
     )
 
-    monkeypatch.setattr(exports, "_download_bytes", lambda _url: (b"II*\x00FAKE", "image/tiff"))
+    monkeypatch.setattr(
+        exports, "_download_bytes", lambda _url: (b"II*\x00FAKE", "image/tiff")
+    )
     monkeypatch.setattr(exports, "_extract_tiff", lambda payload, _ctype: payload)
 
     path = exports._download_index_to_path(item, job, tmp_path)
@@ -436,7 +443,9 @@ def test_download_index_to_path_preserves_nodata_for_scalar(tmp_path, monkeypatc
         image=_FakeImage(),
     )
 
-    monkeypatch.setattr(exports, "_download_bytes", lambda _url: (b"II*\x00FAKE", "image/tiff"))
+    monkeypatch.setattr(
+        exports, "_download_bytes", lambda _url: (b"II*\x00FAKE", "image/tiff")
+    )
     monkeypatch.setattr(exports, "_extract_tiff", lambda payload, _ctype: payload)
 
     path = exports._download_index_to_path(item, job, tmp_path)
@@ -538,18 +547,26 @@ def test_start_zone_cloud_exports_uploads_zone_files(tmp_path, monkeypatch):
 
     with zipfile.ZipFile(io.BytesIO(uploaded[f"{prefix}_shp.zip"])) as shp_zip:
         zip_members = set(shp_zip.namelist())
-        assert {f"{Path(prefix).name}.{ext}" for ext in ["shp", "dbf", "shx", "prj"]} <= zip_members
+        assert {
+            f"{Path(prefix).name}.{ext}" for ext in ["shp", "dbf", "shx", "prj"]
+        } <= zip_members
 
     paths = job.zone_state.paths
     assert paths["raster"] == f"gs://test-bucket/{prefix}.tif"
     assert paths["mean_ndvi"] == f"gs://test-bucket/{prefix}_mean_ndvi.tif"
     assert paths["geojson"] == f"gs://test-bucket/{prefix}.geojson"
     assert paths["vectors_zip"] == f"gs://test-bucket/{prefix}_shp.zip"
-    assert job.zone_state.tasks["raster"]["signed_url"] == f"https://signed/{prefix}.tif"
-    assert job.zone_state.tasks["mean_ndvi"]["signed_url"] == f"https://signed/{prefix}_mean_ndvi.tif"
+    assert (
+        job.zone_state.tasks["raster"]["signed_url"] == f"https://signed/{prefix}.tif"
+    )
+    assert (
+        job.zone_state.tasks["mean_ndvi"]["signed_url"]
+        == f"https://signed/{prefix}_mean_ndvi.tif"
+    )
     assert job.zone_state.status == "completed"
     assert job.zone_artifacts is None
     assert not Path(artifacts_dir).exists()
+
 
 def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
     job, *_ = _build_zip_job(tmp_path)
@@ -596,10 +613,12 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
             writer.field("zone", "N", decimal=0)
             writer.field("area_ha", "F", decimal=4)
             writer.record(1, 0.1)
-            writer.shape({
-                "type": "Polygon",
-                "coordinates": [[[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]]],
-            })
+            writer.shape(
+                {
+                    "type": "Polygon",
+                    "coordinates": [[[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]]],
+                }
+            )
         shp_base.with_suffix(".cpg").write_text("UTF-8")
         shp_base.with_suffix(".prj").write_text("")
         shp_path = shp_base.with_suffix(".shp")
@@ -610,7 +629,9 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
                 vector_components[ext] = str(member)
 
         stats_path = workdir / "zones_stats.csv"
-        stats_path.write_text("zone,area_ha,mean_ndvi,min_ndvi,max_ndvi,pixel_count\n1,0.1,0.5,0.4,0.6,10\n")
+        stats_path.write_text(
+            "zone,area_ha,mean_ndvi,min_ndvi,max_ndvi,pixel_count\n1,0.1,0.5,0.4,0.6,10\n"
+        )
 
         return zones.ZoneArtifacts(
             raster_path=str(raster_path),
@@ -692,7 +713,12 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
 
     archive_entries = job.zone_state.metadata.get(exports.ZONE_ARCHIVE_METADATA_KEY)
     assert archive_entries
-    assert all(entry.get("included_in_zip") for entry in archive_entries if isinstance(entry, dict))
+    assert all(
+        entry.get("included_in_zip")
+        for entry in archive_entries
+        if isinstance(entry, dict)
+    )
+
 
 def test_run_job_marks_items_visualized(monkeypatch):
     job = exports.ExportJob(
@@ -736,7 +762,9 @@ def test_run_job_marks_items_visualized(monkeypatch):
     def fake_monthly_collection(_geometry, _month, _cloud):
         return _FakeCollection(), "composite"
 
-    monkeypatch.setattr(exports.gee, "monthly_sentinel2_collection", fake_monthly_collection)
+    monkeypatch.setattr(
+        exports.gee, "monthly_sentinel2_collection", fake_monthly_collection
+    )
     monkeypatch.setattr(exports.indices, "compute_index", lambda *_: "index-image")
     monkeypatch.setattr(
         exports.index_visualization,
@@ -785,7 +813,11 @@ def test_cleanup_job_files_removes_zone_exports(tmp_path):
     zone_file.parent.mkdir(parents=True, exist_ok=True)
     zone_file.write_text("zone")
     job.zone_state.metadata[exports.ZONE_ARCHIVE_METADATA_KEY] = [
-        {"path": str(zone_file), "arcname": "zones/PROD_test_zones.tif", "included_in_zip": True}
+        {
+            "path": str(zone_file),
+            "arcname": "zones/PROD_test_zones.tif",
+            "included_in_zip": True,
+        }
     ]
 
     exports.JOB_REGISTRY[job.job_id] = job

@@ -1,4 +1,5 @@
 """Compatibility shim that prefers the real SciPy package when available."""
+
 from __future__ import annotations
 
 from types import ModuleType
@@ -69,6 +70,7 @@ if _REAL_SCIPY is not None:
         __all__.append("ndimage")
 else:  # pragma: no cover - exercised implicitly in CI without SciPy
     from . import ndimage  # type: ignore  # noqa: F401
+
     __all__ = ["ndimage"]
 
 del _REAL_SCIPY
