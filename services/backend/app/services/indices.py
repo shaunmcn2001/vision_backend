@@ -51,6 +51,15 @@ def _normalized_difference(band_pair: Tuple[str, str], name: str) -> IndexComput
     return _compute
 
 
+def compute_ndvi(img: ee.Image) -> ee.Image:
+    # Sentinel-2 SR Harmonized: use B8 (NIR) and B4 (Red). Cast to float FIRST.
+    b8 = img.select("B8").toFloat()
+    b4 = img.select("B4").toFloat()
+    ndvi = b8.subtract(b4).divide(b8.add(b4).add(1e-6)).rename("NDVI")
+    # Preserve the upstream mask (e.g., from cloud/shadow filtering)
+    return ndvi.updateMask(img.mask())
+
+
 def _compute_evi(image: ee.Image, params: Mapping[str, Any]) -> ee.Image:
     nir = image.select("B8")
     red = image.select("B4")

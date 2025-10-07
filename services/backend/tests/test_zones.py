@@ -65,118 +65,98 @@ def _write_zone_raster(path: Path, data: np.ndarray) -> None:
 
 
 def test_compute_ndvi_preserves_source_mask(monkeypatch) -> None:
-    monkeypatch.setattr(zones.ee.Reducer, "min", staticmethod(lambda: "min_reducer"))
-
-    class FakeCondition:
-        def __init__(self, label):
-            self.label = label
-            self.and_args: list[object] = []
-
-        def And(self, other):
-            self.and_args.append(other)
-            return FakeCondition((self.label, getattr(other, "label", other)))
-
     class FakeNdviBand:
         def __init__(self):
             self.renamed: str | None = None
-            self.to_float_calls = 0
-            self.gt_calls: list[float] = []
-            self.lt_calls: list[float] = []
             self.update_mask_arg: object | None = None
 
         def rename(self, name: str):
             self.renamed = name
             return self
 
-        def toFloat(self):
-            self.to_float_calls += 1
-            return self
-
-        def gt(self, value: float):
-            self.gt_calls.append(value)
-            return FakeCondition(("gt", value))
-
-        def lt(self, value: float):
-            self.lt_calls.append(value)
-            return FakeCondition(("lt", value))
-
         def updateMask(self, value: object):
             self.update_mask_arg = value
             return self
 
     class FakeMask:
-        def __init__(self):
-            self.and_args: list[object] = []
-            self.reduce_calls: list[object] = []
-            self.rename_calls: list[str] = []
-            self.gt_calls: list[float] = []
+        pass
 
-        def reduce(self, reducer):
-            self.reduce_calls.append(reducer)
+    class FakeAddResult:
+        def __init__(self, parent: "FakeBands"):
+            self.parent = parent
+
+        def add(self, value: float):
+            self.parent.add_constants.append(value)
             return self
 
-        def rename(self, name: str):
-            self.rename_calls.append(name)
-            return self
+    class FakeSubtractResult:
+        def __init__(self, parent: "FakeBands"):
+            self.parent = parent
 
-        def gt(self, value: float):
-            self.gt_calls.append(value)
-            return self
-
-        def And(self, other):
-            self.and_args.append(other)
-            return self
+        def divide(self, denominator: object):
+            self.parent.divide_args.append(denominator)
+            return self.parent.ndvi_band
 
     class FakeBands:
-        def __init__(self, mask_obj: FakeMask, ndvi_band: FakeNdviBand):
+        def __init__(self, label: str, mask_obj: FakeMask, ndvi_band: FakeNdviBand):
+            self.label = label
             self.mask_obj = mask_obj
             self.ndvi_band = ndvi_band
             self.to_float_calls = 0
-            self.normalized_diff_calls: list[tuple[str, str]] = []
+            self.subtract_args: list[str] = []
+            self.add_args: list[str] = []
+            self.add_constants: list[float] = []
+            self.divide_args: list[object] = []
 
         def toFloat(self):
             self.to_float_calls += 1
             return self
 
-        def normalizedDifference(self, bands):
-            self.normalized_diff_calls.append(tuple(bands))
-            return self.ndvi_band
+        def subtract(self, other: "FakeBands"):
+            self.subtract_args.append(other.label)
+            return FakeSubtractResult(self)
+
+        def add(self, other: "FakeBands"):
+            self.add_args.append(other.label)
+            return FakeAddResult(self)
 
         def mask(self):
             return self.mask_obj
 
     class FakeImage:
         def __init__(self):
-            self.selected: list[tuple[str, str] | str] = []
             self.mask_obj = FakeMask()
             self.ndvi_band = FakeNdviBand()
-            self.band_selection = FakeBands(self.mask_obj, self.ndvi_band)
+            self.selected: list[str] = []
+            self.bands: dict[str, FakeBands] = {}
+            self.mask_calls = 0
 
-        def select(self, bands):
-            entry = tuple(bands) if isinstance(bands, (list, tuple)) else bands
-            self.selected.append(entry)
-            return self.band_selection
+        def select(self, band: str):
+            self.selected.append(band)
+            band_obj = FakeBands(band, self.mask_obj, self.ndvi_band)
+            self.bands[band] = band_obj
+            return band_obj
+
+        def mask(self):
+            self.mask_calls += 1
+            return self.mask_obj
 
     fake_image = FakeImage()
 
-    result = zones._compute_ndvi(fake_image)
+    result = zones.compute_ndvi(fake_image)
 
-    assert fake_image.selected[0] == ("B8", "B4")
-    assert fake_image.band_selection.to_float_calls == 1
-    assert fake_image.band_selection.normalized_diff_calls == [("B8", "B4")]
+    assert fake_image.selected == ["B8", "B4"]
+    assert fake_image.bands["B8"].to_float_calls == 1
+    assert fake_image.bands["B4"].to_float_calls == 1
+    assert fake_image.bands["B8"].subtract_args == ["B4"]
+    assert fake_image.bands["B8"].add_args == ["B4"]
+    assert fake_image.bands["B8"].add_constants == [1e-6]
+    assert fake_image.bands["B8"].divide_args
+    assert fake_image.mask_calls == 1
     assert fake_image.ndvi_band.renamed == "NDVI"
-    assert fake_image.ndvi_band.to_float_calls == 1
-    assert fake_image.mask_obj.and_args, "Expected NDVI mask to include the source mask"
-    assert fake_image.ndvi_band.gt_calls == []
-    assert fake_image.ndvi_band.lt_calls == [1]
-    assert len(fake_image.mask_obj.reduce_calls) == 1
-    assert fake_image.mask_obj.rename_calls == ["mask"]
-    assert fake_image.mask_obj.gt_calls == [0]
-    assert fake_image.mask_obj.and_args
-    combined_mask = fake_image.mask_obj.and_args[0]
-    assert getattr(combined_mask, "label", None) == ("lt", 1)
     assert fake_image.ndvi_band.update_mask_arg is fake_image.mask_obj
     assert result is fake_image.ndvi_band
+
 
 
 def test_download_image_to_path_handles_zipped_payload(
