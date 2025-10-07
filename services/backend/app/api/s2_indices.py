@@ -1,4 +1,5 @@
 """API routes for Sentinel-2 index exports."""
+
 from __future__ import annotations
 
 import os
@@ -57,12 +58,16 @@ async def prepare_aoi_geometry(
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - defensive
-        raise HTTPException(status_code=400, detail=f"Failed to parse shapefile: {exc}") from exc
+        raise HTTPException(
+            status_code=400, detail=f"Failed to parse shapefile: {exc}"
+        ) from exc
 
     try:
         area = area_ha(geometry)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Area calculation failed: {exc}") from exc
+        raise HTTPException(
+            status_code=400, detail=f"Area calculation failed: {exc}"
+        ) from exc
 
     min_area = _min_field_hectares()
     if enforce_area and area < min_area:
@@ -86,7 +91,8 @@ async def prepare_aoi_geometry(
 
 class ProductionZoneOptions(BaseModel):
     enabled: bool = Field(
-        False, description="When true, compute production zones for the requested months"
+        False,
+        description="When true, compute production zones for the requested months",
     )
     n_classes: int = Field(zone_service.DEFAULT_N_CLASSES, ge=3, le=7)
     cv_mask_threshold: float = Field(zone_service.DEFAULT_CV_THRESHOLD, ge=0)
@@ -113,7 +119,9 @@ class Sentinel2ExportRequest(BaseModel):
     )
     aoi_name: str = Field(..., description="Name of the AOI used in filenames")
     scale_m: int = Field(10, description="Target output resolution in metres")
-    cloud_prob_max: int = Field(40, description="Maximum S2 cloud probability to retain")
+    cloud_prob_max: int = Field(
+        40, description="Maximum S2 cloud probability to retain"
+    )
     production_zones: ProductionZoneOptions | None = Field(
         None, description="Optional production zone generation parameters"
     )
@@ -231,7 +239,9 @@ def start_export(request: Sentinel2ExportRequest):
             ),
         ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Failed to queue export: {exc}") from exc
+        raise HTTPException(
+            status_code=400, detail=f"Failed to queue export: {exc}"
+        ) from exc
 
     return {"job_id": job.job_id, "state": job.state}
 
@@ -267,9 +277,7 @@ def download(job_id: str):
                 for chunk in iter(lambda: fh.read(8192), b""):
                     yield chunk
 
-        headers = {
-            "Content-Disposition": f'attachment; filename="{zip_path.name}"'
-        }
+        headers = {"Content-Disposition": f'attachment; filename="{zip_path.name}"'}
         background = BackgroundTask(exports.cleanup_job_files, job)
         return StreamingResponse(
             iterator(),
@@ -283,4 +291,3 @@ def download(job_id: str):
     if status is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return JSONResponse(status)
-

@@ -43,8 +43,8 @@ def _write_ndvi_raster(path: Path, *, data: np.ndarray | None = None) -> None:
         crs=zones.DEFAULT_EXPORT_CRS,
         transform=transform,
         nodata=-9999.0,
-        ) as dst:
-            dst.write(data, 1)
+    ) as dst:
+        dst.write(data, 1)
 
 
 def _write_zone_raster(path: Path, data: np.ndarray) -> None:
@@ -66,6 +66,7 @@ def _write_zone_raster(path: Path, data: np.ndarray) -> None:
 
 def test_compute_ndvi_preserves_source_mask(monkeypatch) -> None:
     monkeypatch.setattr(zones.ee.Reducer, "min", staticmethod(lambda: "min_reducer"))
+
     class FakeCondition:
         def __init__(self, label):
             self.label = label
@@ -178,7 +179,9 @@ def test_compute_ndvi_preserves_source_mask(monkeypatch) -> None:
     assert result is fake_image.ndvi_band
 
 
-def test_download_image_to_path_handles_zipped_payload(monkeypatch, tmp_path: Path) -> None:
+def test_download_image_to_path_handles_zipped_payload(
+    monkeypatch, tmp_path: Path
+) -> None:
     source = tmp_path / "source_ndvi.tif"
     _write_ndvi_raster(source)
 
@@ -208,7 +211,9 @@ def test_download_image_to_path_handles_zipped_payload(monkeypatch, tmp_path: Pa
 
     monkeypatch.setattr(zones, "urlopen", lambda url: FakeResponse(payload))
     monkeypatch.setattr(zones, "_geometry_region", lambda geometry: [[0, 0]])
-    monkeypatch.setattr(zones.ee, "Geometry", SimpleNamespace(Polygon=lambda coords: coords))
+    monkeypatch.setattr(
+        zones.ee, "Geometry", SimpleNamespace(Polygon=lambda coords: coords)
+    )
     monkeypatch.setattr(
         zones.ee.batch.Export.image,
         "toDrive",
@@ -224,7 +229,9 @@ def test_download_image_to_path_handles_zipped_payload(monkeypatch, tmp_path: Pa
         assert dataset.count == 1
 
 
-def test_download_image_to_path_merges_multipolygon_region(monkeypatch, tmp_path: Path) -> None:
+def test_download_image_to_path_merges_multipolygon_region(
+    monkeypatch, tmp_path: Path
+) -> None:
     polygon_a_coords = [
         [0.0, 0.0],
         [0.0, 1.0],
@@ -307,7 +314,9 @@ def test_download_image_to_path_merges_multipolygon_region(monkeypatch, tmp_path
             pass
 
     monkeypatch.setattr(zones, "urlopen", lambda url: FakeResponse())
-    monkeypatch.setattr(zones.ee, "Geometry", SimpleNamespace(Polygon=lambda coords: coords))
+    monkeypatch.setattr(
+        zones.ee, "Geometry", SimpleNamespace(Polygon=lambda coords: coords)
+    )
     monkeypatch.setattr(
         zones.ee.batch.Export.image,
         "toDrive",
@@ -329,6 +338,7 @@ def test_download_image_to_path_merges_multipolygon_region(monkeypatch, tmp_path
     assert result_polygon.equals(merged_polygon)
     assert result_polygon.contains(polygon_a.centroid)
     assert result_polygon.contains(polygon_b.centroid)
+
 
 def test_classify_local_zones_generates_outputs(tmp_path: Path) -> None:
     ndvi_path = tmp_path / "mean_ndvi.tif"
@@ -369,7 +379,9 @@ def test_classify_local_zones_generates_outputs(tmp_path: Path) -> None:
     assert any(float(row["mean_ndvi"]) > 0 for row in rows)
 
 
-def test_prepare_selected_period_artifacts_percentiles(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_selected_period_artifacts_percentiles(
+    monkeypatch, tmp_path: Path
+) -> None:
     class FakeStatImage:
         def __init__(self):
             self.renamed: list[str] = []
@@ -426,7 +438,10 @@ def test_prepare_selected_period_artifacts_percentiles(monkeypatch, tmp_path: Pa
 
     monkeypatch.setattr(zones, "_download_image_to_path", fake_download)
 
-    aoi = {"type": "Polygon", "coordinates": [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]]}  # noqa: E501
+    aoi = {
+        "type": "Polygon",
+        "coordinates": [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]],
+    }  # noqa: E501
 
     artifacts, metadata = zones._prepare_selected_period_artifacts(
         aoi,
@@ -460,7 +475,9 @@ def test_prepare_selected_period_artifacts_percentiles(monkeypatch, tmp_path: Pa
     assert metadata["mean_ndvi_export_task"] == {}
 
 
-def test_prepare_selected_period_artifacts_ndvi_kmeans(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_selected_period_artifacts_ndvi_kmeans(
+    monkeypatch, tmp_path: Path
+) -> None:
     class FakeStatImage:
         def __init__(self):
             self.renamed: list[str] = []
@@ -528,7 +545,9 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(monkeypatch, tmp_path: Pa
         raise RuntimeError("multiindex path should not run")
 
     monkeypatch.setattr(zones, "_build_multiindex_zones", _fail_multiindex)
-    monkeypatch.setattr(zones, "_build_multiindex_zones_with_features", _fail_multiindex)
+    monkeypatch.setattr(
+        zones, "_build_multiindex_zones_with_features", _fail_multiindex
+    )
     monkeypatch.setattr(zones, "_build_ndvi_kmeans_zones", fake_ndvi_kmeans)
 
     def fake_download(image, _geometry, target):
@@ -550,7 +569,10 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(monkeypatch, tmp_path: Pa
 
     monkeypatch.setattr(zones, "_download_image_to_path", fake_download)
 
-    aoi = {"type": "Polygon", "coordinates": [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]]}  # noqa: E501
+    aoi = {
+        "type": "Polygon",
+        "coordinates": [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]],
+    }  # noqa: E501
 
     artifacts, metadata = zones._prepare_selected_period_artifacts(
         aoi,
@@ -593,7 +615,9 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(monkeypatch, tmp_path: Pa
     assert metadata["downloaded_mean_ndvi"] == artifacts.mean_ndvi_path
 
 
-def test_prepare_selected_period_artifacts_multiindex(monkeypatch, tmp_path: Path) -> None:
+def test_prepare_selected_period_artifacts_multiindex(
+    monkeypatch, tmp_path: Path
+) -> None:
     class FakeStatImage:
         def __init__(self):
             self.renamed: list[str] = []
@@ -644,11 +668,13 @@ def test_prepare_selected_period_artifacts_multiindex(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(zones, "_compute_ndvi", lambda image: image)
     monkeypatch.setattr(zones, "_ndvi_temporal_stats", lambda images: fake_stats)
     monkeypatch.setattr(zones, "_stability_mask", lambda *args, **kwargs: "stability")
+
     def _fail_percentiles(*_args, **_kwargs):
         raise RuntimeError("percentile path should not run")
 
     monkeypatch.setattr(zones, "_classify_local_zones", _fail_percentiles)
     monkeypatch.setattr(zones, "_build_multiindex_zones", fake_multiindex)
+
     def _fail_features(*_args, **_kwargs):
         raise RuntimeError("features not supplied")
 
@@ -673,7 +699,10 @@ def test_prepare_selected_period_artifacts_multiindex(monkeypatch, tmp_path: Pat
 
     monkeypatch.setattr(zones, "_download_image_to_path", fake_download)
 
-    aoi = {"type": "Polygon", "coordinates": [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]]}  # noqa: E501
+    aoi = {
+        "type": "Polygon",
+        "coordinates": [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]],
+    }  # noqa: E501
 
     artifacts, metadata = zones._prepare_selected_period_artifacts(
         aoi,
@@ -859,7 +888,9 @@ def test_classify_local_zones_includes_minimum_in_first_class(tmp_path: Path) ->
     assert np.isclose(metadata["percentile_thresholds"][0], float(custom_data.min()))
 
 
-def test_classify_local_zones_preserves_classes_without_smoothing(tmp_path: Path) -> None:
+def test_classify_local_zones_preserves_classes_without_smoothing(
+    tmp_path: Path,
+) -> None:
     ndvi_path = tmp_path / "mean_ndvi_minimal_smoothing.tif"
     values = np.linspace(0.05, 0.95, 36, dtype=np.float32).reshape(6, 6)
     _write_ndvi_raster(ndvi_path, data=values)
@@ -1018,17 +1049,23 @@ def test_classify_local_zones_uses_kmeans_fallback_for_sparse_bins(
     with rasterio.open(artifacts.raster_path) as classified:
         classified_data = classified.read(1)
 
-    populated_classes = sorted({int(value) for value in np.unique(classified_data) if value > 0})
+    populated_classes = sorted(
+        {int(value) for value in np.unique(classified_data) if value > 0}
+    )
     assert populated_classes == [1, 2, 3, 4, 5]
 
     assert metadata["kmeans_fallback_applied"] is True
     assert metadata["classification_method"] == "kmeans"
     assert metadata["percentile_thresholds"] == []
     assert len(metadata["kmeans_cluster_centers"]) == 5
-    assert metadata["kmeans_cluster_centers"] == sorted(metadata["kmeans_cluster_centers"])
+    assert metadata["kmeans_cluster_centers"] == sorted(
+        metadata["kmeans_cluster_centers"]
+    )
 
 
-def test_export_selected_period_zones_returns_local_paths(monkeypatch, tmp_path: Path) -> None:
+def test_export_selected_period_zones_returns_local_paths(
+    monkeypatch, tmp_path: Path
+) -> None:
     def fake_prepare(aoi_geojson, **kwargs):
         workdir = kwargs["working_dir"]
         ndvi_path = workdir / "mean_ndvi.tif"
@@ -1087,14 +1124,13 @@ def test_export_selected_period_zones_returns_local_paths(monkeypatch, tmp_path:
     reader = shapefile.Reader(str(paths["vectors"]))
     field_names = [field[0] for field in reader.fields[1:]]
     zone_index = field_names.index("zone") if "zone" in field_names else 0
-    zones_in_file = {
-        record.record[zone_index]
-        for record in reader.iterShapeRecords()
-    }
+    zones_in_file = {record.record[zone_index] for record in reader.iterShapeRecords()}
     assert set(zones_in_file) <= set(range(1, 6))
 
 
-def test_export_selected_period_zones_preserves_thresholds_for_kmeans(monkeypatch, tmp_path: Path) -> None:
+def test_export_selected_period_zones_preserves_thresholds_for_kmeans(
+    monkeypatch, tmp_path: Path
+) -> None:
     def fake_prepare(aoi_geojson, **kwargs):
         workdir = kwargs["working_dir"]
         ndvi_path = workdir / "mean_ndvi.tif"
@@ -1208,7 +1244,11 @@ def test_classify_by_percentiles_handles_duplicate_thresholds(monkeypatch) -> No
 
         def multiply(self, scalar):
             factor = float(scalar)
-            return FakeImage([value * factor for value in self.values], self.reducer_result, self.band_name)
+            return FakeImage(
+                [value * factor for value in self.values],
+                self.reducer_result,
+                self.band_name,
+            )
 
         def gt(self, threshold):
             thresh = float(threshold)
@@ -1226,7 +1266,9 @@ def test_classify_by_percentiles_handles_duplicate_thresholds(monkeypatch) -> No
             return FakeImage(values, None, self.band_name)
 
         def toInt(self):
-            return FakeImage([int(round(value)) for value in self.values], None, self.band_name)
+            return FakeImage(
+                [int(round(value)) for value in self.values], None, self.band_name
+            )
 
     fake_ee = type(
         "FakeEE",
@@ -1236,7 +1278,11 @@ def test_classify_by_percentiles_handles_duplicate_thresholds(monkeypatch) -> No
             "List": staticmethod(lambda values: FakeEEList(values)),
             "Number": staticmethod(lambda value: FakeNumber(value)),
             "Image": staticmethod(lambda value: value),
-            "Reducer": type("Reducer", (), {"percentile": staticmethod(lambda *args, **kwargs: (args, kwargs))})(),
+            "Reducer": type(
+                "Reducer",
+                (),
+                {"percentile": staticmethod(lambda *args, **kwargs: (args, kwargs))},
+            )(),
         },
     )
 
@@ -1245,7 +1291,9 @@ def test_classify_by_percentiles_handles_duplicate_thresholds(monkeypatch) -> No
     values = [0.1, 0.20000000000000003, 0.3, 0.51, 0.81]
     image = FakeImage(values, FakeReducerResult(reducer_payload))
 
-    classified, thresholds = zones._classify_by_percentiles(image, geometry=object(), n_classes=5)
+    classified, thresholds = zones._classify_by_percentiles(
+        image, geometry=object(), n_classes=5
+    )
 
     assert all(later > earlier for earlier, later in zip(thresholds, thresholds[1:]))
     assert set(classified.values) == {1, 2, 3, 4, 5}

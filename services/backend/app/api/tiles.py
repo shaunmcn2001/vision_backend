@@ -14,6 +14,7 @@ from app.services.tiles import (
 
 router = APIRouter()
 
+
 def _collect_overrides(
     vis_min: float | None,
     vis_max: float | None,
@@ -75,6 +76,7 @@ def tiles_ndvi_annual(
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Tile failed: {e}")
+
 
 @router.get("/tiles/ndvi/month/{field_id}/{year}/{month}")
 def tiles_ndvi_month(

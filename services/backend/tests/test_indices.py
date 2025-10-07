@@ -26,27 +26,50 @@ SAMPLE_BANDS = {
 
 msavi_expected = (
     (2 * SAMPLE_BANDS["B8"] + 1)
-    - math.sqrt((2 * SAMPLE_BANDS["B8"] + 1) ** 2 - 8 * (SAMPLE_BANDS["B8"] - SAMPLE_BANDS["B4"]))
+    - math.sqrt(
+        (2 * SAMPLE_BANDS["B8"] + 1) ** 2
+        - 8 * (SAMPLE_BANDS["B8"] - SAMPLE_BANDS["B4"])
+    )
 ) / 2
 
 
 @pytest.mark.parametrize(
     "index_name,expected",
     [
-        ("NDVI", (SAMPLE_BANDS["B8"] - SAMPLE_BANDS["B4"]) / (SAMPLE_BANDS["B8"] + SAMPLE_BANDS["B4"])),
+        (
+            "NDVI",
+            (SAMPLE_BANDS["B8"] - SAMPLE_BANDS["B4"])
+            / (SAMPLE_BANDS["B8"] + SAMPLE_BANDS["B4"]),
+        ),
         (
             "EVI",
             2.5
-            * (SAMPLE_BANDS["B8"] - SAMPLE_BANDS["B4"]) / (
-                SAMPLE_BANDS["B8"] + 6 * SAMPLE_BANDS["B4"] - 7.5 * SAMPLE_BANDS["B2"] + 1
+            * (SAMPLE_BANDS["B8"] - SAMPLE_BANDS["B4"])
+            / (
+                SAMPLE_BANDS["B8"]
+                + 6 * SAMPLE_BANDS["B4"]
+                - 7.5 * SAMPLE_BANDS["B2"]
+                + 1
             ),
         ),
         ("MSAVI", msavi_expected),
-        ("NDMI", (SAMPLE_BANDS["B8"] - SAMPLE_BANDS["B11"]) / (SAMPLE_BANDS["B8"] + SAMPLE_BANDS["B11"])),
+        (
+            "NDMI",
+            (SAMPLE_BANDS["B8"] - SAMPLE_BANDS["B11"])
+            / (SAMPLE_BANDS["B8"] + SAMPLE_BANDS["B11"]),
+        ),
         (
             "BSI",
-            (SAMPLE_BANDS["B11"] + SAMPLE_BANDS["B4"] - (SAMPLE_BANDS["B8"] + SAMPLE_BANDS["B2"]))
-            / (SAMPLE_BANDS["B11"] + SAMPLE_BANDS["B4"] + (SAMPLE_BANDS["B8"] + SAMPLE_BANDS["B2"]))
+            (
+                SAMPLE_BANDS["B11"]
+                + SAMPLE_BANDS["B4"]
+                - (SAMPLE_BANDS["B8"] + SAMPLE_BANDS["B2"])
+            )
+            / (
+                SAMPLE_BANDS["B11"]
+                + SAMPLE_BANDS["B4"]
+                + (SAMPLE_BANDS["B8"] + SAMPLE_BANDS["B2"])
+            ),
         ),
     ],
 )
