@@ -51,7 +51,9 @@ class FakeImage:
         return FakeIndexBand(self._month, self._capture)
 
     def addBands(self, image):
-        self._capture.setdefault("added_bands", []).append(getattr(image, "band_name", None))
+        self._capture.setdefault("added_bands", []).append(
+            getattr(image, "band_name", None)
+        )
         return self
 
     def select(self, band):

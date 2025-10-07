@@ -74,7 +74,9 @@ def shapefile_zip_to_geojson(file_bytes: bytes) -> dict:
                     ) as target:
                         shutil.copyfileobj(source, target)
         except zipfile.BadZipFile as exc:
-            raise HTTPException(status_code=400, detail="Uploaded file is not a valid ZIP archive.") from exc
+            raise HTTPException(
+                status_code=400, detail="Uploaded file is not a valid ZIP archive."
+            ) from exc
 
         shp_path = None
         for root, _, files in os.walk(td):
@@ -87,14 +89,18 @@ def shapefile_zip_to_geojson(file_bytes: bytes) -> dict:
 
         if not shp_path:
             logger.warning("ZIP archive contained no .shp file after recursive search.")
-            raise HTTPException(status_code=400, detail="ZIP archive must contain a polygon .shp file.")
+            raise HTTPException(
+                status_code=400, detail="ZIP archive must contain a polygon .shp file."
+            )
 
         logger.debug("Using shapefile located at %s", shp_path)
 
         try:
             reader = shapefile.Reader(shp_path)
         except shapefile.ShapefileException as exc:
-            raise HTTPException(status_code=400, detail=f"Could not read shapefile: {exc}") from exc
+            raise HTTPException(
+                status_code=400, detail=f"Could not read shapefile: {exc}"
+            ) from exc
 
         geoms: List[Polygon | MultiPolygon] = []
         for shp in reader.shapes():

@@ -169,9 +169,7 @@ def _maybe_log_collection_diagnostics(
         return
 
     debug_logger = logger.getChild("ee")
-    debug_logger.info(
-        "EE debug [%s]: starting diagnostics for collection", band_name
-    )
+    debug_logger.info("EE debug [%s]: starting diagnostics for collection", band_name)
 
     try:
         first = ee.Image(collection.first())
@@ -200,10 +198,12 @@ def _maybe_log_collection_diagnostics(
             tileScale=4,
             maxPixels=EE_REDUCE_MAX_PIXELS,
         )
-        return ee.Dictionary({
-            "id": image.get("system:id"),
-            "minmax": mm,
-        })
+        return ee.Dictionary(
+            {
+                "id": image.get("system:id"),
+                "minmax": mm,
+            }
+        )
 
     try:
         sample = ee.List(
@@ -223,9 +223,7 @@ def _maybe_log_collection_diagnostics(
 
     band_collection = ee.ImageCollection(collection).select([band_name])
     raw_sum = band_collection.reduce(ee.Reducer.sum()).rename(f"{band_name}_sum")
-    raw_count = band_collection.reduce(ee.Reducer.count()).rename(
-        f"{band_name}_count"
-    )
+    raw_count = band_collection.reduce(ee.Reducer.count()).rename(f"{band_name}_count")
 
     try:
         sum_stats = raw_sum.reduceRegion(
@@ -236,9 +234,7 @@ def _maybe_log_collection_diagnostics(
             tileScale=4,
             maxPixels=EE_REDUCE_MAX_PIXELS,
         ).getInfo()
-        debug_logger.info(
-            "EE debug [%s]: raw_sum min/max: %s", band_name, sum_stats
-        )
+        debug_logger.info("EE debug [%s]: raw_sum min/max: %s", band_name, sum_stats)
     except Exception as exc:  # pragma: no cover - diagnostic only
         debug_logger.warning(
             "EE debug [%s]: failed to compute raw_sum stats: %s", band_name, exc
@@ -262,8 +258,10 @@ def _maybe_log_collection_diagnostics(
         )
 
     safe_count = raw_count.where(raw_count.eq(0), 1)
-    mean = raw_sum.divide(safe_count).rename(f"{band_name}_mean").updateMask(
-        raw_count.gt(0)
+    mean = (
+        raw_sum.divide(safe_count)
+        .rename(f"{band_name}_mean")
+        .updateMask(raw_count.gt(0))
     )
 
     try:
@@ -275,9 +273,7 @@ def _maybe_log_collection_diagnostics(
             tileScale=4,
             maxPixels=EE_REDUCE_MAX_PIXELS,
         ).getInfo()
-        debug_logger.info(
-            "EE debug [%s]: mean min/max: %s", band_name, mean_stats
-        )
+        debug_logger.info("EE debug [%s]: mean min/max: %s", band_name, mean_stats)
     except Exception as exc:  # pragma: no cover - diagnostic only
         debug_logger.warning(
             "EE debug [%s]: failed to compute mean min/max: %s", band_name, exc
@@ -292,9 +288,7 @@ def _maybe_log_collection_diagnostics(
             tileScale=4,
             maxPixels=EE_REDUCE_MAX_PIXELS,
         ).getInfo()
-        debug_logger.info(
-            "EE debug [%s]: mean histogram: %s", band_name, histogram
-        )
+        debug_logger.info("EE debug [%s]: mean histogram: %s", band_name, histogram)
     except Exception as exc:  # pragma: no cover - diagnostic only
         debug_logger.warning(
             "EE debug [%s]: failed to compute mean histogram: %s",
@@ -303,22 +297,30 @@ def _maybe_log_collection_diagnostics(
         )
 
     try:
-        valid_pixels = mean.mask().reduceRegion(
-            reducer=ee.Reducer.count(),
-            geometry=geometry,
-            scale=scale,
-            bestEffort=True,
-            tileScale=4,
-            maxPixels=EE_REDUCE_MAX_PIXELS,
-        ).getInfo()
-        total_pixels = mean.unmask().reduceRegion(
-            reducer=ee.Reducer.count(),
-            geometry=geometry,
-            scale=scale,
-            bestEffort=True,
-            tileScale=4,
-            maxPixels=EE_REDUCE_MAX_PIXELS,
-        ).getInfo()
+        valid_pixels = (
+            mean.mask()
+            .reduceRegion(
+                reducer=ee.Reducer.count(),
+                geometry=geometry,
+                scale=scale,
+                bestEffort=True,
+                tileScale=4,
+                maxPixels=EE_REDUCE_MAX_PIXELS,
+            )
+            .getInfo()
+        )
+        total_pixels = (
+            mean.unmask()
+            .reduceRegion(
+                reducer=ee.Reducer.count(),
+                geometry=geometry,
+                scale=scale,
+                bestEffort=True,
+                tileScale=4,
+                maxPixels=EE_REDUCE_MAX_PIXELS,
+            )
+            .getInfo()
+        )
         debug_logger.info(
             "EE debug [%s]: valid_pixels=%s total_pixels=%s",
             band_name,
@@ -469,9 +471,7 @@ def compute_monthly_index(
             and EE_MIN_VALID_PIXEL_RATIO > 0
             and (valid_pixels / total_pixels) < EE_MIN_VALID_PIXEL_RATIO
         ):
-            fallback_reasons.append(
-                f"valid_ratio<{EE_MIN_VALID_PIXEL_RATIO:.3f}"
-            )
+            fallback_reasons.append(f"valid_ratio<{EE_MIN_VALID_PIXEL_RATIO:.3f}")
 
         if fallback_reasons:
             fallback_image = stats.get("mean_unmasked")
@@ -526,9 +526,11 @@ def compute_monthly_index(
         "index": {
             "code": definition.code,
             "band": definition.band_name,
-            "valid_range": list(definition.valid_range)
-            if definition.valid_range is not None
-            else None,
+            "valid_range": (
+                list(definition.valid_range)
+                if definition.valid_range is not None
+                else None
+            ),
             "parameters": dict(resolved_params),
         },
         "data": values,

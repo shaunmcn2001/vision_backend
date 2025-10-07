@@ -13,12 +13,16 @@ from shapely.geometry import shape
 try:
     from app.utils.diag import PipelineError  # structured pipeline errors
 except Exception:  # defensive shim; do not break if helper not present
+
     class PipelineError(Exception):
-        def __init__(self, code: str, msg: str, hints: str | None = None, ctx: dict | None = None):
+        def __init__(
+            self, code: str, msg: str, hints: str | None = None, ctx: dict | None = None
+        ):
             super().__init__(msg)
             self.code = code
             self.hints = hints
             self.ctx = ctx or {}
+
 
 from app.services import zones as zone_service
 from app.utils.sanitization import sanitize_for_json
@@ -59,20 +63,22 @@ class ProductionZonesRequest(_BaseAOIRequest):
         "ndvi_percentiles",
         description="Classification method for production zones",
     )
-    months: Optional[List[str]] = Field(
-        None, description="Months in YYYY-MM format"
-    )
+    months: Optional[List[str]] = Field(None, description="Months in YYYY-MM format")
     start_month: Optional[str] = Field(
-        None, description="Start month in YYYY-MM format (inclusive)",
+        None,
+        description="Start month in YYYY-MM format (inclusive)",
     )
     end_month: Optional[str] = Field(
-        None, description="End month in YYYY-MM format (inclusive)",
+        None,
+        description="End month in YYYY-MM format (inclusive)",
     )
     start_date: Optional[date] = Field(
-        None, description="Start date in YYYY-MM-DD format (inclusive)",
+        None,
+        description="Start date in YYYY-MM-DD format (inclusive)",
     )
     end_date: Optional[date] = Field(
-        None, description="End date in YYYY-MM-DD format (inclusive)",
+        None,
+        description="End date in YYYY-MM-DD format (inclusive)",
     )
     cloud_prob_max: int = Field(zone_service.DEFAULT_CLOUD_PROB_MAX, ge=0, le=100)
     n_classes: int = Field(zone_service.DEFAULT_N_CLASSES, ge=3, le=7)
@@ -86,11 +92,15 @@ class ProductionZonesRequest(_BaseAOIRequest):
     export_target: Literal["zip", "gcs", "drive"] = Field(
         "zip", description="Destination for exports"
     )
-    gcs_bucket: Optional[str] = Field(None, description="Override GCS bucket for exports")
+    gcs_bucket: Optional[str] = Field(
+        None, description="Override GCS bucket for exports"
+    )
     gcs_prefix: Optional[str] = Field(
         None, description="Optional prefix before zones/ when exporting to GCS"
     )
-    include_zonal_stats: bool = Field(True, description="Export per-zone statistics CSV")
+    include_zonal_stats: bool = Field(
+        True, description="Export per-zone statistics CSV"
+    )
     apply_stability_mask: Optional[bool] = Field(
         None,
         description=(
@@ -132,7 +142,9 @@ class ProductionZonesRequest(_BaseAOIRequest):
             try:
                 return datetime.strptime(month_str, "%Y-%m")
             except ValueError as exc:  # pragma: no cover - defensive
-                raise ValueError(f"Invalid month format for {field_name}: {value}") from exc
+                raise ValueError(
+                    f"Invalid month format for {field_name}: {value}"
+                ) from exc
 
         def _month_end(dt: datetime) -> date:
             last_day = calendar.monthrange(dt.year, dt.month)[1]
@@ -145,7 +157,9 @@ class ProductionZonesRequest(_BaseAOIRequest):
             try:
                 return date.fromisoformat(value_str)
             except ValueError as exc:
-                raise ValueError(f"Invalid date format for {field_name}: {value}") from exc
+                raise ValueError(
+                    f"Invalid date format for {field_name}: {value}"
+                ) from exc
 
         if months_provided:
             parsed_months: List[str] = []
@@ -169,7 +183,9 @@ class ProductionZonesRequest(_BaseAOIRequest):
 
         if month_range_provided:
             if start_month is None or end_month is None:
-                raise ValueError("Both start_month and end_month must be provided together")
+                raise ValueError(
+                    "Both start_month and end_month must be provided together"
+                )
             start_dt = _parse_month(start_month, "start_month")
             end_dt = _parse_month(end_month, "end_month")
             if end_dt < start_dt:
@@ -229,7 +245,9 @@ class ProductionZonesRequest(_BaseAOIRequest):
 
 
 @router.post("/production")
-def create_production_zones(request: ProductionZonesRequest, diagnostics: bool = Query(False)):
+def create_production_zones(
+    request: ProductionZonesRequest, diagnostics: bool = Query(False)
+):
     resolved_bucket: Optional[str] = request.gcs_bucket
     if request.export_target == "gcs":
         resolved_bucket = (
@@ -273,14 +291,20 @@ def create_production_zones(request: ProductionZonesRequest, diagnostics: bool =
     except PipelineError as exc:
         logger.warning(
             "Pipeline error for AOI %s (target %s): %s",
-            request.aoi_name, request.export_target, exc, exc_info=True,
+            request.aoi_name,
+            request.export_target,
+            exc,
+            exc_info=True,
         )
-        raise HTTPException(status_code=422, detail={
-            "code": getattr(exc, "code", "E_PIPELINE"),
-            "message": str(exc),
-            "hints": getattr(exc, "hints", None),
-            "context": getattr(exc, "ctx", {}),
-        }) from exc
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": getattr(exc, "code", "E_PIPELINE"),
+                "message": str(exc),
+                "hints": getattr(exc, "hints", None),
+                "context": getattr(exc, "ctx", {}),
+            },
+        ) from exc
     except ValueError as exc:
         logger.warning(
             "Zone production request validation failed for AOI %s (target %s): %s",
@@ -305,7 +329,11 @@ def create_production_zones(request: ProductionZonesRequest, diagnostics: bool =
     ym_start = used_months[0]
     ym_end = used_months[-1]
 
-    palette = result.get("palette") or metadata.get("palette") if isinstance(metadata, dict) else None
+    palette = (
+        result.get("palette") or metadata.get("palette")
+        if isinstance(metadata, dict)
+        else None
+    )
     thresholds = result.get("thresholds") or (
         metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
     )
@@ -333,12 +361,16 @@ def create_production_zones(request: ProductionZonesRequest, diagnostics: bool =
     if isinstance(debug_info, dict):
         stability_extra = debug_info.get("stability")
         if isinstance(stability_extra, dict):
-            stability_meta.update({k: v for k, v in stability_extra.items() if v is not None})
+            stability_meta.update(
+                {k: v for k, v in stability_extra.items() if v is not None}
+            )
 
     debug_payload = {
         "requested_months": request.months,
         "used_months": used_months,
-        "skipped_months": metadata.get("skipped_months", []) if isinstance(metadata, dict) else [],
+        "skipped_months": (
+            metadata.get("skipped_months", []) if isinstance(metadata, dict) else []
+        ),
         "retry_thresholds": stability_meta.get("thresholds_tested", []),
         "stability": stability_meta or None,
     }
@@ -366,5 +398,3 @@ def create_production_zones(request: ProductionZonesRequest, diagnostics: bool =
         response["debug"] = sanitize_for_json(response.get("debug"))
 
     return response
-
-

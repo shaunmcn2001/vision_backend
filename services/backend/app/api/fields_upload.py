@@ -13,6 +13,7 @@ router = APIRouter()
 
 MIN_FIELD_HA = float(os.getenv("MIN_FIELD_HA", "1.0"))  # default 1 ha
 
+
 def _kml_or_kmz_to_geojson(file_bytes: bytes, is_kmz: bool) -> dict:
     """
     Extract polygons from KML/KMZ → MultiPolygon (EPSG:4326).
@@ -22,7 +23,9 @@ def _kml_or_kmz_to_geojson(file_bytes: bytes, is_kmz: bool) -> dict:
     if is_kmz:
         with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as z:
             # find the first .kml inside KMZ
-            kml_name = next((n for n in z.namelist() if n.lower().endswith(".kml")), None)
+            kml_name = next(
+                (n for n in z.namelist() if n.lower().endswith(".kml")), None
+            )
             if not kml_name:
                 raise HTTPException(status_code=400, detail="KMZ has no KML inside.")
             data = z.read(kml_name)
@@ -48,7 +51,11 @@ def _kml_or_kmz_to_geojson(file_bytes: bytes, is_kmz: bool) -> dict:
                     else mapping(feat.geometry)
                 )
                 g = shape(geom_src)
-                if isinstance(g, (Polygon, MultiPolygon)) and g.is_valid and not g.is_empty:
+                if (
+                    isinstance(g, (Polygon, MultiPolygon))
+                    and g.is_valid
+                    and not g.is_empty
+                ):
                     out.append(g)
             except Exception:
                 pass
@@ -57,16 +64,19 @@ def _kml_or_kmz_to_geojson(file_bytes: bytes, is_kmz: bool) -> dict:
         return out
 
     geoms = []
-    for d in iter_features(k):          # Document(s)
+    for d in iter_features(k):  # Document(s)
         geoms.extend(extract_polys(d))
 
     mp = as_multipolygon(geoms)
     return mapping(mp)
 
+
 @router.post("/upload")
 async def upload_field(
-    file: UploadFile = File(..., description="Shapefile ZIP (.zip), KML (.kml) or KMZ (.kmz)"),
-    name: Optional[str] = Form(None)
+    file: UploadFile = File(
+        ..., description="Shapefile ZIP (.zip), KML (.kml) or KMZ (.kmz)"
+    ),
+    name: Optional[str] = Form(None),
 ):
     fname = (file.filename or "").lower()
     content = await file.read()
@@ -79,7 +89,10 @@ async def upload_field(
         elif fname.endswith(".kmz"):
             geom = _kml_or_kmz_to_geojson(content, is_kmz=True)
         else:
-            raise HTTPException(status_code=415, detail="Unsupported file type. Use .zip (shapefile), .kml, or .kmz.")
+            raise HTTPException(
+                status_code=415,
+                detail="Unsupported file type. Use .zip (shapefile), .kml, or .kmz.",
+            )
     except HTTPException:
         raise
     except Exception as e:
@@ -92,7 +105,10 @@ async def upload_field(
         raise HTTPException(status_code=400, detail=f"Area calculation failed: {e}")
 
     if area < MIN_FIELD_HA:
-        raise HTTPException(status_code=400, detail=f"Field area {area:.2f} ha < minimum {MIN_FIELD_HA} ha")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Field area {area:.2f} ha < minimum {MIN_FIELD_HA} ha",
+        )
 
     # Save to GCS
     field_id = uuid4().hex[:12]
@@ -103,7 +119,7 @@ async def upload_field(
         "id": field_id,
         "name": field_name,
         "area_ha": round(area, 4),
-        "created_at": created_at
+        "created_at": created_at,
     }
     geom_path = f"fields/{field_id}/field.geojson"
     meta_path = f"fields/{field_id}/meta.json"
@@ -115,7 +131,14 @@ async def upload_field(
     # Append to index
     try:
         idx = download_json(index_path) if exists(index_path) else []
-        idx.append({"id": field_id, "name": field_name, "area_ha": round(area, 4), "created_at": created_at})
+        idx.append(
+            {
+                "id": field_id,
+                "name": field_name,
+                "area_ha": round(area, 4),
+                "created_at": created_at,
+            }
+        )
         upload_json(idx, index_path)
     except Exception:
         pass

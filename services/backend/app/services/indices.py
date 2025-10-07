@@ -30,7 +30,9 @@ class IndexDefinition:
     parameter_builder: ParameterBuilder = field(default=_default_parameter_builder)
     default_scale: int = 10
 
-    def prepare_parameters(self, params: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+    def prepare_parameters(
+        self, params: Mapping[str, Any] | None = None
+    ) -> Dict[str, Any]:
         return self.parameter_builder(params)
 
     def default_visualization(self) -> Dict[str, Any]:
@@ -55,9 +57,7 @@ def _compute_evi(image: ee.Image, params: Mapping[str, Any]) -> ee.Image:
     blue = image.select("B2")
     numerator = nir.subtract(red).multiply(2.5)
     denominator = (
-        nir.add(red.multiply(6))
-        .subtract(blue.multiply(7.5))
-        .add(ee.Image.constant(1))
+        nir.add(red.multiply(6)).subtract(blue.multiply(7.5)).add(ee.Image.constant(1))
     )
     return numerator.divide(denominator).rename("EVI")
 

@@ -1,4 +1,5 @@
 """Production zone workflow built on Sentinel-2 monthly composites."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -79,6 +80,7 @@ def _to_ee_geometry(geojson: dict) -> ee.Geometry:
         return ee.Geometry(geojson)
     except Exception as e:
         raise ValueError(f"Invalid AOI GeoJSON: {e}")
+
 
 def _parse_bool_env(value: str | None, default: bool) -> bool:
     if value is None:
@@ -219,8 +221,10 @@ def _geometry_region(geometry: ee.Geometry) -> List[List[List[float]]]:
 def _is_zip_payload(content_type: str | None, payload: bytes) -> bool:
     if content_type and "zip" in content_type.lower():
         return True
-    return payload.startswith(b"PK\x03\x04") or payload.startswith(b"PK\x05\x06") or payload.startswith(
-        b"PK\x07\x08"
+    return (
+        payload.startswith(b"PK\x03\x04")
+        or payload.startswith(b"PK\x05\x06")
+        or payload.startswith(b"PK\x07\x08")
     )
 
 
@@ -397,7 +401,9 @@ def _assemble_zone_artifacts(
 
     records: List[Dict[str, object]] = []
     zonal_stats: List[Dict[str, object]] = []
-    for geom, value in shapes(classified_array, mask=classified_array > 0, transform=transform):
+    for geom, value in shapes(
+        classified_array, mask=classified_array > 0, transform=transform
+    ):
         zone_id = int(value)
         if zone_id <= 0:
             continue
@@ -458,7 +464,14 @@ def _assemble_zone_artifacts(
         with stats_path.open("w", newline="") as csv_file:
             writer = csv.DictWriter(
                 csv_file,
-                fieldnames=["zone", "area_ha", "mean_ndvi", "min_ndvi", "max_ndvi", "pixel_count"],
+                fieldnames=[
+                    "zone",
+                    "area_ha",
+                    "mean_ndvi",
+                    "min_ndvi",
+                    "max_ndvi",
+                    "pixel_count",
+                ],
             )
             writer.writeheader()
             writer.writerows(zonal_stats)
@@ -481,10 +494,13 @@ def _assemble_zone_artifacts(
         for stage_name, metadata_key in stage_key_map.items()
     }
     smoothing_executed = {
-        stage_key_map[name]: bool(executed_operations.get(name)) for name in stage_key_map
+        stage_key_map[name]: bool(executed_operations.get(name))
+        for name in stage_key_map
     }
 
-    skipped_steps = [stage_key_map[name] for name in fallback_removed if name in stage_key_map]
+    skipped_steps = [
+        stage_key_map[name] for name in fallback_removed if name in stage_key_map
+    ]
     skipped_steps = sorted(set(skipped_steps))
 
     final_zone_count = int(unique_zones.size)
@@ -572,7 +588,9 @@ def _classify_local_zones(
 
     percentiles = np.linspace(0, 100, effective_n_classes + 1)[1:-1]
     raw_thresholds = (
-        np.nanpercentile(valid_values, percentiles) if percentiles.size else np.array([])
+        np.nanpercentile(valid_values, percentiles)
+        if percentiles.size
+        else np.array([])
     )
 
     thresholds = raw_thresholds
@@ -616,7 +634,9 @@ def _classify_local_zones(
                         max_idx = min(max_idx, B - 1)
                         if max_idx < min_idx:
                             min_idx = max_idx
-                        found_idx = int(np.searchsorted(boundary_props, target, side="left"))
+                        found_idx = int(
+                            np.searchsorted(boundary_props, target, side="left")
+                        )
                         if found_idx >= B:
                             found_idx = B - 1
                         idx = min(max(found_idx, min_idx), max_idx)
@@ -624,17 +644,25 @@ def _classify_local_zones(
                         prev_idx = idx
                     fallback_thresholds = np.array(
                         [
-                            (float(unique_sorted[idx]) + float(unique_sorted[idx + 1])) / 2.0
+                            (float(unique_sorted[idx]) + float(unique_sorted[idx + 1]))
+                            / 2.0
                             for idx in selected_indices
                         ],
                         dtype=float,
                     )
                     fallback_comparison = comparison_data
                     fallback_classified = (
-                        np.sum(fallback_comparison > fallback_thresholds, axis=-1, dtype=np.int16) + 1
+                        np.sum(
+                            fallback_comparison > fallback_thresholds,
+                            axis=-1,
+                            dtype=np.int16,
+                        )
+                        + 1
                     )
                     fallback_classified[combined_mask] = 0
-                    fallback_unique = np.unique(fallback_classified[fallback_classified > 0])
+                    fallback_unique = np.unique(
+                        fallback_classified[fallback_classified > 0]
+                    )
                     if fallback_unique.size == effective_n_classes:
                         thresholds = fallback_thresholds
                         classified = fallback_classified
@@ -692,14 +720,18 @@ def _classify_local_zones(
 
     fallback_removed: list[str] = []
     final_index = len(stage_results) - 1
-    unique_zones = np.unique(stage_results[final_index][1][stage_results[final_index][1] > 0])
+    unique_zones = np.unique(
+        stage_results[final_index][1][stage_results[final_index][1] > 0]
+    )
     while unique_zones.size < effective_n_classes and final_index > 0:
         stage_name = stage_results[final_index][0]
         if stage_name in applied_operations and applied_operations[stage_name]:
             applied_operations[stage_name] = False
             fallback_removed.append(stage_name)
         final_index -= 1
-        unique_zones = np.unique(stage_results[final_index][1][stage_results[final_index][1] > 0])
+        unique_zones = np.unique(
+            stage_results[final_index][1][stage_results[final_index][1] > 0]
+        )
 
     fallback_removed.reverse()
     fallback_applied = bool(fallback_removed)
@@ -873,7 +905,9 @@ def _month_bounds(months: Sequence[str]) -> tuple[str, str]:
 def _export_prefix(aoi_name: str, months: Sequence[str]) -> str:
     start, end = _month_bounds(months)
     safe_name = sanitize_name(aoi_name or "aoi")
-    return f"zones/PROD_{start.replace('-', '')}_{end.replace('-', '')}_{safe_name}_zones"
+    return (
+        f"zones/PROD_{start.replace('-', '')}_{end.replace('-', '')}_{safe_name}_zones"
+    )
 
 
 def export_prefix(aoi_name: str, months: Sequence[str]) -> str:
@@ -887,7 +921,9 @@ def month_bounds(months: Sequence[str]) -> tuple[str, str]:
 
 
 def resolve_export_bucket(explicit: str | None = None) -> str:
-    bucket = (explicit or os.getenv("GEE_GCS_BUCKET") or os.getenv("GCS_BUCKET") or "").strip()
+    bucket = (
+        explicit or os.getenv("GEE_GCS_BUCKET") or os.getenv("GCS_BUCKET") or ""
+    ).strip()
     if not bucket:
         raise RuntimeError("GEE_GCS_BUCKET or GCS_BUCKET must be set for zone exports")
     return bucket
@@ -931,7 +967,9 @@ def _mask_sentinel2_scene(image: ee.Image, cloud_prob_max: int) -> ee.Image:
     qa = image.select("QA60")
     cloud_bit_mask = 1 << 10
     cirrus_bit_mask = 1 << 11
-    qa_mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
+    qa_mask = (
+        qa.bitwiseAnd(cloud_bit_mask).eq(0).And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
+    )
 
     prob_mask = image.select("cloud_probability").lte(cloud_prob_max)
 
@@ -951,12 +989,20 @@ def _native_reproject(img: ee.Image) -> ee.Image:
     return img.resample("bilinear").reproject(proj, None, DEFAULT_SCALE)
 
 
-def _build_masked_s2_collection(*_args, **_kwargs):  # pragma: no cover - compatibility shim
-    raise NotImplementedError("_build_masked_s2_collection is not implemented in this module")
+def _build_masked_s2_collection(
+    *_args, **_kwargs
+):  # pragma: no cover - compatibility shim
+    raise NotImplementedError(
+        "_build_masked_s2_collection is not implemented in this module"
+    )
 
 
-def _build_composite_collection(*_args, **_kwargs):  # pragma: no cover - compatibility shim
-    raise NotImplementedError("_build_composite_collection is not implemented in this module")
+def _build_composite_collection(
+    *_args, **_kwargs
+):  # pragma: no cover - compatibility shim
+    raise NotImplementedError(
+        "_build_composite_collection is not implemented in this module"
+    )
 
 
 def _ndvi_collection(*_args, **_kwargs):  # pragma: no cover - compatibility shim
@@ -967,8 +1013,12 @@ def _ndvi_statistics(*_args, **_kwargs):  # pragma: no cover - compatibility shi
     raise NotImplementedError("_ndvi_statistics is not implemented in this module")
 
 
-def _ndvi_percentile_thresholds(*_args, **_kwargs):  # pragma: no cover - compatibility shim
-    raise NotImplementedError("_ndvi_percentile_thresholds is not implemented in this module")
+def _ndvi_percentile_thresholds(
+    *_args, **_kwargs
+):  # pragma: no cover - compatibility shim
+    raise NotImplementedError(
+        "_ndvi_percentile_thresholds is not implemented in this module"
+    )
 
 
 def _classify_percentiles(*_args, **_kwargs):  # pragma: no cover - compatibility shim
@@ -1414,7 +1464,8 @@ def _percentile_thresholds(
         thresholds.append(value)
 
     return thresholds
-    
+
+
 def _classify_by_percentiles(
     image: ee.Image, geometry: ee.Geometry, n_classes: int
 ) -> tuple[ee.Image, List[float]]:
@@ -1501,6 +1552,7 @@ def _classify_by_percentiles(
 
     return classified.rename("zone"), thresholds
 
+
 def _connected_component_area(classified: ee.Image, n_classes: int) -> ee.Image:
     pixel_area = ee.Image.pixelArea()
     band_names = classified.bandNames()
@@ -1529,27 +1581,29 @@ def _apply_cleanup(
 
     smoothed = classified
     if smooth_radius > 0:
-        smoothed = classified.focal_mode(radius=smooth_radius, units="meters", iterations=1)
+        smoothed = classified.focal_mode(
+            radius=smooth_radius, units="meters", iterations=1
+        )
 
     opened = smoothed
     if open_radius > 0:
-        opened = (
-            smoothed.focal_min(radius=open_radius, units="meters", iterations=1)
-            .focal_max(radius=open_radius, units="meters", iterations=1)
-        )
+        opened = smoothed.focal_min(
+            radius=open_radius, units="meters", iterations=1
+        ).focal_max(radius=open_radius, units="meters", iterations=1)
 
     closed = opened
     if close_radius > 0:
-        closed = (
-            opened.focal_max(radius=close_radius, units="meters", iterations=1)
-            .focal_min(radius=close_radius, units="meters", iterations=1)
-        )
+        closed = opened.focal_max(
+            radius=close_radius, units="meters", iterations=1
+        ).focal_min(radius=close_radius, units="meters", iterations=1)
 
     component_area = _connected_component_area(closed, n_classes)
     min_area_m2 = max(min_mapping_unit_ha, 0) * 10_000
     majority_large = closed
     if smooth_radius > 0:
-        majority_large = closed.focal_mode(radius=smooth_radius, units="meters", iterations=1)
+        majority_large = closed.focal_mode(
+            radius=smooth_radius, units="meters", iterations=1
+        )
     small_mask = component_area.lt(min_area_m2)
     if hasattr(small_mask, "rename") and hasattr(classified, "bandNames"):
         small_mask = small_mask.rename(classified.bandNames())
@@ -1558,9 +1612,9 @@ def _apply_cleanup(
     mask = cleaned.mask()
     closed_mask = mask
     if close_radius > 0:
-        closed_mask = mask.focal_max(radius=close_radius, units="meters", iterations=1).focal_min(
+        closed_mask = mask.focal_max(
             radius=close_radius, units="meters", iterations=1
-        )
+        ).focal_min(radius=close_radius, units="meters", iterations=1)
     filler = cleaned
     if smooth_radius > 0:
         filler = cleaned.focal_mode(radius=smooth_radius, units="meters", iterations=1)
@@ -1770,14 +1824,13 @@ def _simplify_vectors(
         zone_value = ee.Number(feature.get("zone")).toInt()
         area_m2 = geom.area(maxError=1)
         area_ha_val = area_m2.divide(10_000)
-        return (
-            feature.setGeometry(geom)
-            .set({
+        return feature.setGeometry(geom).set(
+            {
                 "zone": zone_value,
                 "zone_id": zone_value,
                 "area_m2": area_m2,
                 "area_ha": area_ha_val,
-            })
+            }
         )
 
     return ee.FeatureCollection(vectors.map(_simplify))
@@ -1852,7 +1905,9 @@ def _collect_stats_images(
     return stats
 
 
-def _add_zonal_stats(feature: ee.Feature, stats_images: Mapping[str, ee.Image]) -> ee.Feature:
+def _add_zonal_stats(
+    feature: ee.Feature, stats_images: Mapping[str, ee.Image]
+) -> ee.Feature:
     geometry = feature.geometry()
     area_ha_val = geometry.area(maxError=1).divide(10_000)
     ordered = [stats_images[name].rename(name) for name in sorted(stats_images)]
@@ -1915,7 +1970,9 @@ def _add_zonal_stats(feature: ee.Feature, stats_images: Mapping[str, ee.Image]) 
     def _merge(entry: ee.ComputedObject, acc: ee.ComputedObject) -> ee.Dictionary:
         return ee.Dictionary(acc).combine(ee.Dictionary(entry))
 
-    sanitized_stats = ee.Dictionary(keys.map(_sanitize_value).iterate(_merge, ee.Dictionary({})))
+    sanitized_stats = ee.Dictionary(
+        keys.map(_sanitize_value).iterate(_merge, ee.Dictionary({}))
+    )
     zone_value = ee.Number(feature.get("zone")).toInt()
     return feature.set(sanitized_stats).set(
         {"area_ha": area_ha_val, "zone": zone_value, "zone_id": zone_value}
@@ -1941,15 +1998,15 @@ def _build_percentile_zones(
         thresholds_image, geometry, n_classes
     )
     # Now classify the full pct_source, then apply stability mask afterwards
-    ranked_full, _ = _classify_by_percentiles(
-        pct_source, geometry, n_classes
-    )
+    ranked_full, _ = _classify_by_percentiles(pct_source, geometry, n_classes)
     ranked = ranked_full.updateMask(ndvi_stats["stability"])
 
     try:
         percentile_thresholds = [float(value) for value in thresholds]
     except (TypeError, ValueError) as exc:  # pragma: no cover
-        raise RuntimeError(f"Failed to evaluate NDVI percentile thresholds: {exc}") from exc
+        raise RuntimeError(
+            f"Failed to evaluate NDVI percentile thresholds: {exc}"
+        ) from exc
 
     cleaned = _apply_cleanup(
         ranked,
@@ -1963,7 +2020,9 @@ def _build_percentile_zones(
     return cleaned.rename("zone"), percentile_thresholds
 
 
-def _normalise_feature(mean_image: ee.Image, geometry: ee.Geometry, name: str) -> ee.Image:
+def _normalise_feature(
+    mean_image: ee.Image, geometry: ee.Geometry, name: str
+) -> ee.Image:
     def _first_value(result: Mapping[str, object] | object) -> object:
         if isinstance(result, Mapping):
             for value in result.values():
@@ -1974,7 +2033,12 @@ def _normalise_feature(mean_image: ee.Image, geometry: ee.Geometry, name: str) -
             return values.get(0, 0)
         try:
             return values[0]
-        except (TypeError, KeyError, IndexError, AttributeError):  # pragma: no cover - defensive
+        except (
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+        ):  # pragma: no cover - defensive
             return 0
 
     stats = mean_image.reduceRegion(
@@ -1998,7 +2062,9 @@ def _normalise_feature(mean_image: ee.Image, geometry: ee.Geometry, name: str) -
     return mean_image.subtract(mean_value).divide(std_value).rename(f"norm_{name}")
 
 
-def _rank_zones(cluster_image: ee.Image, ndvi_mean: ee.Image, geometry: ee.Geometry) -> ee.Image:
+def _rank_zones(
+    cluster_image: ee.Image, ndvi_mean: ee.Image, geometry: ee.Geometry
+) -> ee.Image:
     cluster_band = cluster_image.rename("cluster")
     stats_image = cluster_band.addBands(ndvi_mean.rename("mean_ndvi"))
     grouped = stats_image.reduceRegion(
@@ -2021,7 +2087,9 @@ def _rank_zones(cluster_image: ee.Image, ndvi_mean: ee.Image, geometry: ee.Geome
         )
 
     sorted_groups = groups.map(_cluster_value).sort("mean_ndvi")
-    source = ee.List(sorted_groups.map(lambda g: ee.Number(ee.Dictionary(g).get("cluster"))))
+    source = ee.List(
+        sorted_groups.map(lambda g: ee.Number(ee.Dictionary(g).get("cluster")))
+    )
     target = ee.List.sequence(1, source.size())
     ranked = ee.Image(
         ee.Algorithms.If(
@@ -2141,12 +2209,17 @@ def _build_multiindex_zones(
     sample_size: int,
 ) -> tuple[ee.Image, Dict[str, ee.Image], CleanupResult]:
     indices = {
-        "NDVI": [image.normalizedDifference(["B8", "B4"]).rename("NDVI") for image in composites],
+        "NDVI": [
+            image.normalizedDifference(["B8", "B4"]).rename("NDVI")
+            for image in composites
+        ],
         "NDRE": [
-            image.normalizedDifference(["B8", "B5"]).rename("NDRE") for image in composites
+            image.normalizedDifference(["B8", "B5"]).rename("NDRE")
+            for image in composites
         ],
         "NDMI": [
-            image.normalizedDifference(["B8", "B11"]).rename("NDMI") for image in composites
+            image.normalizedDifference(["B8", "B11"]).rename("NDMI")
+            for image in composites
         ],
         "BSI": [
             image.expression(
@@ -2167,7 +2240,10 @@ def _build_multiindex_zones(
         collection = ee.ImageCollection(stack)
         mean_images[name] = collection.mean().rename(f"{name}_mean")
 
-    normalised = [_normalise_feature(mean_images[name], geometry, name) for name in sorted(mean_images)]
+    normalised = [
+        _normalise_feature(mean_images[name], geometry, name)
+        for name in sorted(mean_images)
+    ]
     stack = ee.Image.cat(normalised)
     stack = stack.updateMask(ndvi_stats["stability"])
 
@@ -2285,7 +2361,9 @@ def _prepare_selected_period_artifacts(
         cloud_prob_max,
     )
     if not composites:
-        raise ValueError("No valid Sentinel-2 scenes were found for the selected months")
+        raise ValueError(
+            "No valid Sentinel-2 scenes were found for the selected months"
+        )
 
     composite_images = [image for _, image in composites]
 
@@ -2315,7 +2393,9 @@ def _prepare_selected_period_artifacts(
                 )
                 fill_source = neighbors.updateMask(small_holes)
             except Exception:  # pragma: no cover - logging guard
-                logger.exception("Failed to apply NDVI hole size mask; using full neighbors")
+                logger.exception(
+                    "Failed to apply NDVI hole size mask; using full neighbors"
+                )
             mean_image = mean_image.unmask(fill_source)
             mean_image = mean_image.clip(geometry).rename("NDVI_mean")
             ndvi_stats["mean"] = mean_image
@@ -2388,7 +2468,9 @@ def _prepare_selected_period_artifacts(
     except Exception:  # pragma: no cover - logging guard
         logger.exception("Failed to compute NDVI percentile diagnostics")
 
-    stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
+    stability_flag = (
+        APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
+    )
     if stability_flag:
         stability_image = _stability_mask(
             ndvi_stats["cv"],
@@ -2486,7 +2568,9 @@ def _prepare_selected_period_artifacts(
 
         populated = classified_data[classified_data > 0]
         final_zone_count = int(np.unique(populated).size) if populated.size else 0
-        effective_zone_count = min(n_classes, final_zone_count) if final_zone_count else 0
+        effective_zone_count = (
+            min(n_classes, final_zone_count) if final_zone_count else 0
+        )
 
         artifacts, local_metadata = _assemble_zone_artifacts(
             classified=classified_data,
@@ -2541,16 +2625,18 @@ def _prepare_selected_period_artifacts(
     feature_images_meta = composite_metadata.get("feature_images")
     cleanup_result: CleanupResult
     if isinstance(feature_images_meta, Mapping) and feature_images_meta:
-        zone_image, feature_payload, cleanup_result = _build_multiindex_zones_with_features(
-            ndvi_stats=ndvi_stats,
-            feature_images=feature_images_meta,
-            geometry=geometry,
-            n_classes=n_classes,
-            smooth_radius_m=smooth_radius_m,
-            open_radius_m=open_radius_m,
-            close_radius_m=close_radius_m,
-            min_mapping_unit_ha=mmu_value,
-            sample_size=sample_size,
+        zone_image, feature_payload, cleanup_result = (
+            _build_multiindex_zones_with_features(
+                ndvi_stats=ndvi_stats,
+                feature_images=feature_images_meta,
+                geometry=geometry,
+                n_classes=n_classes,
+                smooth_radius_m=smooth_radius_m,
+                open_radius_m=open_radius_m,
+                close_radius_m=close_radius_m,
+                min_mapping_unit_ha=mmu_value,
+                sample_size=sample_size,
+            )
         )
     else:
         zone_image, feature_payload, cleanup_result = _build_multiindex_zones(
@@ -2566,7 +2652,9 @@ def _prepare_selected_period_artifacts(
         )
 
     zone_raster_path = workdir / "zones_classified.tif"
-    zone_export = _download_image_to_path(zone_image.rename("zone"), geometry, zone_raster_path)
+    zone_export = _download_image_to_path(
+        zone_image.rename("zone"), geometry, zone_raster_path
+    )
     zone_raster_path = zone_export.path
 
     with rasterio.open(zone_raster_path) as zone_src:
@@ -2877,7 +2965,9 @@ def export_selected_period_zones(
     }
 
     palette = metadata.get("palette") if isinstance(metadata, dict) else None
-    thresholds = metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
+    thresholds = (
+        metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
+    )
     if palette is not None:
         result["palette"] = palette
     if thresholds is not None:
