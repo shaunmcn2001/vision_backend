@@ -14,3 +14,9 @@
 - Guard stages:
   - pre_mean_valid_mask_sum: ensure non-zero valid pixels before mean().
   - ndvi_stats: require NDVI_min and NDVI_max present and NDVI_min < NDVI_max.
+### Adaptive Monthly NDVI Policy
+- Build per-month composites with tiered masks (strict SCL → relaxed SCL → prob → none).
+- Accept the first variant meeting thresholds: VALID_RATIO ≥ 0.35 and NDVI_SPREAD ≥ 0.08.
+- Server-side filter: keep only images with band 'NDVI' (`listContains('system:band_names','NDVI')`).
+- Guard checks the first **valid** composite, not the first requested month.
+- Diagnostics saved: MASK_TIER, VALID_RATIO, NDVI_SPREAD, NDVI_min/max, and first valid month (ym).
