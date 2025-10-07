@@ -1131,7 +1131,8 @@ def _build_composite_series(
                 skipped.append(month)
                 continue
 
-            composites.append((month, reproj.clip(geometry)))
+            composite_with_ndvi = reproj.addBands(ndvi, overwrite=True)
+            composites.append((month, composite_with_ndvi.clip(geometry)))
     else:
         metadata["composite_mode"] = "scene"
         metadata["start_date"] = start_iso
