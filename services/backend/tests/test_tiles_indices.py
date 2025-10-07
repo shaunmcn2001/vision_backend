@@ -15,7 +15,9 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.append(str(BACKEND_DIR))
 
 from app.services import tiles  # noqa: E402  pylint: disable=wrong-import-position
-from app.services.indices import resolve_index  # noqa: E402  pylint: disable=wrong-import-position
+from app.services.indices import (
+    resolve_index,
+)  # noqa: E402  pylint: disable=wrong-import-position
 
 
 def test_gndvi_images_and_metadata(monkeypatch):
@@ -91,4 +93,3 @@ def test_index_tile_visualization_overrides(monkeypatch):
     assert tile["vis"]["min"] == pytest.approx(0.0)
     assert tile["vis"]["max"] == pytest.approx(0.8)
     assert tile["vis"]["palette"] == ["00FF00", "FFFFFF"]
-

@@ -4,7 +4,13 @@ from typing import Any, Dict, Optional, List
 
 
 class PipelineError(RuntimeError):
-    def __init__(self, code: str, msg: str, hints: Optional[str] = None, ctx: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        code: str,
+        msg: str,
+        hints: Optional[str] = None,
+        ctx: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(msg)
         self.code = code
         self.hints = hints
@@ -28,7 +34,9 @@ class Guard:
     def warn(self, msg: str):
         self._warnings.append(msg)
 
-    def require(self, cond: bool, code: str, msg: str, hints: Optional[str] = None, **ctx):
+    def require(
+        self, cond: bool, code: str, msg: str, hints: Optional[str] = None, **ctx
+    ):
         if not cond:
             raise PipelineError(code=code, msg=f"{code}: {msg}", hints=hints, ctx=ctx)
 

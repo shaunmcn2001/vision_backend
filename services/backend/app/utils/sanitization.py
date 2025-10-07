@@ -1,4 +1,5 @@
 """Helpers for normalising nested payloads before JSON serialisation."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
@@ -54,4 +55,3 @@ def sanitize_for_json(value: Any) -> Any:
 
 
 __all__ = ["sanitize_for_json"]
-

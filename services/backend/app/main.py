@@ -14,10 +14,7 @@ from app import gee
 import os
 
 app = FastAPI(
-    title="Agri NDVI Backend",
-    version="0.1.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    title="Agri NDVI Backend", version="0.1.0", docs_url="/docs", redoc_url="/redoc"
 )
 
 # Allow all origins (adjust later if needed)
@@ -41,6 +38,7 @@ def _startup_init_gee() -> None:
     except Exception as exc:  # pragma: no cover - best effort
         logger.warning("Earth Engine initialisation skipped: %s", exc)
 
+
 @app.get("/healthz")
 def healthz():
     return {
@@ -49,6 +47,7 @@ def healthz():
         "project": os.getenv("GCP_PROJECT"),
         "region": os.getenv("GCP_REGION"),
     }
+
 
 @app.get("/")
 def root():
@@ -1366,8 +1365,8 @@ async def require_api_key(req: Request, call_next):
         "/healthz",
         "/docs",
         "/redoc",
-        "/openapi.json",           # needed for Swagger UI to load
-        "/docs/oauth2-redirect",   # docs assets
+        "/openapi.json",  # needed for Swagger UI to load
+        "/docs/oauth2-redirect",  # docs assets
         "/docs/swagger-ui",
         "/docs/swagger-ui-init.js",
         "/docs/swagger-ui-bundle.js",
@@ -1381,6 +1380,7 @@ async def require_api_key(req: Request, call_next):
         return JSONResponse(status_code=401, content={"detail": "Invalid API key"})
     return await call_next(req)
 
+
 # Mount API routes
 app.include_router(api_router, prefix="/api")
 app.include_router(fields_router, prefix="/api/fields")
@@ -1389,4 +1389,3 @@ app.include_router(tiles_router, prefix="/api")
 app.include_router(s2_indices_router)
 app.include_router(zones_router, prefix="/api")
 app.include_router(export_shapefile_router)
-
