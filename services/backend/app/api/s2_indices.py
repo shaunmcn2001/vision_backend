@@ -94,6 +94,10 @@ class ProductionZoneOptions(BaseModel):
         False,
         description="When true, compute production zones for the requested months",
     )
+    method: Literal["ndvi_percentiles", "ndvi_kmeans", "multiindex_kmeans"] = Field(
+        "ndvi_kmeans",
+        description="Classification method for production zones",
+    )
     n_classes: int = Field(zone_service.DEFAULT_N_CLASSES, ge=3, le=7)
     cv_mask_threshold: float = Field(zone_service.DEFAULT_CV_THRESHOLD, ge=0)
     apply_stability_mask: bool = Field(
@@ -216,6 +220,7 @@ def start_export(request: Sentinel2ExportRequest):
                 close_radius_m=request.production_zones.close_radius_m,
                 simplify_tolerance_m=request.production_zones.simplify_tol_m,
                 simplify_buffer_m=request.production_zones.simplify_buffer_m,
+                method=request.production_zones.method,
                 include_stats=True,
             )
 

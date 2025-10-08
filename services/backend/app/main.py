@@ -1057,8 +1057,9 @@ def export_ui():
             simplify_buffer_m: zoneParams.simplify_buffer_m,
             export_target: exportTarget,
             include_zonal_stats: zoneParams.include_zonal_stats,
+            method: zoneParams.method || 'ndvi_kmeans',
           }),
-         });
+        });
          if (!response.ok) {
            throw new Error(await readError(response));
          }
@@ -1194,6 +1195,7 @@ def export_ui():
             simplify_tol_m: simplify,
             simplify_buffer_m: ZONE_SIMPLIFY_BUFFER_M,
             include_zonal_stats: true,
+            method: 'ndvi_kmeans',
           };
         }
         const aoiName = aoiNameInput.value.trim();
@@ -1262,6 +1264,7 @@ def export_ui():
                     close_radius_m: zoneParams.close_radius_m,
                     simplify_tol_m: zoneParams.simplify_tol_m,
                     simplify_buffer_m: zoneParams.simplify_buffer_m,
+                    method: zoneParams.method || 'ndvi_kmeans',
                   }
                 : { enabled: false },
             }),
