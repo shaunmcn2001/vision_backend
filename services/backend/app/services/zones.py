@@ -14,7 +14,7 @@ import shutil
 import tempfile
 import zipfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -152,6 +152,7 @@ class ZoneArtifacts:
     vector_components: dict[str, str]
     zonal_stats_path: str | None = None
     working_dir: str | None = None
+    extra_files: dict[str, bytes] | None = None
 
 
 @dataclass(frozen=True)
@@ -2634,6 +2635,7 @@ def _prepare_selected_period_artifacts(
     method: str,
     sample_size: int,
     include_stats: bool,
+    debug_dump: bool = False,
     guard: Guard | None = None,
 ) -> tuple[ZoneArtifacts, dict[str, object]]:
     _ = (
@@ -2644,7 +2646,26 @@ def _prepare_selected_period_artifacts(
         method,
         sample_size,
     )
+    ee_geometry = geometry
+    if not isinstance(geometry, ee.Geometry):
+        try:
+            ee_geometry = _to_ee_geometry(geometry)
+        except Exception:
+            ee_geometry = geometry
+    geometry = ee_geometry
+
     diag_guard = guard
+    region = None
+    if isinstance(geometry, ee.Geometry):
+        try:
+            region = (
+                ee.FeatureCollection([ee.Feature(geometry)])
+                .geometry()
+                .buffer(5)
+                .bounds(1)
+            )
+        except Exception:
+            region = None
     ordered_months = list(_ordered_months(months))
     logger.info("zones:ordered_months=%s", ordered_months)
     if guard is not None:
@@ -2676,6 +2697,69 @@ def _prepare_selected_period_artifacts(
             "First valid monthly composite lacks NDVI band.",
             "Ensure compute_ndvi() returns 'NDVI' and masks aren't over-aggressive.",
         )
+
+        per_month_py = None
+        if region is not None:
+            try:
+
+                def _month_diag(img):
+                    ym = img.get("ym")
+                    mm = img.reduceRegion(
+                        ee.Reducer.minMax(),
+                        region,
+                        10,
+                        maxPixels=1e9,
+                        bestEffort=True,
+                        tileScale=4,
+                    )
+                    vv = img.mask().reduceRegion(
+                        ee.Reducer.sum(),
+                        region,
+                        10,
+                        maxPixels=1e9,
+                        bestEffort=True,
+                        tileScale=4,
+                    )
+                    hist = img.reduceRegion(
+                        ee.Reducer.fixedHistogram(0.0, 1.0, 64),
+                        region,
+                        10,
+                        maxPixels=1e9,
+                        bestEffort=True,
+                        tileScale=4,
+                    )
+                    return ee.Feature(
+                        None,
+                        {
+                            "ym": ym,
+                            "NDVI_min": mm.get("NDVI_min"),
+                            "NDVI_max": mm.get("NDVI_max"),
+                            "valid_sum": ee.Number(
+                                vv.values().reduce(ee.Reducer.sum())
+                            ),
+                            "hist": hist.get("NDVI"),
+                        },
+                    )
+
+                per_month_fc = monthly_ndvi_collection.map(_month_diag)
+                per_month_list = ee.FeatureCollection(per_month_fc).aggregate_array(
+                    "properties"
+                )
+                if debug_dump:
+                    try:
+                        per_month_py = per_month_list.getInfo()
+                    except Exception:
+                        per_month_py = None
+            except Exception:
+                per_month_py = None
+
+        try:
+            diag_guard.record(
+                "ndvi_per_month",
+                items=per_month_py if per_month_py else "unavailable",
+            )
+        except Exception:
+            pass
     composites, skipped_months, composite_metadata = _build_composite_series(
         geometry,
         ordered_months,
@@ -3212,6 +3296,138 @@ def _prepare_selected_period_artifacts(
                 std=std.get("NDVI_stdDev") if isinstance(std, Mapping) else None,
             )
 
+        band_names: list[str] | None = None
+        mask_band_count_val: int | None = None
+        valid_ratio_val: float | None = None
+        vmin_val: float | None = None
+        vmax_val: float | None = None
+        spread_val: float | None = None
+
+        try:
+            band_names = masked_mean.bandNames().getInfo() or []
+        except Exception:
+            band_names = None
+        try:
+            mask_band_names = masked_mean.mask().bandNames().getInfo() or []
+            mask_band_count_val = len(mask_band_names)
+        except Exception:
+            mask_band_count_val = None
+
+        if region is not None:
+            try:
+                valid_sum_result = masked_mean.mask().reduceRegion(
+                    ee.Reducer.sum(),
+                    region,
+                    10,
+                    maxPixels=1e9,
+                    bestEffort=True,
+                    tileScale=4,
+                )
+                valid_sum_info = (
+                    valid_sum_result.getInfo()
+                    if hasattr(valid_sum_result, "getInfo")
+                    else valid_sum_result
+                )
+                valid_sum_scalar = None
+                if isinstance(valid_sum_info, Mapping):
+                    values = [
+                        value for value in valid_sum_info.values() if value is not None
+                    ]
+                    if values:
+                        valid_sum_scalar = sum(float(value) for value in values)
+                elif valid_sum_info is not None:
+                    valid_sum_scalar = float(valid_sum_info)
+
+                region_area_val = None
+                try:
+                    region_area_val = ee.Number(region.area(1)).getInfo()
+                except Exception:
+                    region_area_val = None
+                if (
+                    valid_sum_scalar is not None
+                    and region_area_val is not None
+                    and float(region_area_val) > 0
+                ):
+                    total_px_val = float(region_area_val) / (10**2)
+                    if total_px_val > 0:
+                        valid_ratio_val = float(valid_sum_scalar) / total_px_val
+            except Exception:
+                valid_ratio_val = None
+
+            try:
+                range_result = masked_mean.reduceRegion(
+                    ee.Reducer.minMax(),
+                    region,
+                    10,
+                    maxPixels=1e9,
+                    bestEffort=True,
+                    tileScale=4,
+                )
+                range_info = (
+                    range_result.getInfo()
+                    if hasattr(range_result, "getInfo")
+                    else range_result
+                )
+                if isinstance(range_info, Mapping):
+                    min_val = range_info.get("NDVI_min")
+                    max_val = range_info.get("NDVI_max")
+                    if min_val is not None:
+                        vmin_val = float(min_val)
+                    if max_val is not None:
+                        vmax_val = float(max_val)
+            except Exception:
+                pass
+
+        if vmin_val is not None and vmax_val is not None:
+            spread_val = float(vmax_val - vmin_val)
+
+        band_ok_val = (
+            bool(band_names)
+            and len(band_names or []) == 1
+            and "NDVI" in (band_names or [])
+        )
+
+        if guard is not None:
+            try:
+                guard.record(
+                    "ndvi_input_health",
+                    band_ok=band_ok_val,
+                    mask_band_count=mask_band_count_val,
+                    valid_ratio=valid_ratio_val,
+                    ndvi_min=vmin_val,
+                    ndvi_max=vmax_val,
+                    ndvi_spread=spread_val,
+                )
+            except Exception:
+                pass
+
+            guard.require(
+                band_ok_val,
+                "E_NDVI_BAND",
+                "NDVI must be single band named 'NDVI'.",
+                "Ensure compute_ndvi() renames and monthly composite selects 'NDVI'.",
+            )
+            guard.require(
+                mask_band_count_val == 1,
+                "E_MASK_SHAPE",
+                "NDVI mask must be single-band (not multi-band).",
+                "Use b8.mask().And(b4.mask()) when computing NDVI.",
+            )
+            if valid_ratio_val is not None:
+                guard.require(
+                    valid_ratio_val >= 0.25,
+                    "E_COVERAGE_LOW",
+                    "Too few valid pixels after masking (valid_ratio < 0.25).",
+                    "Relax masks or widen the month range.",
+                )
+            if vmin_val is not None and vmax_val is not None:
+                guard.require(
+                    vmax_val > vmin_val,
+                    "E_RANGE_EMPTY",
+                    "No dynamic range in NDVI (min == max).",
+                    "Check masks/region/scale; verify AOI intersects imagery.",
+                )
+
         zones_raw = kmeans_classify(
             kmeans_input,
             geometry,
@@ -3631,6 +3847,7 @@ def export_selected_period_zones(
     apply_stability_mask: bool = True,
     method: str | None = None,
     diagnostics: bool = False,
+    debug_dump: bool = False,
 ):
     g = Guard()
     logger.info(
@@ -3736,6 +3953,7 @@ def export_selected_period_zones(
             method=method_selection,
             sample_size=DEFAULT_SAMPLE_SIZE,
             include_stats=include_stats_flag,
+            debug_dump=debug_dump,
             guard=g,
         )
     except PipelineError:
@@ -3787,6 +4005,15 @@ def export_selected_period_zones(
         raise ValueError("Only local zone exports are supported in this workflow")
 
     diag = g.diagnostics_payload()
+    if debug_dump:
+        try:
+            diag_bytes = json.dumps(diag, ensure_ascii=False, indent=2).encode("utf-8")
+            extra_files = dict(artifacts.extra_files or {})
+            extra_files["diagnostics/diagnostics.json"] = diag_bytes
+            artifacts = replace(artifacts, extra_files=extra_files)
+            result["artifacts"] = artifacts
+        except Exception as _exc:
+            logger.warning("debug_dump: failed to attach diagnostics.json: %s", _exc)
     if diagnostics:
         result = dict(result)
         result["ok"] = True
