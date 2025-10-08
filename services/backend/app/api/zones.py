@@ -82,7 +82,24 @@ class ProductionZonesRequest(_BaseAOIRequest):
     )
     cloud_prob_max: int = Field(zone_service.DEFAULT_CLOUD_PROB_MAX, ge=0, le=100)
     n_classes: int = Field(zone_service.DEFAULT_N_CLASSES, ge=3, le=7)
-    cv_mask_threshold: float = Field(zone_service.DEFAULT_CV_THRESHOLD, ge=0)
+    mask_mode: Literal["strict", "relaxed", "adaptive"] = Field(
+        "adaptive", description="SCL/cloud masking policy per month"
+    )
+    min_valid_ratio: float = Field(
+        0.25,
+        ge=0.0,
+        le=1.0,
+        description="Minimum required valid-pixel ratio (0–1) BEFORE applying stability",
+    )
+    stability_adaptive: bool = Field(
+        True,
+        description="If true, only apply CV mask when coverage after stability remains acceptable",
+    )
+    cv_mask_threshold: float = Field(
+        zone_service.DEFAULT_CV_THRESHOLD,
+        ge=0.0,
+        description="CV threshold (std/mean) for stability mask",
+    )
     mmu_ha: float = Field(zone_service.DEFAULT_MIN_MAPPING_UNIT_HA, gt=0)
     smooth_radius_m: float = Field(zone_service.DEFAULT_SMOOTH_RADIUS_M, ge=0)
     open_radius_m: float = Field(zone_service.DEFAULT_OPEN_RADIUS_M, ge=0)
@@ -103,12 +120,6 @@ class ProductionZonesRequest(_BaseAOIRequest):
     )
     debug_dump: bool = Field(
         False, description="Dump extended per-month NDVI diagnostics"
-    )
-    min_valid_ratio: float = Field(
-        0.25,
-        ge=0.0,
-        le=1.0,
-        description="Minimum required valid-pixel ratio before classification (0–1).",
     )
     apply_stability_mask: Optional[bool] = Field(
         None,
@@ -283,6 +294,7 @@ def create_production_zones(
             start_date=request.start_date,
             end_date=request.end_date,
             cloud_prob_max=request.cloud_prob_max,
+            mask_mode=request.mask_mode,
             n_classes=request.n_classes,
             cv_mask_threshold=request.cv_mask_threshold,
             min_mapping_unit_ha=request.mmu_ha,
@@ -295,6 +307,7 @@ def create_production_zones(
             gcs_prefix=request.gcs_prefix,
             include_stats=request.include_zonal_stats,
             apply_stability_mask=request.apply_stability_mask,
+            stability_adaptive=request.stability_adaptive,
             min_valid_ratio=request.min_valid_ratio,
             diagnostics=diagnostics,
             debug_dump=request.debug_dump,

@@ -202,6 +202,17 @@ ratio (`target_ratio`) the `low_confidence` flag is set; operators should treat
 those exports as less reliable and consider collecting additional observations
 for the period.
 
+#### Masking controls
+
+- `mask_mode`: `"strict" | "relaxed" | "adaptive"` (default adaptive). Adaptive tries stricter SCL
+  filters first, then relaxes only when needed to reach `min_valid_ratio`.
+- `min_valid_ratio`: coverage target (default `0.25`) used for per-month tier selection
+  and for the pre-stability coverage guard.
+- `stability_adaptive`: when true, the CV mask is only applied if coverage after
+  stability remains ≥ `min_valid_ratio`.
+- `cv_mask_threshold`: coefficient of variation threshold (`std/mean`); values in the
+  `0.30–0.40` range retain more pixels.
+
 ### Zones Troubleshooting
 - **E_NDVI_BAND**: Expected a single band named `NDVI`. Ensure the NDVI helper renames to `NDVI` and monthly composites select it.
 - **E_MASK_SHAPE**: NDVI mask must be single-band. Use the intersection of `B8` and `B4` masks.
