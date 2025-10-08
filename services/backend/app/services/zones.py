@@ -3171,6 +3171,7 @@ def _prepare_selected_period_artifacts(
         return artifacts, metadata
 
     if method == "ndvi_kmeans":
+        aoi_geom = geometry
         feature_payload: dict[str, ee.Image] = {"NDVI": masked_mean}
         kmeans_input = masked_mean.rename("NDVI")
 
@@ -3212,9 +3213,84 @@ def _prepare_selected_period_artifacts(
                 std=std.get("NDVI_stdDev") if isinstance(std, Mapping) else None,
             )
 
-        zones_raw = kmeans_classify(
+            g = diag_guard
+            # --- NDVI input health (inline) ---------------------------------------------
+            region = ee.FeatureCollection(aoi_geom).geometry().buffer(5).bounds(1)
+
+            # Bands + mask shape
+            bands = masked_mean.bandNames()
+            band_ok = bands.size().eq(1).And(bands.contains("NDVI"))
+            mask_band_count = masked_mean.mask().bandNames().size()
+
+            # Coverage
+            valid_sum = masked_mean.mask().reduceRegion(
+                ee.Reducer.sum(),
+                region,
+                10,
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=4,
+            )
+            valid_sum_scalar = ee.Number(valid_sum.values().reduce(ee.Reducer.sum()))
+            total_px = region.area(1).divide(ee.Number(10).pow(2))
+            valid_ratio = valid_sum_scalar.divide(total_px)
+
+            # Range / spread
+            rng = masked_mean.reduceRegion(
+                ee.Reducer.minMax(),
+                region,
+                10,
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=4,
+            )
+            vmin = ee.Number(rng.get("NDVI_min"))
+            vmax = ee.Number(rng.get("NDVI_max"))
+            spread = vmax.subtract(vmin)
+
+            # Record diagnostics (best-effort materialization)
+            try:
+                g.record(
+                    "ndvi_input_health",
+                    band_ok=bool(ee.Boolean(band_ok).getInfo()),
+                    mask_band_count=int(mask_band_count.getInfo()),
+                    valid_ratio=float(valid_ratio.getInfo()),
+                    ndvi_min=float(vmin.getInfo()) if vmin else None,
+                    ndvi_max=float(vmax.getInfo()) if vmax else None,
+                    ndvi_spread=float(spread.getInfo()) if spread else None,
+                )
+            except Exception:
+                pass
+
+            # Hard guards (fail-fast, clear instructions)
+            g.require(
+                ee.Boolean(band_ok),
+                "E_NDVI_BAND",
+                "NDVI image must have a single band named 'NDVI'.",
+                "Ensure compute_ndvi() renames to 'NDVI' and monthly composite selects it.",
+            )
+            g.require(
+                mask_band_count.eq(1),
+                "E_MASK_SHAPE",
+                "NDVI mask must be single-band.",
+                "Use b8.mask().And(b4.mask()) when computing NDVI.",
+            )
+            g.require(
+                valid_ratio.gte(0.25),
+                "E_COVERAGE_LOW",
+                "Too few valid pixels after masking (valid_ratio < 0.25).",
+                "Relax masks or widen date range.",
+            )
+            g.require(
+                vmax.gt(vmin),
+                "E_RANGE_EMPTY",
+                "NDVI reduction returned no dynamic range.",
+                "Check region/scale & masking; verify AOI intersects imagery.",
+            )
+            # ---------------------------------------------------------------------------
+        zones_raster = kmeans_classify(
             kmeans_input,
-            geometry,
+            aoi_geom,
             n_classes=n_classes,
             seed=42,
             sample_scale=10,
@@ -3223,22 +3299,20 @@ def _prepare_selected_period_artifacts(
         )
 
         if diag_guard is not None:
-            try:
-                lbl_hist = zones_raw.reduceRegion(
-                    ee.Reducer.frequencyHistogram(),
-                    geometry,
-                    10,
-                    maxPixels=1e9,
-                    bestEffort=True,
-                    tileScale=4,
-                ).getInfo()
-            except Exception:
-                lbl_hist = None
-            diag_guard.record("kmeans_label_histogram", hist=lbl_hist)
+            g = diag_guard
+            lbl_hist = zones_raster.reduceRegion(
+                ee.Reducer.frequencyHistogram(),
+                aoi_geom,
+                10,
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=4,
+            ).getInfo()
+            g.record("kmeans_label_histogram", hist=lbl_hist)
 
-        zones_raster = zones_raw.rename("zone")
+        zone_seed = zones_raster.rename("zone")
         cleanup_result = _apply_cleanup_with_fallback_tracking(
-            zones_raster,
+            zone_seed,
             geometry,
             n_classes=n_classes,
             smooth_radius_m=smooth_radius_m,
