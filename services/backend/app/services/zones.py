@@ -2122,8 +2122,10 @@ def robust_quantile_breaks(
     """
 
     region = ee.FeatureCollection(aoi).geometry().buffer(5).bounds(1)
+    # ensure a stable band name for reducer outputs
+    base_band = ndvi_img.select([0]).rename("NDVI")
     # ensure float + tiny jitter to break exact ties without changing classing
-    base = ndvi_img.toFloat().add(ee.Image.random().multiply(1e-6))
+    base = base_band.toFloat().add(ee.Image.random().multiply(1e-6))
 
     # 1) native percentiles
     perc = [int(round(100 * i / n_classes)) for i in range(1, n_classes)]
@@ -3150,8 +3152,17 @@ def _prepare_selected_period_artifacts(
 
     if method == "ndvi_percentiles":
         brks_py = None
+        percentile_source = masked_mean
         try:
-            breaks = robust_quantile_breaks(masked_mean, geometry, n_classes)
+            percentile_source = masked_mean.select([0]).rename("NDVI")
+        except Exception:  # pragma: no cover - defensive guard
+            try:
+                percentile_source = masked_mean.rename("NDVI")
+            except Exception:  # pragma: no cover - defensive guard
+                percentile_source = masked_mean
+
+        try:
+            breaks = robust_quantile_breaks(percentile_source, geometry, n_classes)
             brks_py = ee.List(breaks).getInfo()
         except Exception:
             logger.exception(
