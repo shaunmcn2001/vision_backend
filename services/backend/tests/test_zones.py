@@ -1,5 +1,6 @@
 import csv
 import io
+import math
 import sys
 import zipfile
 from datetime import date
@@ -61,6 +62,116 @@ def _write_zone_raster(path: Path, data: np.ndarray) -> None:
         nodata=0,
     ) as dst:
         dst.write(data, 1)
+
+
+class _NumberStub:
+    def __init__(self, value: object):
+        self._value = float(self._coerce_value(value))
+
+    @staticmethod
+    def _coerce_value(value: object) -> float:
+        if isinstance(value, _NumberStub):
+            return value._value
+        if isinstance(value, (int, float, bool)):
+            return float(value)
+        if hasattr(value, "getInfo"):
+            try:
+                info = value.getInfo()
+            except Exception:
+                info = value
+            try:
+                return float(info)
+            except Exception:
+                return 1.0 if info else 0.0
+        try:
+            return float(value)
+        except Exception:
+            return 1.0 if value else 0.0
+
+    @staticmethod
+    def _truthy(value: object) -> bool:
+        try:
+            return bool(_NumberStub._coerce_value(value))
+        except Exception:
+            return bool(value)
+
+    def getInfo(self) -> float:
+        return self._value
+
+    def divide(self, other: object) -> "_NumberStub":
+        denominator = self._coerce_value(other)
+        if denominator == 0:
+            return _NumberStub(float("inf"))
+        return _NumberStub(self._value / denominator)
+
+    def pow(self, exponent: object) -> "_NumberStub":
+        return _NumberStub(self._value ** self._coerce_value(exponent))
+
+    def add(self, other: object) -> "_NumberStub":
+        return _NumberStub(self._value + self._coerce_value(other))
+
+    def subtract(self, other: object) -> "_NumberStub":
+        return _NumberStub(self._value - self._coerce_value(other))
+
+    def multiply(self, other: object) -> "_NumberStub":
+        return _NumberStub(self._value * self._coerce_value(other))
+
+    def max(self, other: object) -> "_NumberStub":
+        return _NumberStub(max(self._value, self._coerce_value(other)))
+
+    def min(self, other: object) -> "_NumberStub":
+        return _NumberStub(min(self._value, self._coerce_value(other)))
+
+    def gt(self, other: object) -> "_NumberStub":
+        return _NumberStub(1 if self._value > self._coerce_value(other) else 0)
+
+    def gte(self, other: object) -> "_NumberStub":
+        return _NumberStub(1 if self._value >= self._coerce_value(other) else 0)
+
+    def lt(self, other: object) -> "_NumberStub":
+        return _NumberStub(1 if self._value < self._coerce_value(other) else 0)
+
+    def lte(self, other: object) -> "_NumberStub":
+        return _NumberStub(1 if self._value <= self._coerce_value(other) else 0)
+
+    def eq(self, other: object) -> "_NumberStub":
+        return _NumberStub(1 if self._value == self._coerce_value(other) else 0)
+
+    def neq(self, other: object) -> "_NumberStub":
+        return _NumberStub(1 if self._value != self._coerce_value(other) else 0)
+
+    def And(self, other: object) -> "_NumberStub":
+        return _NumberStub(1 if self._truthy(self) and self._truthy(other) else 0)
+
+    def Or(self, other: object) -> "_NumberStub":
+        return _NumberStub(1 if self._truthy(self) or self._truthy(other) else 0)
+
+    def isFinite(self) -> "_NumberStub":
+        return _NumberStub(1 if math.isfinite(self._value) else 0)
+
+    def toInt(self) -> "_NumberStub":
+        return _NumberStub(int(self._value))
+
+    def toFloat(self) -> "_NumberStub":
+        return _NumberStub(float(self._value))
+
+    def abs(self) -> "_NumberStub":
+        return _NumberStub(abs(self._value))
+
+    def __float__(self) -> float:  # pragma: no cover - helper for debugging
+        return self._value
+
+    def __bool__(self) -> bool:  # pragma: no cover - helper for debugging
+        return self._truthy(self._value)
+
+    def __repr__(self) -> str:  # pragma: no cover - helper for debugging
+        return f"_NumberStub({self._value!r})"
+
+
+def _make_number(value: object) -> _NumberStub:
+    if isinstance(value, _NumberStub):
+        return value
+    return _NumberStub(value)
 
 
 def test_compute_ndvi_preserves_source_mask(monkeypatch) -> None:
@@ -372,7 +483,15 @@ def test_prepare_selected_period_artifacts_percentiles(
 ) -> None:
     class FakeMask:
         def bandNames(self):
-            return SimpleNamespace(size=lambda: SimpleNamespace(getInfo=lambda: 1))
+            class _Names:
+                @staticmethod
+                def size():
+                    return SimpleNamespace(
+                        getInfo=lambda: 1,
+                        eq=lambda other: fake_number(1 if other == 1 else 0),
+                    )
+
+            return _Names()
 
         def reduce(self, *_args, **_kwargs):
             return self
@@ -397,10 +516,25 @@ def test_prepare_selected_period_artifacts_percentiles(
             self.renamed.append(name)
             return self
 
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def select(self, *_args, **_kwargs):
+            return self
+
         def toFloat(self):
             return self
 
         def clip(self, _geometry):
+            return self
+
+        def select(self, *_args, **_kwargs):
             return self
 
         def mask(self):
@@ -415,7 +549,9 @@ def test_prepare_selected_period_artifacts_percentiles(
                     return ["NDVI"]
 
                 def size(self_inner):
-                    return SimpleNamespace(eq=lambda other: other == 1)
+                    return SimpleNamespace(
+                        eq=lambda other: fake_number(1 if other == 1 else 0)
+                    )
 
                 def contains(self_inner, value):
                     return value == "NDVI"
@@ -433,24 +569,7 @@ def test_prepare_selected_period_artifacts_percentiles(
     }
 
     def fake_number(value):
-        class _Number:
-            def __init__(self, val):
-                self.val = float(val)
-
-            def getInfo(self):
-                return self.val
-
-            def divide(self, other):
-                other_val = getattr(other, "getInfo", lambda: other)()
-                return _Number(self.val / float(other_val))
-
-            def pow(self, exponent):
-                exp_val = getattr(exponent, "getInfo", lambda: exponent)()
-                return _Number(self.val ** float(exp_val))
-
-        if hasattr(value, "getInfo"):
-            return value
-        return _Number(value)
+        return _make_number(value)
 
     def fake_boolean(value):
         class _Boolean:
@@ -466,8 +585,31 @@ def test_prepare_selected_period_artifacts_percentiles(
         def area(self, *_args, **_kwargs):
             return fake_number(10000)
 
+    class FakeImageCtor:
+        def __call__(self, image):
+            return image
+
+        @staticmethod
+        def random(_seed=None):
+            class _RandomImage:
+                def multiply(self_inner, _factor):
+                    return self_inner
+
+            return _RandomImage()
+
     monkeypatch.setattr(zones.ee, "Number", fake_number)
     monkeypatch.setattr(zones.ee, "Boolean", fake_boolean, raising=False)
+    monkeypatch.setattr(zones.ee, "Image", FakeImageCtor(), raising=False)
+    monkeypatch.setattr(zones.ee, "String", lambda value: value, raising=False)
+    monkeypatch.setattr(
+        zones.ee,
+        "Algorithms",
+        SimpleNamespace(
+            If=lambda cond, on_true, on_false: (
+                on_true if (getattr(cond, "getInfo", lambda: cond)()) else on_false
+            )
+        ),
+    )
     monkeypatch.setattr(
         zones.ee,
         "Reducer",
@@ -515,6 +657,7 @@ def test_prepare_selected_period_artifacts_percentiles(
     monkeypatch.setattr(zones, "_compute_ndvi", lambda image: image)
     monkeypatch.setattr(zones, "_ndvi_temporal_stats", lambda images: fake_stats)
     monkeypatch.setattr(zones, "_stability_mask", lambda *args, **kwargs: "stability")
+    monkeypatch.setattr(zones, "_cover_ratio", lambda *args, **kwargs: fake_number(1))
     monkeypatch.setattr(zones, "_classify_local_zones", fake_classify)
     monkeypatch.setattr(
         zones,
@@ -552,9 +695,12 @@ def test_prepare_selected_period_artifacts_percentiles(
         start_date=date(2024, 1, 1),
         end_date=date(2024, 1, 31),
         cloud_prob_max=40,
+        mask_mode="adaptive",
         n_classes=5,
         cv_mask_threshold=zones.DEFAULT_CV_THRESHOLD,
         apply_stability_mask=True,
+        stability_adaptive=True,
+        min_valid_ratio=0.0,
         min_mapping_unit_ha=1.5,
         smooth_radius_m=0,
         open_radius_m=0,
@@ -672,6 +818,19 @@ def test_prepare_selected_period_artifacts_percentiles_without_fallback(
         _write_ndvi_raster(target)
         return zones.ImageExportResult(path=target, task=None)
 
+    def fake_number(value):
+        return _make_number(value)
+
+    def fake_boolean(value):
+        class _Boolean:
+            def __init__(self, val):
+                self.val = bool(val)
+
+            def getInfo(self):
+                return self.val
+
+        return _Boolean(value)
+
     def fake_breaks(image, _geometry, n_classes):
         bands = []
         if hasattr(image, "band_names"):
@@ -693,9 +852,36 @@ def test_prepare_selected_period_artifacts_percentiles_without_fallback(
     monkeypatch.setattr(zones, "_stability_mask", lambda *_args, **_kwargs: "stability")
     monkeypatch.setattr(zones, "_download_image_to_path", fake_download)
     monkeypatch.setattr(zones, "robust_quantile_breaks", fake_breaks)
+    monkeypatch.setattr(zones, "_cover_ratio", lambda *_args, **_kwargs: fake_number(1))
     monkeypatch.setattr(zones, "_to_ee_geometry", lambda geom: geom)
     monkeypatch.setattr(zones.ee, "ImageCollection", fail_image_collection)
+
+    class FakeImageCtor:
+        def __call__(self, image):
+            return image
+
+        @staticmethod
+        def random(_seed=None):
+            class _RandomImage:
+                def multiply(self_inner, _factor):
+                    return self_inner
+
+            return _RandomImage()
+
+    monkeypatch.setattr(zones.ee, "Number", fake_number)
+    monkeypatch.setattr(zones.ee, "Boolean", fake_boolean, raising=False)
+    monkeypatch.setattr(zones.ee, "Image", FakeImageCtor(), raising=False)
+    monkeypatch.setattr(zones.ee, "String", lambda value: value, raising=False)
     monkeypatch.setattr(zones.ee, "List", lambda values=None: FakeEeList(values or []))
+    monkeypatch.setattr(
+        zones.ee,
+        "Algorithms",
+        SimpleNamespace(
+            If=lambda cond, on_true, on_false: (
+                on_true if (getattr(cond, "getInfo", lambda: cond)()) else on_false
+            )
+        ),
+    )
 
     aoi = {
         "type": "Polygon",
@@ -716,9 +902,12 @@ def test_prepare_selected_period_artifacts_percentiles_without_fallback(
         start_date=date(2024, 1, 1),
         end_date=date(2024, 1, 31),
         cloud_prob_max=40,
+        mask_mode="adaptive",
         n_classes=3,
         cv_mask_threshold=zones.DEFAULT_CV_THRESHOLD,
         apply_stability_mask=True,
+        stability_adaptive=True,
+        min_valid_ratio=0.0,
         min_mapping_unit_ha=0.0,
         smooth_radius_m=0,
         open_radius_m=0,
@@ -741,24 +930,7 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
     monkeypatch, tmp_path: Path
 ) -> None:
     def fake_number(value):
-        class _Number:
-            def __init__(self, val):
-                self.val = float(val)
-
-            def getInfo(self):
-                return self.val
-
-            def divide(self, other):
-                other_val = getattr(other, "getInfo", lambda: other)()
-                return _Number(self.val / float(other_val))
-
-            def pow(self, exponent):
-                exp_val = getattr(exponent, "getInfo", lambda: exponent)()
-                return _Number(self.val ** float(exp_val))
-
-        if hasattr(value, "getInfo"):
-            return value
-        return _Number(value)
+        return _make_number(value)
 
     def fake_boolean(value):
         class _Boolean:
@@ -775,7 +947,10 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
             class _Names:
                 @staticmethod
                 def size():
-                    return SimpleNamespace(getInfo=lambda: 1)
+                    return SimpleNamespace(
+                        getInfo=lambda: 1,
+                        eq=lambda other: fake_number(1 if other == 1 else 0),
+                    )
 
             return _Names()
 
@@ -802,10 +977,16 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
             self.renamed.append(name)
             return self
 
+        def select(self, *_args, **_kwargs):
+            return self
+
         def toFloat(self):
             return self
 
         def clip(self, _geometry):
+            return self
+
+        def add(self, _other):
             return self
 
         def mask(self):
@@ -817,7 +998,9 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
                     return ["NDVI"]
 
                 def size(self_inner):
-                    return SimpleNamespace(eq=lambda other: other == 1)
+                    return SimpleNamespace(
+                        eq=lambda other: fake_number(1 if other == 1 else 0)
+                    )
 
                 def contains(self_inner, value):
                     return value == "NDVI"
@@ -825,7 +1008,7 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
             return _Names()
 
         def reduceRegion(self, *_args, **_kwargs):
-            return SimpleNamespace(get=lambda key: 0.2 if key == "NDVI_min" else 0.8)
+            return {"NDVI_min": 0.2, "NDVI_max": 0.8}
 
     class FakeGeometry:
         def area(self, *_args, **_kwargs):
@@ -878,8 +1061,51 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
             fallback_removed=[],
         )
 
+    def fake_dictionary(value=None, **_kwargs):
+        class _Dict(dict):
+            def values(self_inner):
+                actual_values = list(dict.values(self_inner))
+                return SimpleNamespace(
+                    reduce=lambda reducer: fake_number(sum(actual_values))
+                )
+
+            def getInfo(self_inner):
+                return dict(self_inner)
+
+        if isinstance(value, dict):
+            return _Dict(value)
+        if hasattr(value, "getInfo"):
+            info = value.getInfo()
+            if isinstance(info, dict):
+                return _Dict(info)
+        return _Dict({})
+
+    class FakeImageCtor:
+        def __call__(self, image):
+            return image
+
+        @staticmethod
+        def random(_seed=None):
+            class _RandomImage:
+                def multiply(self_inner, _factor):
+                    return self_inner
+
+            return _RandomImage()
+
     monkeypatch.setattr(zones.ee, "Number", fake_number)
     monkeypatch.setattr(zones.ee, "Boolean", fake_boolean, raising=False)
+    monkeypatch.setattr(zones.ee, "Image", FakeImageCtor(), raising=False)
+    monkeypatch.setattr(zones.ee, "String", lambda value: value, raising=False)
+    monkeypatch.setattr(zones.ee, "Dictionary", fake_dictionary, raising=False)
+    monkeypatch.setattr(
+        zones.ee,
+        "Algorithms",
+        SimpleNamespace(
+            If=lambda cond, on_true, on_false: (
+                on_true if (getattr(cond, "getInfo", lambda: cond)()) else on_false
+            )
+        ),
+    )
     monkeypatch.setattr(
         zones.ee,
         "Reducer",
@@ -898,6 +1124,7 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
     monkeypatch.setattr(zones, "_compute_ndvi", lambda image: image)
     monkeypatch.setattr(zones, "_ndvi_temporal_stats", lambda images: fake_stats)
     monkeypatch.setattr(zones, "_stability_mask", lambda *args, **kwargs: "stability")
+    monkeypatch.setattr(zones, "_cover_ratio", lambda *_args, **_kwargs: fake_number(1))
 
     def _fail_percentiles(*_args, **_kwargs):
         raise RuntimeError("percentile path should not run")
@@ -946,9 +1173,12 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
         start_date=date(2024, 1, 1),
         end_date=date(2024, 1, 31),
         cloud_prob_max=40,
+        mask_mode="adaptive",
         n_classes=4,
         cv_mask_threshold=zones.DEFAULT_CV_THRESHOLD,
         apply_stability_mask=True,
+        stability_adaptive=True,
+        min_valid_ratio=0.0,
         min_mapping_unit_ha=1.5,
         smooth_radius_m=0,
         open_radius_m=0,
@@ -990,6 +1220,9 @@ def test_prepare_selected_period_artifacts_multiindex(
             self.renamed.append(name)
             return self
 
+        def select(self, *_args, **_kwargs):
+            return self
+
     def fake_composites(_geometry, months, *_args, **_kwargs):
         return [("2024-01", object())], [], {"composite_mode": "monthly"}
 
@@ -1028,10 +1261,24 @@ def test_prepare_selected_period_artifacts_multiindex(
         )
         return image, {"NDVI": object(), "NDRE": object()}, cleanup
 
+    def fake_number(value):
+        return _make_number(value)
+
+    def fake_boolean(value):
+        class _Boolean:
+            def __init__(self, val):
+                self.val = bool(val)
+
+            def getInfo(self):
+                return self.val
+
+        return _Boolean(value)
+
     monkeypatch.setattr(zones, "_build_composite_series", fake_composites)
     monkeypatch.setattr(zones, "_compute_ndvi", lambda image: image)
     monkeypatch.setattr(zones, "_ndvi_temporal_stats", lambda images: fake_stats)
     monkeypatch.setattr(zones, "_stability_mask", lambda *args, **kwargs: "stability")
+    monkeypatch.setattr(zones, "_cover_ratio", lambda *_args, **_kwargs: fake_number(1))
 
     def _fail_percentiles(*_args, **_kwargs):
         raise RuntimeError("percentile path should not run")
@@ -1062,6 +1309,10 @@ def test_prepare_selected_period_artifacts_multiindex(
         return zones.ImageExportResult(path=target, task=None)
 
     monkeypatch.setattr(zones, "_download_image_to_path", fake_download)
+    monkeypatch.setattr(zones.ee, "Number", fake_number)
+    monkeypatch.setattr(zones.ee, "Boolean", fake_boolean, raising=False)
+    monkeypatch.setattr(zones.ee, "Image", lambda image: image, raising=False)
+    monkeypatch.setattr(zones.ee, "String", lambda value: value, raising=False)
 
     aoi = {
         "type": "Polygon",
@@ -1076,9 +1327,12 @@ def test_prepare_selected_period_artifacts_multiindex(
         start_date=date(2024, 1, 1),
         end_date=date(2024, 1, 31),
         cloud_prob_max=40,
+        mask_mode="adaptive",
         n_classes=4,
         cv_mask_threshold=zones.DEFAULT_CV_THRESHOLD,
         apply_stability_mask=True,
+        stability_adaptive=True,
+        min_valid_ratio=0.0,
         min_mapping_unit_ha=1.5,
         smooth_radius_m=0,
         open_radius_m=0,
