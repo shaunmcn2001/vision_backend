@@ -205,7 +205,8 @@ for the period.
 ### Zones Troubleshooting
 - **E_NDVI_BAND**: Expected a single band named `NDVI`. Ensure the NDVI helper renames to `NDVI` and monthly composites select it.
 - **E_MASK_SHAPE**: NDVI mask must be single-band. Use the intersection of `B8` and `B4` masks.
-- **E_COVERAGE_LOW**: Too few valid pixels after masking (valid_ratio < 0.25). Relax SCL/cloud masks or widen the month window.
+- **E_COVERAGE_LOW**: Too few valid pixels before stability masking. Inspect diagnostics for `per_month_preview`/`mask_tiers` and widen the month window if needed.
+- **Coverage**: To improve coverage, expand the month range, relax SCL filters to include classes 3/7, raise `cloud_prob_max` into the 60–70 range, or temporarily disable the stability mask to gauge impact.
 - **E_RANGE_EMPTY**: NDVI_min == NDVI_max (no dynamic range). Check NDVI bands/float math; relax masks; verify AOI intersects imagery.
 - **E_BREAKS_COLLAPSED** (percentiles only): NDVI spread too small for distinct thresholds. Use `method=ndvi_kmeans` or widen the date range.
 
