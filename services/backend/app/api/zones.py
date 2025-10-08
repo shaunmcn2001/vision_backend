@@ -101,6 +101,9 @@ class ProductionZonesRequest(_BaseAOIRequest):
     include_zonal_stats: bool = Field(
         True, description="Export per-zone statistics CSV"
     )
+    debug_dump: bool = Field(
+        False, description="Dump extended per-month NDVI diagnostics"
+    )
     apply_stability_mask: Optional[bool] = Field(
         None,
         description=(
@@ -287,6 +290,7 @@ def create_production_zones(
             include_stats=request.include_zonal_stats,
             apply_stability_mask=request.apply_stability_mask,
             diagnostics=diagnostics,
+            debug_dump=request.debug_dump,
         )
     except PipelineError as exc:
         logger.warning(
