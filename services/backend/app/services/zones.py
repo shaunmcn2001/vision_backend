@@ -3324,11 +3324,23 @@ def _prepare_selected_period_artifacts(
         except Exception:
             mask_band_count_val = None
 
-        if region is not None:
+        region_for_checks = region
+        if region_for_checks is None and isinstance(geometry, ee.Geometry):
+            try:
+                region_for_checks = (
+                    ee.FeatureCollection([ee.Feature(geometry)])
+                    .geometry()
+                    .buffer(5)
+                    .bounds(1)
+                )
+            except Exception:
+                region_for_checks = None
+
+        if region_for_checks is not None:
             try:
                 valid_sum_result = masked_mean.mask().reduceRegion(
                     ee.Reducer.sum(),
-                    region,
+                    region_for_checks,
                     10,
                     maxPixels=1e9,
                     bestEffort=True,
@@ -3351,7 +3363,7 @@ def _prepare_selected_period_artifacts(
 
                 region_area_val = None
                 try:
-                    region_area_val = ee.Number(region.area(1)).getInfo()
+                    region_area_val = ee.Number(region_for_checks.area(1)).getInfo()
                 except Exception:
                     region_area_val = None
                 if (
@@ -3368,7 +3380,7 @@ def _prepare_selected_period_artifacts(
             try:
                 range_result = masked_mean.reduceRegion(
                     ee.Reducer.minMax(),
-                    region,
+                    region_for_checks,
                     10,
                     maxPixels=1e9,
                     bestEffort=True,
@@ -3424,6 +3436,12 @@ def _prepare_selected_period_artifacts(
                 "NDVI mask must be single-band (not multi-band).",
                 "Use b8.mask().And(b4.mask()) when computing NDVI.",
             )
+            guard.require(
+                valid_ratio_val is not None,
+                "E_COVERAGE_LOW",
+                "Unable to evaluate NDVI coverage (no valid pixels detected).",
+                "Ensure AOI buffer/bounds succeed and geometry intersects imagery.",
+            )
             if valid_ratio_val is not None:
                 guard.require(
                     valid_ratio_val >= 0.25,
@@ -3431,6 +3449,12 @@ def _prepare_selected_period_artifacts(
                     "Too few valid pixels after masking (valid_ratio < 0.25).",
                     "Relax masks or widen the month range.",
                 )
+            guard.require(
+                vmin_val is not None and vmax_val is not None,
+                "E_RANGE_EMPTY",
+                "Failed to retrieve NDVI min/max for classification region.",
+                "Check reduceRegion parameters and ensure NDVI band is present.",
+            )
             if vmin_val is not None and vmax_val is not None:
                 guard.require(
                     vmax_val > vmin_val,
