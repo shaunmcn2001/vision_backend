@@ -55,6 +55,7 @@ minimum mapping unit:
 ```json
 {
   "production_zones": {
+    "method": "ndvi_kmeans",
     "n_classes": 5,
     "mmu_ha": 3
   }
@@ -200,6 +201,13 @@ system has to relax the stability threshold to satisfy the minimum survival
 ratio (`target_ratio`) the `low_confidence` flag is set; operators should treat
 those exports as less reliable and consider collecting additional observations
 for the period.
+
+### Zones Troubleshooting
+- **E_NDVI_BAND**: Expected a single band named `NDVI`. Ensure the NDVI helper renames to `NDVI` and monthly composites select it.
+- **E_MASK_SHAPE**: NDVI mask must be single-band. Use the intersection of `B8` and `B4` masks.
+- **E_COVERAGE_LOW**: Too few valid pixels after masking (valid_ratio < 0.25). Relax SCL/cloud masks or widen the month window.
+- **E_RANGE_EMPTY**: NDVI_min == NDVI_max (no dynamic range). Check NDVI bands/float math; relax masks; verify AOI intersects imagery.
+- **E_BREAKS_COLLAPSED** (percentiles only): NDVI spread too small for distinct thresholds. Use `method=ndvi_kmeans` or widen the date range.
 
 ### Export package layout
 

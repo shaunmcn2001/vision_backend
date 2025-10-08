@@ -90,6 +90,7 @@ class ZoneExportConfig:
     close_radius_m: float
     simplify_tolerance_m: float
     simplify_buffer_m: float
+    method: str = "ndvi_kmeans"
     include_stats: bool = True
     apply_stability_mask: Optional[bool] = None
 
@@ -626,6 +627,7 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
             simplify_buffer_m=job.zone_config.simplify_buffer_m,
             destination="zip",
             include_stats=job.zone_config.include_stats,
+            method=job.zone_config.method,
         )
         artifacts = result.get("artifacts")
         metadata = result.get("metadata", {}) or {}
