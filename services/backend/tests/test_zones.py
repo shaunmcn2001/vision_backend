@@ -490,17 +490,12 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
 
     ndvi_kmeans_calls = {"count": 0}
 
-    feature_payload = {
-        "mean": object(),
-        "p10": object(),
-        "p90": object(),
-        "cv": object(),
-    }
-
-    def fake_ndvi_kmeans(*_args, **_kwargs):
+    def fake_kmeans_classify(*_args, **_kwargs):
         ndvi_kmeans_calls["count"] += 1
-        image = FakeZoneImage()
-        cleanup = zones.CleanupResult(
+        return FakeZoneImage()
+
+    def fake_cleanup(image, *_args, **_kwargs):
+        return zones.CleanupResult(
             image=image,
             applied_operations={
                 "smooth": False,
@@ -517,7 +512,6 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
             fallback_applied=False,
             fallback_removed=[],
         )
-        return image, dict(feature_payload), cleanup
 
     monkeypatch.setattr(zones, "_build_composite_series", fake_composites)
     monkeypatch.setattr(zones, "_compute_ndvi", lambda image: image)
@@ -536,7 +530,8 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
     monkeypatch.setattr(
         zones, "_build_multiindex_zones_with_features", _fail_multiindex
     )
-    monkeypatch.setattr(zones, "_build_ndvi_kmeans_zones", fake_ndvi_kmeans)
+    monkeypatch.setattr(zones, "kmeans_classify", fake_kmeans_classify)
+    monkeypatch.setattr(zones, "_apply_cleanup_with_fallback_tracking", fake_cleanup)
 
     def fake_download(image, _geometry, target):
         if target.name == "mean_ndvi.tif":
@@ -593,9 +588,9 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
     assert metadata["kmeans_sample_size"] == 4321
     assert metadata["kmeans_features"] == {
         "method": "kmeans",
-        "features": sorted(str(name) for name in feature_payload),
+        "features": ["NDVI"],
     }
-    assert metadata["kmeans_feature_count"] == len(feature_payload)
+    assert metadata["kmeans_feature_count"] == 1
     assert metadata["stability_mask_applied"] is True
     assert Path(artifacts.raster_path).exists()
     assert Path(metadata["downloaded_zone_raster"]).exists()
