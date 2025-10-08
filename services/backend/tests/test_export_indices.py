@@ -342,6 +342,7 @@ def test_start_export_includes_zone_config(monkeypatch):
         zone_config.min_mapping_unit_ha
         == s2_indices.zone_service.DEFAULT_MIN_MAPPING_UNIT_HA
     )
+    assert zone_config.method == "ndvi_kmeans"
     assert result == {"job_id": "job-zone", "state": "pending"}
 
 
@@ -374,6 +375,7 @@ def test_start_export_enables_zone_config_when_options_provided(monkeypatch):
     assert isinstance(zone_config, s2_indices.exports.ZoneExportConfig)
     assert zone_config.n_classes == 5
     assert zone_config.min_mapping_unit_ha == 3.5
+    assert zone_config.method == "ndvi_kmeans"
     assert result == {"job_id": "job-zone-options", "state": "pending"}
 
 

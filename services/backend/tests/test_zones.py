@@ -370,6 +370,25 @@ def test_classify_local_zones_generates_outputs(tmp_path: Path) -> None:
 def test_prepare_selected_period_artifacts_percentiles(
     monkeypatch, tmp_path: Path
 ) -> None:
+    class FakeMask:
+        def bandNames(self):
+            return SimpleNamespace(size=lambda: SimpleNamespace(getInfo=lambda: 1))
+
+        def reduce(self, *_args, **_kwargs):
+            return self
+
+        def reduceRegion(self, *_args, **_kwargs):
+            class _Result:
+                @staticmethod
+                def values():
+                    return SimpleNamespace(reduce=lambda _reducer: 500)
+
+                @staticmethod
+                def getInfo():
+                    return {"NDVI": 500}
+
+            return _Result()
+
     class FakeStatImage:
         def __init__(self):
             self.renamed: list[str] = []
@@ -377,6 +396,31 @@ def test_prepare_selected_period_artifacts_percentiles(
         def rename(self, name: str):
             self.renamed.append(name)
             return self
+
+        def toFloat(self):
+            return self
+
+        def clip(self, _geometry):
+            return self
+
+        def mask(self):
+            return FakeMask()
+
+        def reduceRegion(self, *_args, **_kwargs):
+            return SimpleNamespace(get=lambda key: 0.2 if key == "NDVI_min" else 0.8)
+
+        def bandNames(self):
+            class _Names:
+                def getInfo(self_inner):
+                    return ["NDVI"]
+
+                def size(self_inner):
+                    return SimpleNamespace(eq=lambda other: other == 1)
+
+                def contains(self_inner, value):
+                    return value == "NDVI"
+
+            return _Names()
 
     def fake_composites(_geometry, months, *_args, **_kwargs):
         return [("2024-01", object())], [], {"composite_mode": "monthly"}
@@ -387,6 +431,62 @@ def test_prepare_selected_period_artifacts_percentiles(
         "std": FakeStatImage(),
         "cv": FakeStatImage(),
     }
+
+    def fake_number(value):
+        class _Number:
+            def __init__(self, val):
+                self.val = float(val)
+
+            def getInfo(self):
+                return self.val
+
+            def divide(self, other):
+                other_val = getattr(other, "getInfo", lambda: other)()
+                return _Number(self.val / float(other_val))
+
+            def pow(self, exponent):
+                exp_val = getattr(exponent, "getInfo", lambda: exponent)()
+                return _Number(self.val ** float(exp_val))
+
+        if hasattr(value, "getInfo"):
+            return value
+        return _Number(value)
+
+    def fake_boolean(value):
+        class _Boolean:
+            def __init__(self, val):
+                self.val = bool(val)
+
+            def getInfo(self):
+                return self.val
+
+        return _Boolean(value)
+
+    class FakeGeometry:
+        def area(self, *_args, **_kwargs):
+            return fake_number(10000)
+
+    monkeypatch.setattr(zones.ee, "Number", fake_number)
+    monkeypatch.setattr(zones.ee, "Boolean", fake_boolean, raising=False)
+    monkeypatch.setattr(
+        zones.ee,
+        "Reducer",
+        SimpleNamespace(
+            sum=lambda *args, **kwargs: "sum",
+            count=lambda *args, **kwargs: "count",
+            minMax=lambda *args, **kwargs: "minMax",
+            stdDev=lambda *args, **kwargs: "stdDev",
+            histogram=lambda *args, **kwargs: "histogram",
+            percentile=lambda *args, **kwargs: "percentile",
+        ),
+    )
+    monkeypatch.setattr(
+        zones.ee,
+        "List",
+        lambda values=None: SimpleNamespace(getInfo=lambda: list(values or [])),
+    )
+    fake_geom = FakeGeometry()
+    monkeypatch.setattr(zones, "_to_ee_geometry", lambda geom: fake_geom)
 
     called = {"count": 0}
 
@@ -406,13 +506,26 @@ def test_prepare_selected_period_artifacts_percentiles(
             zonal_stats_path=str(stats),
             working_dir=str(tmp_path),
         )
-        return artifacts, {"classification_method": "percentiles"}
+        return artifacts, {
+            "classification_method": "percentiles",
+            "percentile_thresholds": [0.2, 0.4, 0.6, 0.8],
+        }
 
     monkeypatch.setattr(zones, "_build_composite_series", fake_composites)
     monkeypatch.setattr(zones, "_compute_ndvi", lambda image: image)
     monkeypatch.setattr(zones, "_ndvi_temporal_stats", lambda images: fake_stats)
     monkeypatch.setattr(zones, "_stability_mask", lambda *args, **kwargs: "stability")
     monkeypatch.setattr(zones, "_classify_local_zones", fake_classify)
+    monkeypatch.setattr(
+        zones,
+        "robust_quantile_breaks",
+        lambda *_args, **_kwargs: [0.2, 0.4, 0.6, 0.8],
+    )
+    monkeypatch.setattr(
+        zones.ee,
+        "List",
+        lambda values=None: SimpleNamespace(getInfo=lambda: list(values or [])),
+    )
 
     def _fail_multiindex(*_args, **_kwargs):
         raise RuntimeError("multiindex should not run")
@@ -589,6 +702,12 @@ def test_prepare_selected_period_artifacts_percentiles_without_fallback(
         "coordinates": [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]],
     }
 
+    fake_guard = SimpleNamespace(
+        record=lambda *args, **kwargs: None,
+        require=lambda *args, **kwargs: None,
+        warn=lambda *args, **kwargs: None,
+    )
+
     artifacts, metadata = zones._prepare_selected_period_artifacts(
         aoi,
         geometry=aoi,
@@ -621,12 +740,101 @@ def test_prepare_selected_period_artifacts_percentiles_without_fallback(
 def test_prepare_selected_period_artifacts_ndvi_kmeans(
     monkeypatch, tmp_path: Path
 ) -> None:
+    def fake_number(value):
+        class _Number:
+            def __init__(self, val):
+                self.val = float(val)
+
+            def getInfo(self):
+                return self.val
+
+            def divide(self, other):
+                other_val = getattr(other, "getInfo", lambda: other)()
+                return _Number(self.val / float(other_val))
+
+            def pow(self, exponent):
+                exp_val = getattr(exponent, "getInfo", lambda: exponent)()
+                return _Number(self.val ** float(exp_val))
+
+        if hasattr(value, "getInfo"):
+            return value
+        return _Number(value)
+
+    def fake_boolean(value):
+        class _Boolean:
+            def __init__(self, val):
+                self.val = bool(val)
+
+            def getInfo(self):
+                return self.val
+
+        return _Boolean(value)
+
+    class FakeMask:
+        def bandNames(self):
+            class _Names:
+                @staticmethod
+                def size():
+                    return SimpleNamespace(getInfo=lambda: 1)
+
+            return _Names()
+
+        def reduce(self, *_args, **_kwargs):
+            return self
+
+        def reduceRegion(self, *_args, **_kwargs):
+            class _Result:
+                @staticmethod
+                def values():
+                    return SimpleNamespace(reduce=lambda _reducer: 500)
+
+                @staticmethod
+                def getInfo():
+                    return {"NDVI": 500}
+
+            return _Result()
+
     class FakeStatImage:
         def __init__(self):
             self.renamed: list[str] = []
 
         def rename(self, name: str):
             self.renamed.append(name)
+            return self
+
+        def toFloat(self):
+            return self
+
+        def clip(self, _geometry):
+            return self
+
+        def mask(self):
+            return FakeMask()
+
+        def bandNames(self):
+            class _Names:
+                def getInfo(self_inner):
+                    return ["NDVI"]
+
+                def size(self_inner):
+                    return SimpleNamespace(eq=lambda other: other == 1)
+
+                def contains(self_inner, value):
+                    return value == "NDVI"
+
+            return _Names()
+
+        def reduceRegion(self, *_args, **_kwargs):
+            return SimpleNamespace(get=lambda key: 0.2 if key == "NDVI_min" else 0.8)
+
+    class FakeGeometry:
+        def area(self, *_args, **_kwargs):
+            return fake_number(10000)
+
+        def buffer(self, *_args, **_kwargs):
+            return self
+
+        def bounds(self, *_args, **_kwargs):
             return self
 
     def fake_composites(_geometry, months, *_args, **_kwargs):
@@ -638,6 +846,8 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
         "std": FakeStatImage(),
         "cv": FakeStatImage(),
     }
+
+    fake_geom = FakeGeometry()
 
     class FakeZoneImage:
         def rename(self, _name: str):
@@ -667,6 +877,22 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
             fallback_applied=False,
             fallback_removed=[],
         )
+
+    monkeypatch.setattr(zones.ee, "Number", fake_number)
+    monkeypatch.setattr(zones.ee, "Boolean", fake_boolean, raising=False)
+    monkeypatch.setattr(
+        zones.ee,
+        "Reducer",
+        SimpleNamespace(
+            sum=lambda *args, **kwargs: "sum",
+            count=lambda *args, **kwargs: "count",
+            minMax=lambda *args, **kwargs: "minMax",
+            stdDev=lambda *args, **kwargs: "stdDev",
+            histogram=lambda *args, **kwargs: "histogram",
+            percentile=lambda *args, **kwargs: "percentile",
+        ),
+    )
+    monkeypatch.setattr(zones, "_to_ee_geometry", lambda geom: fake_geom)
 
     monkeypatch.setattr(zones, "_build_composite_series", fake_composites)
     monkeypatch.setattr(zones, "_compute_ndvi", lambda image: image)
@@ -714,7 +940,7 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
 
     artifacts, metadata = zones._prepare_selected_period_artifacts(
         aoi,
-        geometry=aoi,
+        geometry=fake_geom,
         working_dir=tmp_path,
         months=["2024-01"],
         start_date=date(2024, 1, 1),
