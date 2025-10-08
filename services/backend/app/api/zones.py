@@ -104,6 +104,12 @@ class ProductionZonesRequest(_BaseAOIRequest):
     debug_dump: bool = Field(
         False, description="Dump extended per-month NDVI diagnostics"
     )
+    min_valid_ratio: float = Field(
+        0.25,
+        ge=0.0,
+        le=1.0,
+        description="Minimum required valid-pixel ratio before classification (0–1).",
+    )
     apply_stability_mask: Optional[bool] = Field(
         None,
         description=(
@@ -289,6 +295,7 @@ def create_production_zones(
             gcs_prefix=request.gcs_prefix,
             include_stats=request.include_zonal_stats,
             apply_stability_mask=request.apply_stability_mask,
+            min_valid_ratio=request.min_valid_ratio,
             diagnostics=diagnostics,
             debug_dump=request.debug_dump,
         )
