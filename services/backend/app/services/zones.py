@@ -51,7 +51,7 @@ DEFAULT_OPEN_RADIUS_M = 10
 DEFAULT_CLOSE_RADIUS_M = 10
 DEFAULT_SIMPLIFY_TOL_M = 5
 DEFAULT_SIMPLIFY_BUFFER_M = 3
-DEFAULT_METHOD = "ndvi_percentiles"
+DEFAULT_METHOD = "ndvi_kmeans"
 DEFAULT_SAMPLE_SIZE = 8000
 DEFAULT_SCALE = 10
 # Holes below this threshold (in hectares) are removed during vector cleanup.
@@ -2678,6 +2678,56 @@ def _prepare_selected_period_artifacts(
         monthly_ndvi_collection = build_monthly_ndvi_collection(
             geometry, list(ordered_months)
         )
+        per_month_py = None
+        try:
+            region = (
+                ee.FeatureCollection([ee.Feature(geometry)])
+                .geometry()
+                .buffer(5)
+                .bounds(1)
+            )
+
+            def _month_diag(img):
+                ym = img.get("ym")
+                mm = img.reduceRegion(
+                    ee.Reducer.minMax(),
+                    region,
+                    10,
+                    maxPixels=1e9,
+                    bestEffort=True,
+                    tileScale=4,
+                )
+                vv = img.mask().reduceRegion(
+                    ee.Reducer.sum(),
+                    region,
+                    10,
+                    maxPixels=1e9,
+                    bestEffort=True,
+                    tileScale=4,
+                )
+                return ee.Feature(
+                    None,
+                    {
+                        "ym": ym,
+                        "NDVI_min": mm.get("NDVI_min"),
+                        "NDVI_max": mm.get("NDVI_max"),
+                        "valid_sum": ee.Number(vv.values().reduce(ee.Reducer.sum())),
+                    },
+                )
+
+            per_month_fc = monthly_ndvi_collection.map(_month_diag)
+            per_month_py = (
+                ee.FeatureCollection(per_month_fc)
+                .aggregate_array("properties")
+                .getInfo()
+            )
+        except Exception:
+            per_month_py = None
+        try:
+            diag_guard.record("ndvi_per_month", items=per_month_py)
+        except Exception:
+            pass
+
         # After server-side NDVI filter
         col_size = monthly_ndvi_collection.size().getInfo()
         diag_guard.record("monthly_stack_size_after_filter", images=col_size)
@@ -2699,69 +2749,6 @@ def _prepare_selected_period_artifacts(
             "First valid monthly composite lacks NDVI band.",
             "Ensure compute_ndvi() returns 'NDVI' and masks aren't over-aggressive.",
         )
-
-        per_month_py = None
-        if region is not None:
-            try:
-
-                def _month_diag(img):
-                    ym = img.get("ym")
-                    mm = img.reduceRegion(
-                        ee.Reducer.minMax(),
-                        region,
-                        10,
-                        maxPixels=1e9,
-                        bestEffort=True,
-                        tileScale=4,
-                    )
-                    vv = img.mask().reduceRegion(
-                        ee.Reducer.sum(),
-                        region,
-                        10,
-                        maxPixels=1e9,
-                        bestEffort=True,
-                        tileScale=4,
-                    )
-                    hist = img.reduceRegion(
-                        ee.Reducer.fixedHistogram(0.0, 1.0, 64),
-                        region,
-                        10,
-                        maxPixels=1e9,
-                        bestEffort=True,
-                        tileScale=4,
-                    )
-                    return ee.Feature(
-                        None,
-                        {
-                            "ym": ym,
-                            "NDVI_min": mm.get("NDVI_min"),
-                            "NDVI_max": mm.get("NDVI_max"),
-                            "valid_sum": ee.Number(
-                                vv.values().reduce(ee.Reducer.sum())
-                            ),
-                            "hist": hist.get("NDVI"),
-                        },
-                    )
-
-                per_month_fc = monthly_ndvi_collection.map(_month_diag)
-                per_month_list = ee.FeatureCollection(per_month_fc).aggregate_array(
-                    "properties"
-                )
-                if debug_dump:
-                    try:
-                        per_month_py = per_month_list.getInfo()
-                    except Exception:
-                        per_month_py = None
-            except Exception:
-                per_month_py = None
-
-        try:
-            diag_guard.record(
-                "ndvi_per_month",
-                items=per_month_py if per_month_py else "unavailable",
-            )
-        except Exception:
-            pass
     composites, skipped_months, composite_metadata = _build_composite_series(
         geometry,
         ordered_months,
@@ -3150,120 +3137,15 @@ def _prepare_selected_period_artifacts(
             mmu_value = max(min_mapping_unit_ha, 0)
             mmu_applied = True
 
-    if method == "ndvi_percentiles":
-        brks_py = None
-        percentile_source = masked_mean
-        try:
-            percentile_source = masked_mean.select([0]).rename("NDVI")
-        except Exception:  # pragma: no cover - defensive guard
-            try:
-                percentile_source = masked_mean.rename("NDVI")
-            except Exception:  # pragma: no cover - defensive guard
-                percentile_source = masked_mean
+    def _guard_require(cond: bool, code: str, msg: str, hints: str, **ctx) -> None:
+        if guard is not None:
+            guard.require(cond, code, msg, hints, **ctx)
+        elif not cond:
+            raise PipelineError(code=code, msg=f"{code}: {msg}", hints=hints, ctx=ctx)
 
-        try:
-            breaks = robust_quantile_breaks(percentile_source, geometry, n_classes)
-            brks_py = ee.List(breaks).getInfo()
-        except Exception:
-            logger.exception(
-                "Failed to compute robust quantile breaks; will evaluate fallback"
-            )
-            brks_py = None
-
-        forced_thresholds = None
-        required_breaks = max(n_classes - 1, 0)
-        if isinstance(brks_py, list) and len(brks_py) >= required_breaks:
-            forced_thresholds = sorted(
-                float(value) for value in brks_py[:required_breaks]
-            )
-
-        if diag_guard is not None:
-            diag_guard.record("classification", method=method, breaks=brks_py)
-        else:
-            logger.info("zones:classification method=%s", method)
-
-        fallback_requested = (
-            forced_thresholds is None or len(forced_thresholds) < required_breaks
-        )
-        if fallback_requested:
-            if diag_guard is not None:
-                diag_guard.warn("percentile breaks collapsed; falling back to k-means")
-            else:
-                logger.warning("percentile breaks collapsed; falling back to k-means")
-
-        artifacts, local_metadata = _classify_local_zones(
-            ndvi_path,
-            working_dir=workdir,
-            n_classes=n_classes,
-            min_mapping_unit_ha=mmu_value,
-            smooth_radius_m=smooth_radius_m,
-            open_radius_m=open_radius_m,
-            close_radius_m=close_radius_m,
-            include_stats=include_stats,
-            forced_thresholds=forced_thresholds,
-        )
-
-        percentile_breaks: list[float] | None = None
-        raw_breaks = local_metadata.get("percentile_thresholds")
-        if isinstance(raw_breaks, Sequence):
-            percentile_breaks = [float(value) for value in raw_breaks]
-        fallback_applied = bool(local_metadata.get("kmeans_fallback_applied"))
-        if diag_guard is not None:
-            diag_guard.record(
-                "classification_result",
-                method=local_metadata.get("classification_method", method),
-                breaks=percentile_breaks,
-            )
-            if fallback_applied:
-                diag_guard.record("classification_fallback", method="kmeans", seed=42)
-        if fallback_applied:
-            logger.info("zones:classification fallback=kmeans seed=42")
-        logger.info("zones:classification method=%s", method)
-
-        mmu_was_applied = mmu_value > 0 and mmu_applied
-        metadata: dict[str, object] = {
-            "used_months": ordered_months,
-            "skipped_months": skipped_months,
-            "min_mapping_unit_applied": mmu_was_applied,
-            "mmu_applied": mmu_was_applied,
-            "zone_method": method,
-            "stability_thresholds": list(STABILITY_THRESHOLD_SEQUENCE),
-            "stability_mask_applied": stability_flag,
-        }
-
-        metadata.update(composite_metadata)
-        metadata.update(local_metadata)
-        metadata["downloaded_mean_ndvi"] = str(ndvi_path)
-        metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
-
-        area_stats = (
-            local_metadata.get("zones") if isinstance(local_metadata, Mapping) else None
-        )
-        area_list = area_stats if isinstance(area_stats, list) else []
-        if diag_guard is not None:
-            diag_guard.record(
-                "cartography",
-                open_m=open_radius_m,
-                close_m=close_radius_m,
-                mmu_ha=mmu_value,
-                area_stats=area_stats,
-            )
-            logger.info(
-                "zones:cartography open=%s close=%s mmu_ha=%s polys=%s",
-                open_radius_m,
-                close_radius_m,
-                mmu_value,
-                len(area_list),
-            )
-            diag_guard.require(
-                bool(area_list),
-                "E_VECT_EMPTY",
-                "Vectorization produced no polygons.",
-                "Loosen MMU; reduce smoothing.",
-                area_stats=area_stats,
-            )
-
-        return artifacts, metadata
+    valid_methods = {"ndvi_kmeans", "ndvi_percentiles", "multiindex_kmeans"}
+    if method not in valid_methods:
+        raise PipelineError("E_METHOD_UNKNOWN", f"Unknown method: {method}")
 
     if method == "ndvi_kmeans":
         feature_payload: dict[str, ee.Image] = {"NDVI": masked_mean}
@@ -3306,24 +3188,6 @@ def _prepare_selected_period_artifacts(
                 max=rng.get("NDVI_max") if isinstance(rng, Mapping) else None,
                 std=std.get("NDVI_stdDev") if isinstance(std, Mapping) else None,
             )
-
-        band_names: list[str] | None = None
-        mask_band_count_val: int | None = None
-        valid_ratio_val: float | None = None
-        vmin_val: float | None = None
-        vmax_val: float | None = None
-        spread_val: float | None = None
-
-        try:
-            band_names = masked_mean.bandNames().getInfo() or []
-        except Exception:
-            band_names = None
-        try:
-            mask_band_names = masked_mean.mask().bandNames().getInfo() or []
-            mask_band_count_val = len(mask_band_names)
-        except Exception:
-            mask_band_count_val = None
-
         region_for_checks = region
         if region_for_checks is None and isinstance(geometry, ee.Geometry):
             try:
@@ -3335,83 +3199,72 @@ def _prepare_selected_period_artifacts(
                 )
             except Exception:
                 region_for_checks = None
+        if region_for_checks is None:
+            region_for_checks = geometry
 
-        if region_for_checks is not None:
-            try:
-                valid_sum_result = masked_mean.mask().reduceRegion(
-                    ee.Reducer.sum(),
-                    region_for_checks,
-                    10,
-                    maxPixels=1e9,
-                    bestEffort=True,
-                    tileScale=4,
-                )
-                valid_sum_info = (
-                    valid_sum_result.getInfo()
-                    if hasattr(valid_sum_result, "getInfo")
-                    else valid_sum_result
-                )
-                valid_sum_scalar = None
-                if isinstance(valid_sum_info, Mapping):
-                    values = [
-                        value for value in valid_sum_info.values() if value is not None
-                    ]
-                    if values:
-                        valid_sum_scalar = sum(float(value) for value in values)
-                elif valid_sum_info is not None:
-                    valid_sum_scalar = float(valid_sum_info)
+        band_ok_val: bool | None = None
+        mask_band_count_val: int | None = None
+        valid_ratio_val: float | None = None
+        vmin_val: float | None = None
+        vmax_val: float | None = None
 
-                region_area_val = None
-                try:
-                    region_area_val = ee.Number(region_for_checks.area(1)).getInfo()
-                except Exception:
-                    region_area_val = None
-                if (
-                    valid_sum_scalar is not None
-                    and region_area_val is not None
-                    and float(region_area_val) > 0
-                ):
-                    total_px_val = float(region_area_val) / (10**2)
-                    if total_px_val > 0:
-                        valid_ratio_val = float(valid_sum_scalar) / total_px_val
-            except Exception:
-                valid_ratio_val = None
+        try:
+            band_ok_val = bool(
+                ee.Boolean(masked_mean.bandNames().size().eq(1)).getInfo()
+            )
+            contains_ndvi = bool(
+                ee.Boolean(masked_mean.bandNames().contains("NDVI")).getInfo()
+            )
+            band_ok_val = band_ok_val and contains_ndvi
+        except Exception:
+            band_ok_val = None
 
-            try:
-                range_result = masked_mean.reduceRegion(
-                    ee.Reducer.minMax(),
-                    region_for_checks,
-                    10,
-                    maxPixels=1e9,
-                    bestEffort=True,
-                    tileScale=4,
-                )
-                range_info = (
-                    range_result.getInfo()
-                    if hasattr(range_result, "getInfo")
-                    else range_result
-                )
-                if isinstance(range_info, Mapping):
-                    min_val = range_info.get("NDVI_min")
-                    max_val = range_info.get("NDVI_max")
-                    if min_val is not None:
-                        vmin_val = float(min_val)
-                    if max_val is not None:
-                        vmax_val = float(max_val)
-            except Exception:
-                pass
+        try:
+            mask_band_count_val = int(
+                masked_mean.mask().bandNames().size().getInfo() or 0
+            )
+        except Exception:
+            mask_band_count_val = None
 
-        if vmin_val is not None and vmax_val is not None:
-            spread_val = float(vmax_val - vmin_val)
+        try:
+            valid_sum = masked_mean.mask().reduceRegion(
+                ee.Reducer.sum(),
+                region_for_checks,
+                10,
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=4,
+            )
+            valid_sum_scalar = float(
+                ee.Number(valid_sum.values().reduce(ee.Reducer.sum())).getInfo()
+            )
+            total_px = float(
+                ee.Number(region_for_checks.area(1))
+                .divide(ee.Number(10).pow(2))
+                .getInfo()
+            )
+            if total_px > 0:
+                valid_ratio_val = valid_sum_scalar / total_px
+        except Exception:
+            valid_ratio_val = None
 
-        band_ok_val = (
-            bool(band_names)
-            and len(band_names or []) == 1
-            and "NDVI" in (band_names or [])
-        )
+        try:
+            rng = masked_mean.reduceRegion(
+                ee.Reducer.minMax(),
+                region_for_checks,
+                10,
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=4,
+            )
+            vmin_val = float(ee.Number(rng.get("NDVI_min")).getInfo())
+            vmax_val = float(ee.Number(rng.get("NDVI_max")).getInfo())
+        except Exception:
+            vmin_val = None
+            vmax_val = None
 
-        if guard is not None:
-            try:
+        try:
+            if guard is not None:
                 guard.record(
                     "ndvi_input_health",
                     band_ok=band_ok_val,
@@ -3419,49 +3272,39 @@ def _prepare_selected_period_artifacts(
                     valid_ratio=valid_ratio_val,
                     ndvi_min=vmin_val,
                     ndvi_max=vmax_val,
-                    ndvi_spread=spread_val,
                 )
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-            guard.require(
-                band_ok_val,
-                "E_NDVI_BAND",
-                "NDVI must be single band named 'NDVI'.",
-                "Ensure compute_ndvi() renames and monthly composite selects 'NDVI'.",
-            )
-            guard.require(
-                mask_band_count_val == 1,
-                "E_MASK_SHAPE",
-                "NDVI mask must be single-band (not multi-band).",
-                "Use b8.mask().And(b4.mask()) when computing NDVI.",
-            )
-            guard.require(
-                valid_ratio_val is not None,
-                "E_COVERAGE_LOW",
-                "Unable to evaluate NDVI coverage (no valid pixels detected).",
-                "Ensure AOI buffer/bounds succeed and geometry intersects imagery.",
-            )
-            if valid_ratio_val is not None:
-                guard.require(
-                    valid_ratio_val >= 0.25,
-                    "E_COVERAGE_LOW",
-                    "Too few valid pixels after masking (valid_ratio < 0.25).",
-                    "Relax masks or widen the month range.",
-                )
-            guard.require(
-                vmin_val is not None and vmax_val is not None,
-                "E_RANGE_EMPTY",
-                "Failed to retrieve NDVI min/max for classification region.",
-                "Check reduceRegion parameters and ensure NDVI band is present.",
-            )
-            if vmin_val is not None and vmax_val is not None:
-                guard.require(
-                    vmax_val > vmin_val,
-                    "E_RANGE_EMPTY",
-                    "No dynamic range in NDVI (min == max).",
-                    "Check masks/region/scale; verify AOI intersects imagery.",
-                )
+        _guard_require(
+            bool(band_ok_val),
+            "E_NDVI_BAND",
+            "Classifier input must be a single band named 'NDVI'.",
+            "Ensure compute_ndvi() renames to 'NDVI' and monthly composites select it.",
+            band_ok=band_ok_val,
+        )
+        _guard_require(
+            mask_band_count_val == 1,
+            "E_MASK_SHAPE",
+            "NDVI mask must be single-band (not multi-band).",
+            "Use b8.mask().And(b4.mask()) when computing NDVI.",
+            mask_band_count=mask_band_count_val,
+        )
+        _guard_require(
+            valid_ratio_val is not None and valid_ratio_val >= 0.25,
+            "E_COVERAGE_LOW",
+            "Too few valid pixels after masking (valid_ratio < 0.25).",
+            "Relax SCL/cloud masks or widen months.",
+            valid_ratio=valid_ratio_val,
+        )
+        _guard_require(
+            vmin_val is not None and vmax_val is not None and vmax_val > vmin_val,
+            "E_RANGE_EMPTY",
+            "NDVI has no dynamic range (min == max) before k-means.",
+            "Check NDVI bands/float, relax masks, verify AOI intersects imagery.",
+            ndvi_min=vmin_val,
+            ndvi_max=vmax_val,
+        )
 
         zones_raw = kmeans_classify(
             kmeans_input,
@@ -3573,6 +3416,109 @@ def _prepare_selected_period_artifacts(
         metadata["downloaded_zone_raster"] = str(zone_raster_path)
         metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
         metadata["zone_raster_export_task"] = _task_payload(zone_export.task)
+
+        area_stats = (
+            local_metadata.get("zones") if isinstance(local_metadata, Mapping) else None
+        )
+        area_list = area_stats if isinstance(area_stats, list) else []
+        if diag_guard is not None:
+            diag_guard.record(
+                "cartography",
+                open_m=open_radius_m,
+                close_m=close_radius_m,
+                mmu_ha=mmu_value,
+                area_stats=area_stats,
+            )
+            logger.info(
+                "zones:cartography open=%s close=%s mmu_ha=%s polys=%s",
+                open_radius_m,
+                close_radius_m,
+                mmu_value,
+                len(area_list),
+            )
+            diag_guard.require(
+                bool(area_list),
+                "E_VECT_EMPTY",
+                "Vectorization produced no polygons.",
+                "Loosen MMU; reduce smoothing.",
+                area_stats=area_stats,
+            )
+
+        return artifacts, metadata
+
+    if method == "ndvi_percentiles":
+        percentile_source = masked_mean
+        try:
+            percentile_source = masked_mean.select([0]).rename("NDVI")
+        except Exception:  # pragma: no cover - defensive guard
+            try:
+                percentile_source = masked_mean.rename("NDVI")
+            except Exception:  # pragma: no cover - defensive guard
+                percentile_source = masked_mean
+
+        brks_py = None
+        try:
+            breaks = robust_quantile_breaks(percentile_source, geometry, n_classes)
+            brks_py = ee.List(breaks).getInfo()
+        except Exception:
+            brks_py = None
+
+        if diag_guard is not None:
+            diag_guard.record("classification", method="percentiles", breaks=brks_py)
+        else:
+            logger.info("zones:classification method=%s", method)
+
+        required_breaks = max(n_classes - 1, 0)
+        has_breaks = isinstance(brks_py, list) and len(brks_py) == required_breaks
+        _guard_require(
+            bool(has_breaks),
+            "E_BREAKS_COLLAPSED",
+            "Percentile thresholds collapsed; NDVI spread too small.",
+            "Widen date range or use method=ndvi_kmeans.",
+            breaks=brks_py,
+        )
+
+        forced_thresholds = sorted(float(value) for value in brks_py[:required_breaks])
+
+        artifacts, local_metadata = _classify_local_zones(
+            ndvi_path,
+            working_dir=workdir,
+            n_classes=n_classes,
+            min_mapping_unit_ha=mmu_value,
+            smooth_radius_m=smooth_radius_m,
+            open_radius_m=open_radius_m,
+            close_radius_m=close_radius_m,
+            include_stats=include_stats,
+            forced_thresholds=forced_thresholds,
+        )
+
+        percentile_breaks: list[float] | None = None
+        raw_breaks = local_metadata.get("percentile_thresholds")
+        if isinstance(raw_breaks, Sequence):
+            percentile_breaks = [float(value) for value in raw_breaks]
+        if diag_guard is not None:
+            diag_guard.record(
+                "classification_result",
+                method=local_metadata.get("classification_method", method),
+                breaks=percentile_breaks,
+            )
+        logger.info("zones:classification method=%s", method)
+
+        mmu_was_applied = mmu_value > 0 and mmu_applied
+        metadata: dict[str, object] = {
+            "used_months": ordered_months,
+            "skipped_months": skipped_months,
+            "min_mapping_unit_applied": mmu_was_applied,
+            "mmu_applied": mmu_was_applied,
+            "zone_method": method,
+            "stability_thresholds": list(STABILITY_THRESHOLD_SEQUENCE),
+            "stability_mask_applied": stability_flag,
+        }
+
+        metadata.update(composite_metadata)
+        metadata.update(local_metadata)
+        metadata["downloaded_mean_ndvi"] = str(ndvi_path)
+        metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
 
         area_stats = (
             local_metadata.get("zones") if isinstance(local_metadata, Mapping) else None

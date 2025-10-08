@@ -65,6 +65,7 @@ def _build_zip_job(tmp_path, job_id: str = "job-zip"):
         close_radius_m=10,
         simplify_tolerance_m=5,
         simplify_buffer_m=0,
+        method="ndvi_kmeans",
         include_stats=True,
     )
 

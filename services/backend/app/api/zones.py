@@ -60,7 +60,7 @@ class _BaseAOIRequest(BaseModel):
 
 class ProductionZonesRequest(_BaseAOIRequest):
     method: Literal["ndvi_percentiles", "ndvi_kmeans"] = Field(
-        "ndvi_percentiles",
+        "ndvi_kmeans",
         description="Classification method for production zones",
     )
     months: Optional[List[str]] = Field(None, description="Months in YYYY-MM format")
