@@ -1041,19 +1041,26 @@ def build_monthly_ndvi_collection(aoi, months: list[str]) -> ee.ImageCollection:
     images = []
     for ym in months:
         s, e = _range(ym)
-        comp = monthly_ndvi_adaptive(
-            aoi,
-            s,
-            e,
-            valid_ratio_min=0.35,
-            spread_min=0.08,
-            have_cloudprob=False,  # flip to True if you add the prob band
-        ).set({"ym": ym})
-        images.append(comp)
+        monthly = (
+            monthly_ndvi_adaptive(
+                aoi,
+                s,
+                e,
+                valid_ratio_min=0.35,
+                spread_min=0.08,
+                have_cloudprob=False,  # flip to True if you add the prob band
+            )
+            .select("NDVI")
+            .rename("NDVI")
+            .set({"ym": ym})
+        )
+        images.append(monthly)
 
-    ic = ee.ImageCollection(images)
-    # Server-side filter: keep only images that truly have an NDVI band
-    return ic.filter(ee.Filter.listContains("system:band_names", "NDVI"))
+    monthly_ndvi = ee.ImageCollection(images)
+    monthly_ndvi = monthly_ndvi.filter(
+        ee.Filter.listContains("system:band_names", "NDVI")
+    )
+    return monthly_ndvi
 
 
 def _native_reproject(img: ee.Image) -> ee.Image:
@@ -3148,8 +3155,10 @@ def _prepare_selected_period_artifacts(
         raise PipelineError("E_METHOD_UNKNOWN", f"Unknown method: {method}")
 
     if method == "ndvi_kmeans":
+        masked_mean = ee.Image(masked_mean).select(["NDVI"]).rename("NDVI")
+        g = guard if guard is not None else Guard()
         feature_payload: dict[str, ee.Image] = {"NDVI": masked_mean}
-        kmeans_input = masked_mean.rename("NDVI")
+        kmeans_input = masked_mean
 
         if diag_guard is not None:
             diag_guard.record(
@@ -3202,29 +3211,9 @@ def _prepare_selected_period_artifacts(
         if region_for_checks is None:
             region_for_checks = geometry
 
-        band_ok_val: bool | None = None
-        mask_band_count_val: int | None = None
         valid_ratio_val: float | None = None
         vmin_val: float | None = None
         vmax_val: float | None = None
-
-        try:
-            band_ok_val = bool(
-                ee.Boolean(masked_mean.bandNames().size().eq(1)).getInfo()
-            )
-            contains_ndvi = bool(
-                ee.Boolean(masked_mean.bandNames().contains("NDVI")).getInfo()
-            )
-            band_ok_val = band_ok_val and contains_ndvi
-        except Exception:
-            band_ok_val = None
-
-        try:
-            mask_band_count_val = int(
-                masked_mean.mask().bandNames().size().getInfo() or 0
-            )
-        except Exception:
-            mask_band_count_val = None
 
         try:
             valid_sum = masked_mean.mask().reduceRegion(
@@ -3266,9 +3255,7 @@ def _prepare_selected_period_artifacts(
         try:
             if guard is not None:
                 guard.record(
-                    "ndvi_input_health",
-                    band_ok=band_ok_val,
-                    mask_band_count=mask_band_count_val,
+                    "ndvi_input_health_metrics",
                     valid_ratio=valid_ratio_val,
                     ndvi_min=vmin_val,
                     ndvi_max=vmax_val,
@@ -3276,20 +3263,6 @@ def _prepare_selected_period_artifacts(
         except Exception:
             pass
 
-        _guard_require(
-            bool(band_ok_val),
-            "E_NDVI_BAND",
-            "Classifier input must be a single band named 'NDVI'.",
-            "Ensure compute_ndvi() renames to 'NDVI' and monthly composites select it.",
-            band_ok=band_ok_val,
-        )
-        _guard_require(
-            mask_band_count_val == 1,
-            "E_MASK_SHAPE",
-            "NDVI mask must be single-band (not multi-band).",
-            "Use b8.mask().And(b4.mask()) when computing NDVI.",
-            mask_band_count=mask_band_count_val,
-        )
         _guard_require(
             valid_ratio_val is not None and valid_ratio_val >= 0.25,
             "E_COVERAGE_LOW",
@@ -3305,6 +3278,30 @@ def _prepare_selected_period_artifacts(
             ndvi_min=vmin_val,
             ndvi_max=vmax_val,
         )
+
+        bands = masked_mean.bandNames()
+        mask_band_count = masked_mean.mask().bandNames().size()
+        g.require(
+            bands.size().eq(1).And(bands.contains("NDVI")),
+            "E_NDVI_BAND",
+            "Classifier input must be a single band named 'NDVI'.",
+            "Ensure compute_ndvi() renames and monthly composites select 'NDVI'.",
+        )
+        g.require(
+            mask_band_count.eq(1),
+            "E_MASK_SHAPE",
+            "NDVI mask must be single-band.",
+            "Use B8.mask().And(B4.mask()) in NDVI compute.",
+        )
+
+        try:
+            g.record(
+                "ndvi_input_health",
+                band_names=ee.List(bands).getInfo(),
+                mask_band_count=int(mask_band_count.getInfo()),
+            )
+        except Exception:
+            pass
 
         zones_raw = kmeans_classify(
             kmeans_input,
