@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.request import urlopen
 
 import ee
@@ -3248,41 +3248,69 @@ def _prepare_selected_period_artifacts(
             vmax = ee.Number(rng.get("NDVI_max"))
             spread = vmax.subtract(vmin)
 
+            # Materialize Earth Engine results for diagnostics and guards
+            def _materialize_bool(value: ee.ComputedObject) -> bool | None:
+                try:
+                    return bool(ee.Boolean(value).getInfo())
+                except Exception:
+                    return None
+
+            def _materialize_number(
+                value: ee.ComputedObject, caster: Callable[[Any], float | int]
+            ) -> float | int | None:
+                try:
+                    result = value.getInfo()
+                except Exception:
+                    return None
+                if result is None:
+                    return None
+                try:
+                    return caster(result)
+                except Exception:
+                    return None
+
+            band_ok_bool = _materialize_bool(band_ok)
+            mask_band_count_int = _materialize_number(mask_band_count, int)
+            valid_ratio_float = _materialize_number(valid_ratio, float)
+            vmin_float = _materialize_number(vmin, float)
+            vmax_float = _materialize_number(vmax, float)
+            spread_float = _materialize_number(spread, float)
+
             # Record diagnostics (best-effort materialization)
             try:
                 g.record(
                     "ndvi_input_health",
-                    band_ok=bool(ee.Boolean(band_ok).getInfo()),
-                    mask_band_count=int(mask_band_count.getInfo()),
-                    valid_ratio=float(valid_ratio.getInfo()),
-                    ndvi_min=float(vmin.getInfo()) if vmin else None,
-                    ndvi_max=float(vmax.getInfo()) if vmax else None,
-                    ndvi_spread=float(spread.getInfo()) if spread else None,
+                    band_ok=band_ok_bool,
+                    mask_band_count=mask_band_count_int,
+                    valid_ratio=valid_ratio_float,
+                    ndvi_min=vmin_float,
+                    ndvi_max=vmax_float,
+                    ndvi_spread=spread_float,
                 )
             except Exception:
                 pass
 
             # Hard guards (fail-fast, clear instructions)
             g.require(
-                ee.Boolean(band_ok),
+                band_ok_bool is True,
                 "E_NDVI_BAND",
                 "NDVI image must have a single band named 'NDVI'.",
                 "Ensure compute_ndvi() renames to 'NDVI' and monthly composite selects it.",
             )
             g.require(
-                mask_band_count.eq(1),
+                mask_band_count_int == 1,
                 "E_MASK_SHAPE",
                 "NDVI mask must be single-band.",
                 "Use b8.mask().And(b4.mask()) when computing NDVI.",
             )
             g.require(
-                valid_ratio.gte(0.25),
+                valid_ratio_float is not None and valid_ratio_float >= 0.25,
                 "E_COVERAGE_LOW",
                 "Too few valid pixels after masking (valid_ratio < 0.25).",
                 "Relax masks or widen date range.",
             )
             g.require(
-                vmax.gt(vmin),
+                (vmax_float is not None and vmin_float is not None and vmax_float > vmin_float),
                 "E_RANGE_EMPTY",
                 "NDVI reduction returned no dynamic range.",
                 "Check region/scale & masking; verify AOI intersects imagery.",
