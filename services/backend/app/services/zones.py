@@ -549,6 +549,16 @@ def _assemble_zone_artifacts(
     return artifacts, metadata
 
 
+def _ensure_float_image(image: ee.Image) -> ee.Image:
+    to_float = getattr(image, "toFloat", None)
+    if callable(to_float):
+        try:
+            return to_float()
+        except Exception:  # pragma: no cover - defensive fallback
+            logger.exception("Failed to convert image to float; using original")
+    return image
+
+
 def _classify_local_zones(
     ndvi_raster: Path,
     *,
@@ -559,6 +569,7 @@ def _classify_local_zones(
     open_radius_m: float,
     close_radius_m: float,
     include_stats: bool,
+    forced_thresholds: Sequence[float] | None = None,
 ) -> tuple[ZoneArtifacts, dict[str, object]]:
     with rasterio.open(ndvi_raster) as src:
         ndvi = src.read(1, masked=True)
@@ -591,23 +602,36 @@ def _classify_local_zones(
     vmax = float(np.max(valid_values))
 
     percentiles = np.linspace(0, 100, effective_n_classes + 1)[1:-1]
-    raw_thresholds = (
-        np.nanpercentile(valid_values, percentiles)
-        if percentiles.size
-        else np.array([])
-    )
+    thresholds = np.array([], dtype=float)
 
-    thresholds = raw_thresholds
-    if thresholds.size:
-        thresholds = np.asarray(thresholds, dtype=float)
-        thresholds = thresholds[~np.isnan(thresholds)]
-        thresholds = np.unique(thresholds)
-        if thresholds.size < max(effective_n_classes - 1, 0):
-            thresholds = np.linspace(vmin, vmax, effective_n_classes + 1)[1:-1]
-        if thresholds.size != max(effective_n_classes - 1, 0) or not np.all(
-            np.diff(thresholds) > 0
-        ):
+    if forced_thresholds is not None:
+        forced = np.asarray([float(value) for value in forced_thresholds], dtype=float)
+        forced = forced[np.isfinite(forced)]
+        forced = np.unique(forced)
+        forced.sort()
+        if forced.size >= max(effective_n_classes - 1, 0):
+            thresholds = forced[: max(effective_n_classes - 1, 0)]
+        if thresholds.size and not np.all(np.diff(thresholds) > 0):
             thresholds = np.array([], dtype=float)
+
+    if not thresholds.size:
+        raw_thresholds = (
+            np.nanpercentile(valid_values, percentiles)
+            if percentiles.size
+            else np.array([])
+        )
+
+        thresholds = raw_thresholds
+        if thresholds.size:
+            thresholds = np.asarray(thresholds, dtype=float)
+            thresholds = thresholds[~np.isnan(thresholds)]
+            thresholds = np.unique(thresholds)
+            if thresholds.size < max(effective_n_classes - 1, 0):
+                thresholds = np.linspace(vmin, vmax, effective_n_classes + 1)[1:-1]
+            if thresholds.size != max(effective_n_classes - 1, 0) or not np.all(
+                np.diff(thresholds) > 0
+            ):
+                thresholds = np.array([], dtype=float)
 
     comparison_data = ndvi_data[..., None]
     if thresholds.size:
@@ -2081,6 +2105,126 @@ def _build_percentile_zones(
     return cleaned.rename("zone"), percentile_thresholds
 
 
+# --- Robust quantile breaks with self-healing --------------------------------
+def robust_quantile_breaks(
+    ndvi_img: ee.Image,
+    aoi,
+    n_classes: int,
+    scale: int = 10,
+    tile_scale: int = 4,
+) -> ee.List:
+    """
+    Returns strictly increasing K-1 breaks. Tries, in order:
+    1) native percentiles on tiny jittered floats
+    2) histogram-based quantiles (fixedHistogram)
+    3) fallback: return ee.List([]) to trigger k-means
+    """
+
+    region = ee.FeatureCollection(aoi).geometry().buffer(5).bounds(1)
+    # ensure float + tiny jitter to break exact ties without changing classing
+    base = ndvi_img.toFloat().add(ee.Image.random().multiply(1e-6))
+
+    # 1) native percentiles
+    perc = [int(round(100 * i / n_classes)) for i in range(1, n_classes)]
+    try1 = base.reduceRegion(
+        reducer=ee.Reducer.percentile(perc, None),  # key order NDVI_pXX
+        geometry=region,
+        scale=scale,
+        maxPixels=1e9,
+        bestEffort=True,
+        tileScale=tile_scale,
+    )
+    vals1 = ee.List(perc).map(lambda p: try1.get(f"NDVI_p{p}"))
+
+    # de-dup & enforce increasing using ee logic
+    def _uniq_sort(l):
+        l2 = ee.List(l).sort()
+        # remove nulls
+        l2 = l2.filter(ee.Filter.notNull([0]))  # works element-wise
+
+        # squash equal neighbors by adding epsilon steps
+        def _dedup(idx, prev):
+            idx = ee.Number(idx)
+            acc = ee.List(ee.Algorithms.If(prev, prev, ee.List([])))
+            v = ee.Number(l2.get(idx))
+            return ee.Algorithms.If(
+                acc.size().eq(0),
+                acc.add(v),
+                ee.Algorithms.If(
+                    v.lte(ee.Number(acc.get(-1))),
+                    acc.add(ee.Number(acc.get(-1)).add(1e-8 * (idx.add(1)))),
+                    acc.add(v),
+                ),
+            )
+
+        # iterate
+        return ee.List(
+            ee.List.sequence(0, l2.size().subtract(1)).iterate(_dedup, ee.List([]))
+        )
+
+    uniq1 = _uniq_sort(vals1)
+
+    # If we still don't have K-1 distinct thresholds, try histogram route
+    ok1 = uniq1.size().gte(n_classes - 1)
+
+    def _hist_breaks():
+        # compute a reasonably fine histogram
+        rng = base.reduceRegion(
+            ee.Reducer.minMax(),
+            region,
+            scale,
+            maxPixels=1e9,
+            bestEffort=True,
+            tileScale=tile_scale,
+        )
+        vmin = ee.Number(rng.get("NDVI_min"))
+        vmax = ee.Number(rng.get("NDVI_max"))
+        # if range invalid, abort
+        ok_rng = vmin.isFinite().And(vmax.isFinite()).And(vmax.gt(vmin))
+        return ee.Algorithms.If(
+            ok_rng,
+            _hist_quantiles(base, region, vmin, vmax, n_classes, scale, tile_scale),
+            ee.List([]),
+        )
+
+    def _hist_quantiles(img, region, vmin, vmax, n_classes, scale, tile_scale):
+        # 512 bins across observed range
+        hist = img.reduceRegion(
+            reducer=ee.Reducer.fixedHistogram(vmin, vmax, 512),
+            geometry=region,
+            scale=scale,
+            maxPixels=1e9,
+            bestEffort=True,
+            tileScale=tile_scale,
+        ).get("NDVI")
+        hist = ee.Array(hist)  # Nx2 [bin_center, count]
+        xs = hist.slice(1, 0, 1).project([0])  # centers
+        cs = hist.slice(1, 1, 2).project([0])  # counts
+        cdf = cs.cumsum()
+        tot = cdf.get([-1])
+        # target cumulative counts at the desired quantiles
+        qs = ee.List.sequence(1, n_classes - 1).map(
+            lambda i: ee.Number(i).divide(n_classes)
+        )
+        targets = ee.Array(qs).multiply(tot)
+
+        # for each target, find first bin where cdf >= target
+        def _qfind(t):
+            idx = cdf.gte(ee.Number(t)).argmax().get([0])
+            return xs.get([idx])
+
+        brks = targets.toList().map(_qfind)
+        # enforce strictly increasing via tiny nudges
+        brks = _uniq_sort(brks)
+        return brks
+
+    uniq2 = ee.List(ee.Algorithms.If(ok1, uniq1, _hist_breaks()))
+
+    return ee.List(
+        ee.Algorithms.If(ee.List(uniq2).size().gte(n_classes - 1), uniq2, ee.List([]))
+    )
+
+
 def _normalise_feature(
     mean_image: ee.Image, geometry: ee.Geometry, name: str
 ) -> ee.Image:
@@ -2702,6 +2846,17 @@ def _prepare_selected_period_artifacts(
         stability_image = ee.Image(1)
     ndvi_stats["stability"] = stability_image
 
+    mean_float = _ensure_float_image(ndvi_stats["mean"])
+    update_mask = getattr(mean_float, "updateMask", None)
+    if callable(update_mask):
+        try:
+            masked_mean = update_mask(stability_image)
+        except Exception:  # pragma: no cover - defensive fallback
+            logger.exception("Failed to apply stability mask; using unmasked mean")
+            masked_mean = mean_float
+    else:
+        masked_mean = mean_float
+
     if diag_guard is not None:
 
         def _extract_count(payload: Mapping[str, object] | None) -> int:
@@ -2774,7 +2929,38 @@ def _prepare_selected_period_artifacts(
             after=va_cnt,
         )
 
-    mean_image = ndvi_stats["mean"].rename("NDVI_mean")
+        try:
+            rng = masked_mean.reduceRegion(
+                ee.Reducer.minMax(),
+                geometry,
+                10,
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=4,
+            ).getInfo()
+        except Exception:
+            rng = None
+
+        try:
+            std = masked_mean.reduceRegion(
+                ee.Reducer.stdDev(),
+                geometry,
+                10,
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=4,
+            ).getInfo()
+        except Exception:
+            std = None
+
+        diag_guard.record(
+            "ndvi_distribution",
+            min=rng.get("NDVI_min") if isinstance(rng, Mapping) else None,
+            max=rng.get("NDVI_max") if isinstance(rng, Mapping) else None,
+            std=std.get("NDVI_stdDev") if isinstance(std, Mapping) else None,
+        )
+
+    mean_image = mean_float.rename("NDVI_mean")
 
     workdir = _ensure_working_directory(working_dir)
     ndvi_path = workdir / "mean_ndvi.tif"
@@ -2793,6 +2979,37 @@ def _prepare_selected_period_artifacts(
             mmu_applied = True
 
     if method == "ndvi_percentiles":
+        brks_py = None
+        try:
+            breaks = robust_quantile_breaks(masked_mean, geometry, n_classes)
+            brks_py = ee.List(breaks).getInfo()
+        except Exception:
+            logger.exception(
+                "Failed to compute robust quantile breaks; will evaluate fallback"
+            )
+            brks_py = None
+
+        forced_thresholds = None
+        required_breaks = max(n_classes - 1, 0)
+        if isinstance(brks_py, list) and len(brks_py) >= required_breaks:
+            forced_thresholds = sorted(
+                float(value) for value in brks_py[:required_breaks]
+            )
+
+        if diag_guard is not None:
+            diag_guard.record("classification", method=method, breaks=brks_py)
+        else:
+            logger.info("zones:classification method=%s", method)
+
+        fallback_requested = (
+            forced_thresholds is None or len(forced_thresholds) < required_breaks
+        )
+        if fallback_requested:
+            if diag_guard is not None:
+                diag_guard.warn("percentile breaks collapsed; falling back to k-means")
+            else:
+                logger.warning("percentile breaks collapsed; falling back to k-means")
+
         artifacts, local_metadata = _classify_local_zones(
             ndvi_path,
             working_dir=workdir,
@@ -2802,27 +3019,25 @@ def _prepare_selected_period_artifacts(
             open_radius_m=open_radius_m,
             close_radius_m=close_radius_m,
             include_stats=include_stats,
+            forced_thresholds=forced_thresholds,
         )
 
         percentile_breaks: list[float] | None = None
         raw_breaks = local_metadata.get("percentile_thresholds")
         if isinstance(raw_breaks, Sequence):
             percentile_breaks = [float(value) for value in raw_breaks]
+        fallback_applied = bool(local_metadata.get("kmeans_fallback_applied"))
         if diag_guard is not None:
             diag_guard.record(
-                "classification",
-                method=method,
+                "classification_result",
+                method=local_metadata.get("classification_method", method),
                 breaks=percentile_breaks,
             )
-            logger.info("zones:classification method=%s", method)
-            diag_guard.require(
-                percentile_breaks is not None
-                and len(percentile_breaks) == max(n_classes - 1, 0),
-                "E_BREAKS_COLLAPSED",
-                "Quantile breaks collapsed.",
-                "Switch to k-means; reduce smoothing/MMU.",
-                breaks=percentile_breaks,
-            )
+            if fallback_applied:
+                diag_guard.record("classification_fallback", method="kmeans", seed=42)
+        if fallback_applied:
+            logger.info("zones:classification fallback=kmeans seed=42")
+        logger.info("zones:classification method=%s", method)
 
         mmu_was_applied = mmu_value > 0 and mmu_applied
         metadata: dict[str, object] = {
