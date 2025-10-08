@@ -2225,6 +2225,92 @@ def robust_quantile_breaks(
     )
 
 
+def kmeans_classify(
+    ndvi_img: ee.Image,
+    aoi_geom,
+    n_classes: int,
+    seed: int = 42,
+    sample_scale: int = 10,
+    tile_scale: int = 4,
+    min_samples: int = 5000,
+) -> ee.Image:
+    """
+    Robust k-means on NDVI:
+      - float NDVI + tiny jitter to break exact ties (does not change classing perceptibly)
+      - guaranteed sample size (upsample coarser if needed)
+      - seeded k-means (stable labels across runs)
+      - relabels to contiguous 1..K after clustering
+    """
+
+    region = ee.FeatureCollection(aoi_geom).geometry().buffer(5).bounds(1)
+
+    # 1) Ensure float + jitter (breaks ties if NDVI is constant)
+    x = ndvi_img.select(["NDVI"]).toFloat()
+    eps = ee.Image.random(seed).multiply(1e-6)
+    xj = x.add(eps).rename("NDVI")  # still effectively NDVI, just tie-broken
+
+    # 2) Build a sample; if too small, resample at coarser scale to hit min_samples
+    def _sample_at(scale):
+        return xj.sample(
+            region=region,
+            scale=scale,
+            numPixels=1e7,
+            seed=seed,
+            geometries=False,
+            tileScale=tile_scale,
+        )
+
+    samp = _sample_at(sample_scale)
+    # Count samples server-side
+    samp_count = samp.size()
+    need_more = samp_count.lt(min_samples)
+
+    # try a 2x coarser scale if needed
+    samp = ee.FeatureCollection(
+        ee.Algorithms.If(need_more, _sample_at(sample_scale * 2), samp)
+    )
+    # and 4x if still needed
+    samp_count = samp.size()
+    samp = ee.FeatureCollection(
+        ee.Algorithms.If(samp_count.lt(min_samples), _sample_at(sample_scale * 4), samp)
+    )
+
+    # 3) Fit k-means (wekaKMeans supports seed/maxIterations)
+    clusterer = ee.Clusterer.wekaKMeans(
+        n_clusters=n_classes, seed=seed, max_iterations=200
+    ).train(samp, ["NDVI"])
+
+    # 4) Classify the image
+    raw_labels = xj.cluster(clusterer).rename("zones_raw")
+
+    # 5) Relabel to contiguous 1..K by sorting cluster means (low NDVI → 1, high → K)
+    # Compute mean NDVI per label
+    means = xj.addBands(raw_labels).reduceRegion(
+        reducer=ee.Reducer.mean().group(groupField=1, groupName="label"),
+        geometry=region,
+        scale=sample_scale,
+        maxPixels=1e9,
+        bestEffort=True,
+        tileScale=tile_scale,
+    )
+    groups = ee.List(ee.Dictionary(means.get("groups")).get("groups", ee.List([])))
+
+    def _pair(g):
+        d = ee.Dictionary(g)
+        return ee.List([ee.Number(d.get("label")), ee.Number(d.get("mean"))])
+
+    pairs = groups.map(_pair)  # [[label, mean], ...]
+    pairs_sorted = ee.List(pairs).sort(1)  # ascending NDVI
+    orig = pairs_sorted.map(lambda p: ee.List(p).get(0))
+    ranks = ee.List.sequence(1, ee.Number(pairs_sorted.size()))
+    remap_from = ee.List(orig)
+    remap_to = ee.List(ranks)
+
+    relabeled = raw_labels.remap(remap_from, remap_to, 1).rename("zones_kmeans")
+
+    return relabeled.clip(region)
+
+
 def _normalise_feature(
     mean_image: ee.Image, geometry: ee.Geometry, name: str
 ) -> ee.Image:
@@ -3085,22 +3171,83 @@ def _prepare_selected_period_artifacts(
         return artifacts, metadata
 
     if method == "ndvi_kmeans":
-        zone_image, feature_payload, cleanup_result = _build_ndvi_kmeans_zones(
-            ndvi_images=ndvi_images,
-            ndvi_stats=ndvi_stats,
-            geometry=geometry,
+        feature_payload: dict[str, ee.Image] = {"NDVI": masked_mean}
+        kmeans_input = masked_mean.rename("NDVI")
+
+        if diag_guard is not None:
+            diag_guard.record(
+                "classification", method="kmeans", seed=42, n_classes=n_classes
+            )
+            logger.info("zones:classification method=%s", method)
+            logger.info("zones:classification kmeans seed=42")
+
+            try:
+                rng = kmeans_input.reduceRegion(
+                    ee.Reducer.minMax(),
+                    geometry,
+                    10,
+                    maxPixels=1e9,
+                    bestEffort=True,
+                    tileScale=4,
+                ).getInfo()
+            except Exception:
+                rng = None
+
+            try:
+                std = kmeans_input.reduceRegion(
+                    ee.Reducer.stdDev(),
+                    geometry,
+                    10,
+                    maxPixels=1e9,
+                    bestEffort=True,
+                    tileScale=4,
+                ).getInfo()
+            except Exception:
+                std = None
+
+            diag_guard.record(
+                "ndvi_distribution_for_kmeans",
+                min=rng.get("NDVI_min") if isinstance(rng, Mapping) else None,
+                max=rng.get("NDVI_max") if isinstance(rng, Mapping) else None,
+                std=std.get("NDVI_stdDev") if isinstance(std, Mapping) else None,
+            )
+
+        zones_raw = kmeans_classify(
+            kmeans_input,
+            geometry,
+            n_classes=n_classes,
+            seed=42,
+            sample_scale=10,
+            tile_scale=4,
+            min_samples=int(max(sample_size, 0)),
+        )
+
+        if diag_guard is not None:
+            try:
+                lbl_hist = zones_raw.reduceRegion(
+                    ee.Reducer.frequencyHistogram(),
+                    geometry,
+                    10,
+                    maxPixels=1e9,
+                    bestEffort=True,
+                    tileScale=4,
+                ).getInfo()
+            except Exception:
+                lbl_hist = None
+            diag_guard.record("kmeans_label_histogram", hist=lbl_hist)
+
+        zones_raster = zones_raw.rename("zone")
+        cleanup_result = _apply_cleanup_with_fallback_tracking(
+            zones_raster,
+            geometry,
             n_classes=n_classes,
             smooth_radius_m=smooth_radius_m,
             open_radius_m=open_radius_m,
             close_radius_m=close_radius_m,
             min_mapping_unit_ha=mmu_value,
-            sample_size=sample_size,
         )
-
-        if diag_guard is not None:
-            diag_guard.record("classification", method=method, breaks=None)
-            logger.info("zones:classification method=%s", method)
-            logger.info("zones:classification kmeans seed=42")
+        cleanup_result.image = cleanup_result.image.rename("zone")
+        zone_image = cleanup_result.image
 
         zone_raster_path = workdir / "zones_classified.tif"
         zone_export = _download_image_to_path(zone_image, geometry, zone_raster_path)
