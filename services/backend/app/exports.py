@@ -16,7 +16,16 @@ import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional, Tuple, TYPE_CHECKING
+from typing import (
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Tuple,
+    TYPE_CHECKING,
+)
 
 import ee
 import requests
@@ -764,10 +773,32 @@ def _download_zone_artifacts(
     if stats_name and stats_path:
         files.append((stats_path, stats_name))
 
+    extra_files_map: Dict[str, bytes | str] = {}
+    extra_sources = getattr(artifacts, "extra_files", None)
+    if isinstance(extra_sources, Mapping):
+        try:
+            extra_files_map = {str(name): data for name, data in extra_sources.items()}
+        except Exception:
+            extra_files_map = {}
+
     diagnostics_payload = None
     if job.zone_state and isinstance(job.zone_state.metadata, dict):
         diagnostics_payload = job.zone_state.metadata.get("diagnostics")
-    if diagnostics_payload:
+    diag_rel_path = "diagnostics/diagnostics.json"
+    diag_blob = extra_files_map.pop(diag_rel_path, None)
+    if diag_blob is not None:
+        try:
+            diag_path = temp_dir / diag_rel_path
+            diag_path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(diag_blob, (bytes, bytearray)):
+                diag_path.write_bytes(bytes(diag_blob))
+            else:
+                diag_path.write_text(str(diag_blob))
+            files.append((diag_path, diag_rel_path))
+            logger.info("zones:export added diagnostics.json to zip (inline)")
+        except Exception as exc:
+            logger.warning("zones:export diagnostics inline failed: %s", exc)
+    elif diagnostics_payload:
         try:
             diag_dir = temp_dir / "diagnostics"
             diag_dir.mkdir(parents=True, exist_ok=True)
@@ -775,10 +806,23 @@ def _download_zone_artifacts(
             diag_path.write_text(
                 json.dumps(diagnostics_payload, ensure_ascii=False, indent=2)
             )
-            files.append((diag_path, "diagnostics/diagnostics.json"))
+            files.append((diag_path, diag_rel_path))
             logger.info("zones:export added diagnostics.json to zip")
         except Exception as exc:
             logger.warning("zones:export diagnostics.json failed: %s", exc)
+
+    for rel_name, content in extra_files_map.items():
+        try:
+            extra_path = temp_dir / rel_name
+            extra_path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(content, (bytes, bytearray)):
+                extra_path.write_bytes(bytes(content))
+            else:
+                extra_path.write_text(str(content))
+            files.append((extra_path, rel_name))
+            logger.info("zones:export added extra artifact %s", rel_name)
+        except Exception as exc:
+            logger.warning("zones:export extra artifact failed (%s): %s", rel_name, exc)
 
     paths = {
         "raster": raster_name,
