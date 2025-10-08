@@ -207,7 +207,10 @@ for the period.
 - **E_MASK_SHAPE**: NDVI mask must be single-band. Use the intersection of `B8` and `B4` masks.
 - **E_COVERAGE_LOW**: Too few valid pixels before stability masking. Inspect diagnostics for `per_month_preview`/`mask_tiers` and widen the month window if needed.
 - **Coverage**: To improve coverage, expand the month range, relax SCL filters to include classes 3/7, raise `cloud_prob_max` into the 60–70 range, or temporarily disable the stability mask to gauge impact.
-- **E_RANGE_EMPTY**: NDVI_min == NDVI_max (no dynamic range). Check NDVI bands/float math; relax masks; verify AOI intersects imagery.
+- **E_RANGE_EMPTY**: NDVI_min == NDVI_max before classification. Fix by:
+  - Ensuring NDVI uses B8/B4 float math (no visualize, no integer rounding).
+  - Relaxing SCL/cloud masks (e.g., include classes 3/7) and/or widening months to include a greener + drier period.
+  - Verifying AOI intersects Sentinel-2 coverage and reduction region uses `buffer(5).bounds(1)` with `scale=10, bestEffort, tileScale=4`.
 - **E_BREAKS_COLLAPSED** (percentiles only): NDVI spread too small for distinct thresholds. Use `method=ndvi_kmeans` or widen the date range.
 
 ### Export package layout

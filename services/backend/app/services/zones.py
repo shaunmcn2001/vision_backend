@@ -2775,25 +2775,20 @@ def _prepare_selected_period_artifacts(
                 bestEffort=True,
                 tileScale=4,
             )
-            return ee.Feature(
+            feature = ee.Feature(
                 None,
                 {
                     "ym": ym,
                     "NDVI_min": mm.get("NDVI_min"),
                     "NDVI_max": mm.get("NDVI_max"),
                     "valid_sum": ee.Number(vv.values().reduce(ee.Reducer.sum())),
-                    "mask_tier": img.get("mask_tier"),
                 },
             )
+            return feature.set("mask_tier", img.get("mask_tier"))
 
-        per_month_py = None
+        _per_month = ee.FeatureCollection(monthly_ndvi_collection.map(_month_diag))
         try:
-            _per_month_fc = monthly_ndvi_collection.map(_month_diag)
-            per_month_py = (
-                ee.FeatureCollection(_per_month_fc)
-                .aggregate_array("properties")
-                .getInfo()
-            )
+            per_month_py = _per_month.aggregate_array("properties").getInfo()
         except Exception:
             per_month_py = None
         try:
@@ -2905,11 +2900,24 @@ def _prepare_selected_period_artifacts(
         ndvi_images = [_compute_ndvi(image) for image in composite_images]
 
     ndvi_stats = dict(_ndvi_temporal_stats(ndvi_images))
+    try:
+        mean_band = ee.String(ndvi_stats["mean"].bandNames().get(0))
+        ndvi_stats["mean"] = (
+            ee.Image(ndvi_stats["mean"]).select([mean_band]).rename("NDVI")
+        )
+    except Exception:
+        ndvi_stats["mean"] = ee.Image(ndvi_stats["mean"]).rename("NDVI")
 
     if ndvi_collection is not None:
         try:
             valid_mask = ndvi_collection.count().gt(0)
-            mean_image = ndvi_collection.mean().toFloat().updateMask(valid_mask)
+            mean_image = (
+                ndvi_collection.mean()
+                .select("NDVI")
+                .rename("NDVI")
+                .toFloat()
+                .updateMask(valid_mask)
+            )
             neighbors = mean_image.focal_mean(radius=30, units="meters")
             fill_source = neighbors
             try:
@@ -2925,14 +2933,14 @@ def _prepare_selected_period_artifacts(
                     "Failed to apply NDVI hole size mask; using full neighbors"
                 )
             mean_image = mean_image.unmask(fill_source)
-            mean_image = mean_image.clip(geometry).rename("NDVI_mean")
+            mean_image = mean_image.clip(geometry)
             ndvi_stats["mean"] = mean_image
             ndvi_stats["valid_mask"] = valid_mask
         except Exception:  # pragma: no cover - logging guard
             logger.exception("Failed to compute mean NDVI image from collection")
     else:
         try:
-            ndvi_stats["mean"] = ndvi_stats["mean"].toFloat().clip(geometry)
+            ndvi_stats["mean"] = ee.Image(ndvi_stats["mean"]).toFloat().clip(geometry)
         except Exception:  # pragma: no cover - logging guard
             logger.exception("Failed to clip fallback NDVI mean image")
 
@@ -2976,7 +2984,9 @@ def _prepare_selected_period_artifacts(
         ndvi_mean_image = None
         if collection_for_stats is not None:
             try:
-                ndvi_mean_image = collection_for_stats.mean()
+                ndvi_mean_image = (
+                    collection_for_stats.mean().select("NDVI").rename("NDVI")
+                )
             except Exception:
                 ndvi_mean_image = None
         stats_info = {}
@@ -3346,7 +3356,6 @@ def _prepare_selected_period_artifacts(
         masked_mean = ee.Image(masked_mean).select(["NDVI"]).rename("NDVI")
         g = guard if guard is not None else Guard()
         feature_payload: dict[str, ee.Image] = {"NDVI": masked_mean}
-        kmeans_input = masked_mean
 
         if diag_guard is not None:
             diag_guard.record(
@@ -3355,8 +3364,113 @@ def _prepare_selected_period_artifacts(
             logger.info("zones:classification method=%s", method)
             logger.info("zones:classification kmeans seed=42")
 
+        region_for_kmeans = region
+        if region_for_kmeans is None and isinstance(geometry, ee.Geometry):
             try:
-                rng = kmeans_input.reduceRegion(
+                region_for_kmeans = (
+                    ee.FeatureCollection([ee.Feature(geometry)])
+                    .geometry()
+                    .buffer(5)
+                    .bounds(1)
+                )
+            except Exception:
+                region_for_kmeans = geometry
+        if region_for_kmeans is None:
+            region_for_kmeans = geometry
+
+        bands = masked_mean.bandNames()
+        mask_bands = masked_mean.mask().bandNames().size()
+
+        valid_sum = ee.Dictionary(
+            masked_mean.mask().reduceRegion(
+                ee.Reducer.sum(),
+                region_for_kmeans,
+                10,
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=4,
+            )
+        )
+        total_px = ee.Number(region_for_kmeans.area(1)).divide(ee.Number(10).pow(2))
+        safe_total_px = ee.Number(
+            ee.Algorithms.If(total_px.gt(0), total_px, ee.Number(1))
+        )
+        valid_ratio = ee.Number(valid_sum.values().reduce(ee.Reducer.sum())).divide(
+            safe_total_px
+        )
+
+        rng = ee.Dictionary(
+            masked_mean.reduceRegion(
+                ee.Reducer.minMax(),
+                region_for_kmeans,
+                10,
+                maxPixels=1e9,
+                bestEffort=True,
+                tileScale=4,
+            )
+        )
+        vmin = ee.Number(rng.get("NDVI_min", ee.Number(0)))
+        vmax = ee.Number(rng.get("NDVI_max", ee.Number(0)))
+
+        valid_ratio_val: float | None = None
+        ndvi_min_val: float | None = None
+        ndvi_max_val: float | None = None
+        try:
+            valid_ratio_val = float(valid_ratio.getInfo())
+        except Exception:
+            valid_ratio_val = None
+        try:
+            ndvi_min_val = float(vmin.getInfo())
+        except Exception:
+            ndvi_min_val = None
+        try:
+            ndvi_max_val = float(vmax.getInfo())
+        except Exception:
+            ndvi_max_val = None
+
+        try:
+            g.record(
+                "ndvi_input_health",
+                band_names=ee.List(bands).getInfo(),
+                mask_band_count=int(mask_bands.getInfo()),
+                valid_ratio=valid_ratio_val,
+                ndvi_min=ndvi_min_val,
+                ndvi_max=ndvi_max_val,
+            )
+        except Exception:
+            pass
+
+        g.require(
+            bands.size().eq(1).And(bands.contains("NDVI")),
+            "E_NDVI_BAND",
+            "Classifier input must be a single band named 'NDVI'.",
+            "Ensure compute_ndvi() renames and monthly composites select 'NDVI'; avoid visualize().",
+        )
+        g.require(
+            mask_bands.eq(1),
+            "E_MASK_SHAPE",
+            "NDVI mask must be single-band.",
+            "Use B8.mask().And(B4.mask()) in compute_ndvi().",
+        )
+        g.require(
+            valid_ratio.gte(0.25),
+            "E_COVERAGE_LOW",
+            "Too few valid pixels after masking (valid_ratio < 0.25).",
+            "Relax SCL/cloud masks or widen month range.",
+        )
+        g.require(
+            vmax.gt(vmin),
+            "E_RANGE_EMPTY",
+            (
+                f"NDVI has no dynamic range (min == max). "
+                f"NDVI_min={ndvi_min_val}, NDVI_max={ndvi_max_val}."
+            ),
+            "Check NDVI bands/float math; relax masks; widen months; verify AOI intersects imagery; do NOT use visualize().",
+        )
+
+        if diag_guard is not None:
+            try:
+                rng_info = masked_mean.reduceRegion(
                     ee.Reducer.minMax(),
                     geometry,
                     10,
@@ -3365,10 +3479,10 @@ def _prepare_selected_period_artifacts(
                     tileScale=4,
                 ).getInfo()
             except Exception:
-                rng = None
+                rng_info = None
 
             try:
-                std = kmeans_input.reduceRegion(
+                std_info = masked_mean.reduceRegion(
                     ee.Reducer.stdDev(),
                     geometry,
                     10,
@@ -3377,96 +3491,24 @@ def _prepare_selected_period_artifacts(
                     tileScale=4,
                 ).getInfo()
             except Exception:
-                std = None
+                std_info = None
 
             diag_guard.record(
                 "ndvi_distribution_for_kmeans",
-                min=rng.get("NDVI_min") if isinstance(rng, Mapping) else None,
-                max=rng.get("NDVI_max") if isinstance(rng, Mapping) else None,
-                std=std.get("NDVI_stdDev") if isinstance(std, Mapping) else None,
+                min=rng_info.get("NDVI_min") if isinstance(rng_info, Mapping) else None,
+                max=rng_info.get("NDVI_max") if isinstance(rng_info, Mapping) else None,
+                std=(
+                    std_info.get("NDVI_stdDev")
+                    if isinstance(std_info, Mapping)
+                    else None
+                ),
             )
-        region_for_checks = region
-        if region_for_checks is None and isinstance(geometry, ee.Geometry):
-            try:
-                region_for_checks = (
-                    ee.FeatureCollection([ee.Feature(geometry)])
-                    .geometry()
-                    .buffer(5)
-                    .bounds(1)
-                )
-            except Exception:
-                region_for_checks = None
-        if region_for_checks is None:
-            region_for_checks = geometry
 
-        vmin_val: float | None = None
-        vmax_val: float | None = None
-
-        try:
-            rng = masked_mean.reduceRegion(
-                ee.Reducer.minMax(),
-                region_for_checks,
-                10,
-                maxPixels=1e9,
-                bestEffort=True,
-                tileScale=4,
-            )
-            vmin_val = float(ee.Number(rng.get("NDVI_min")).getInfo())
-            vmax_val = float(ee.Number(rng.get("NDVI_max")).getInfo())
-        except Exception:
-            vmin_val = None
-            vmax_val = None
-
-        try:
-            if guard is not None:
-                guard.record(
-                    "ndvi_input_health_metrics",
-                    valid_ratio=(
-                        coverage_after_value
-                        if coverage_after_value is not None
-                        else coverage_before_value
-                    ),
-                    ndvi_min=vmin_val,
-                    ndvi_max=vmax_val,
-                )
-        except Exception:
-            pass
-
-        _guard_require(
-            vmin_val is not None and vmax_val is not None and vmax_val > vmin_val,
-            "E_RANGE_EMPTY",
-            "NDVI has no dynamic range (min == max) before k-means.",
-            "Check NDVI bands/float, relax masks, verify AOI intersects imagery.",
-            ndvi_min=vmin_val,
-            ndvi_max=vmax_val,
-        )
-
-        bands = masked_mean.bandNames()
-        mask_band_count = masked_mean.mask().bandNames().size()
-        g.require(
-            bands.size().eq(1).And(bands.contains("NDVI")),
-            "E_NDVI_BAND",
-            "Classifier input must be a single band named 'NDVI'.",
-            "Ensure compute_ndvi() renames and monthly composites select 'NDVI'.",
-        )
-        g.require(
-            mask_band_count.eq(1),
-            "E_MASK_SHAPE",
-            "NDVI mask must be single-band.",
-            "Use B8.mask().And(B4.mask()) in NDVI compute.",
-        )
-
-        try:
-            g.record(
-                "ndvi_input_health",
-                band_names=ee.List(bands).getInfo(),
-                mask_band_count=int(mask_band_count.getInfo()),
-            )
-        except Exception:
-            pass
+        eps = ee.Image.random(42).multiply(1e-6)
+        ndvi_for_kmeans = masked_mean.toFloat().add(eps).rename("NDVI")
 
         zones_raw = kmeans_classify(
-            kmeans_input,
+            ndvi_for_kmeans,
             geometry,
             n_classes=n_classes,
             seed=42,
