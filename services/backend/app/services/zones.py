@@ -3215,11 +3215,11 @@ def _prepare_selected_period_artifacts(
                 coverage_before_value if coverage_before_value is not None else 0
             )
         )
-        should_apply = ee.Boolean(
+        should_apply = ee.Number(
             ee.Algorithms.If(
-                ee.Boolean(stability_adaptive),
-                ratio_for_decision.gte(min_valid_ratio),
-                True,
+                stability_adaptive,
+                ee.Number(ratio_for_decision.gte(min_valid_ratio)),
+                ee.Number(1),
             )
         )
         masked_mean = ee.Image(
@@ -3237,7 +3237,7 @@ def _prepare_selected_period_artifacts(
             )
         )
         try:
-            stability_applied_bool = bool(should_apply.getInfo())
+            stability_applied_bool = bool(ee.Number(should_apply).getInfo())
         except Exception:
             stability_applied_bool = False
 
