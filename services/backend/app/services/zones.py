@@ -1035,6 +1035,7 @@ def build_monthly_ndvi_collection(
     aoi,
     months: list[str],
     *,
+    mask_mode: str,
     min_valid_ratio: float,
     cloud_prob_max: int,
 ) -> ee.ImageCollection:
@@ -1047,17 +1048,18 @@ def build_monthly_ndvi_collection(
     images = []
     for ym in months:
         s, e = _range(ym)
+        monthly_image = monthly_ndvi_adaptive(
+            aoi,
+            s,
+            e,
+            mask_mode=mask_mode,
+            min_valid_ratio=min_valid_ratio,
+            cloud_prob_max=cloud_prob_max,
+        )
         monthly = (
-            monthly_ndvi_adaptive(
-                aoi,
-                s,
-                e,
-                min_valid_ratio=min_valid_ratio,
-                cloud_prob_max=cloud_prob_max,
-            )
-            .select("NDVI")
+            monthly_image.select("NDVI")
             .rename("NDVI")
-            .set({"ym": ym})
+            .set({"ym": ym, "mask_tier": monthly_image.get("mask_tier")})
         )
         images.append(monthly)
 
@@ -1125,6 +1127,7 @@ def _build_composite_series(
     start_date: date,
     end_date: date,
     cloud_prob_max: int,
+    mask_mode: str,
     min_valid_ratio: float,
 ) -> tuple[list[tuple[str, ee.Image]], list[str], dict[str, object]]:
     composites: list[tuple[str, ee.Image]] = []
@@ -1164,6 +1167,7 @@ def _build_composite_series(
                 geometry,
                 month_start,
                 month_end,
+                mask_mode=mask_mode,
                 min_valid_ratio=min_valid_ratio,
                 cloud_prob_max=cloud_prob_max,
             ).select("NDVI")
@@ -1249,12 +1253,42 @@ def compute_ndvi(img: ee.Image) -> ee.Image:
     return ndvi.updateMask(b8.mask().And(b4.mask()))
 
 
+# --- Helpers -----------------------------------------------------------------
+def _ndvi_from(img: ee.Image) -> ee.Image:
+    b8 = img.select("B8").toFloat()
+    b4 = img.select("B4").toFloat()
+    ndvi = b8.subtract(b4).divide(b8.add(b4).add(1e-6)).rename("NDVI")
+    return ndvi.updateMask(b8.mask().And(b4.mask()))
+
+
+def _scl_mask(img: ee.Image, keep_codes: Sequence[int]) -> ee.Image:
+    return (
+        img.select("SCL").remap(keep_codes, [1] * len(keep_codes), 0).rename("SCL_keep")
+    )
+
+
+def _cover_ratio(
+    img: ee.Image, region: ee.Geometry, scale: int = 10, tile_scale: int = 4
+) -> ee.Number:
+    valid_sum = img.mask().reduceRegion(
+        ee.Reducer.sum(),
+        region,
+        scale,
+        maxPixels=1e9,
+        bestEffort=True,
+        tileScale=tile_scale,
+    )
+    total_px = region.area(1).divide(ee.Number(scale).pow(2))
+    return ee.Number(valid_sum.values().reduce(ee.Reducer.sum())).divide(total_px)
+
+
 # --- Adaptive monthly composite ---------------------------------------------
 def monthly_ndvi_adaptive(
     aoi,
     start,
     end,
     *,
+    mask_mode: str,
     min_valid_ratio: float,
     cloud_prob_max: int,
 ) -> ee.Image:
@@ -1265,18 +1299,6 @@ def monthly_ndvi_adaptive(
         except Exception:
             geometry = ee.Geometry(aoi)
 
-    base = (
-        ee.ImageCollection(gee.S2_SR_COLLECTION)
-        .filterBounds(geometry)
-        .filterDate(start, end)
-    )
-    probability = (
-        ee.ImageCollection(gee.S2_CLOUD_PROB_COLLECTION)
-        .filterBounds(geometry)
-        .filterDate(start, end)
-    )
-    with_prob = gee._attach_cloud_probability(base, probability)
-
     try:
         region = (
             ee.FeatureCollection([ee.Feature(geometry)]).geometry().buffer(5).bounds(1)
@@ -1284,94 +1306,91 @@ def monthly_ndvi_adaptive(
     except Exception:
         region = geometry
 
-    pixel_area = ee.Number(10).pow(2)
-    total_px = ee.Number(region.area(1)).divide(pixel_area)
-    min_ratio = ee.Number(min_valid_ratio).max(0).min(1)
-    cloud_threshold = ee.Number(cloud_prob_max)
+    base = (
+        ee.ImageCollection(gee.S2_SR_COLLECTION)
+        .filterBounds(region)
+        .filterDate(start, end)
+    )
 
-    def _mask_for_classes(image: ee.Image, classes: list[int]) -> ee.Image:
-        scl = image.select("SCL")
-        mask = scl.eq(classes[0])
-        for value in classes[1:]:
-            mask = mask.Or(scl.eq(value))
-        return mask
+    tiers: list[dict[str, object]] = []
+    tiers.append(
+        {
+            "name": "strict",
+            "apply": lambda ic: ic.map(
+                lambda im: _ndvi_from(im).updateMask(_scl_mask(im, [4, 5, 6]))
+            ),
+        }
+    )
+    tiers.append(
+        {
+            "name": "relaxed",
+            "apply": lambda ic: ic.map(
+                lambda im: _ndvi_from(im).updateMask(_scl_mask(im, [3, 4, 5, 6, 7]))
+            ),
+        }
+    )
+    tiers.append({"name": "minimal", "apply": lambda ic: ic.map(_ndvi_from)})
 
-    def _cloud_prob_mask(image: ee.Image) -> ee.Image:
-        has_prob = ee.Image(
-            ee.Algorithms.If(
-                image.bandNames().contains("cloud_probability"),
-                image.select("cloud_probability"),
-                ee.Image(0),
-            )
-        )
-        return has_prob.lte(cloud_threshold)
+    tiers_by_name = {tier["name"]: tier for tier in tiers}
+    tier_order = (
+        ["strict"]
+        if mask_mode == "strict"
+        else ["relaxed"] if mask_mode == "relaxed" else ["strict", "relaxed", "minimal"]
+    )
 
-    def _ndvi_for_image(image: ee.Image, keep: ee.Image | None) -> ee.Image:
-        ndvi = compute_ndvi(image)
-        mask = ndvi.mask()
-        if keep is not None:
-            mask = mask.And(keep)
-        return ndvi.updateMask(mask)
-
-    def _decorate(image: ee.Image, tier: int) -> ee.Image:
-        valid_sum = image.mask().reduceRegion(
-            ee.Reducer.sum(),
-            region,
-            10,
-            maxPixels=1e9,
-            bestEffort=True,
-            tileScale=4,
-        )
-        valid_total = ee.Number(valid_sum.values().reduce(ee.Reducer.sum()))
-        ratio = ee.Number(
-            ee.Algorithms.If(total_px.gt(0), valid_total.divide(total_px), 0)
-        )
-        return image.set(
+    candidates: list[ee.Image] = []
+    for idx, name in enumerate(tier_order):
+        tier_def = tiers_by_name.get(name)
+        if tier_def is None:
+            continue
+        ndvi_ic = ee.ImageCollection(tier_def["apply"](base))
+        comp = ndvi_ic.median().select("NDVI").rename("NDVI")
+        ratio = _cover_ratio(comp, region)
+        comp = comp.set(
             {
-                "mask_tier": tier,
-                "valid_sum": valid_total,
+                "mask_tier": name,
                 "valid_ratio": ratio,
+                "tier_index": idx,
             }
         )
+        candidates.append(comp)
 
-    def _composite(mask_fn, tier: int) -> ee.Image:
-        ndvi_collection = with_prob.map(
-            lambda img: _ndvi_for_image(img, mask_fn(img) if mask_fn else None)
-        )
-        composite = ee.Image(ndvi_collection.median()).select("NDVI").rename("NDVI")
-        return _decorate(composite, tier)
+    minimal_def = tiers_by_name["minimal"]
+    minimal_ic = ee.ImageCollection(minimal_def["apply"](base))
+    minimal_comp = minimal_ic.median().select("NDVI").rename("NDVI")
+    minimal_ratio = _cover_ratio(minimal_comp, region)
+    minimal_comp = minimal_comp.set(
+        {
+            "mask_tier": "minimal",
+            "valid_ratio": minimal_ratio,
+            "tier_index": len(tier_order),
+        }
+    )
 
-    strict_classes = [4, 5, 6]
-    relaxed_classes = [3, 4, 5, 6, 7]
-
-    def _tier1(image: ee.Image) -> ee.Image:
-        return _mask_for_classes(image, strict_classes)
-
-    def _tier2(image: ee.Image) -> ee.Image:
-        return _mask_for_classes(image, relaxed_classes)
-
-    def _tier3(image: ee.Image) -> ee.Image:
-        return _mask_for_classes(image, relaxed_classes).And(_cloud_prob_mask(image))
-
-    def _tier4(_image: ee.Image) -> ee.Image:
-        return ee.Image(1)
-
-    candidates = [
-        _composite(_tier1, 1),
-        _composite(_tier2, 2),
-        _composite(_tier3, 3),
-        _composite(_tier4, 4),
-    ]
+    if not candidates:
+        candidates.append(minimal_comp)
 
     cand_ic = ee.ImageCollection(candidates)
-    accepted = (
-        cand_ic.filter(ee.Filter.gte("valid_ratio", min_ratio))
-        .sort("mask_tier")
+    acceptable = (
+        cand_ic.filter(ee.Filter.gte("valid_ratio", min_valid_ratio))
+        .sort("tier_index")
         .first()
     )
-    fallback = cand_ic.sort("valid_ratio", False).first()
-    selected = ee.Image(ee.Algorithms.If(accepted, accepted, fallback))
-    return selected
+
+    fallback_minimal = minimal_comp.set(
+        {
+            "mask_tier": "fallback_minimal",
+            "valid_ratio": minimal_comp.get("valid_ratio"),
+        }
+    )
+    comp_img = ee.Image(
+        ee.Algorithms.If(
+            acceptable,
+            acceptable,
+            fallback_minimal,
+        )
+    )
+    return comp_img.set("mask_tier", comp_img.get("mask_tier"))
 
 
 # Backwards compatibility for callers still referencing the private helper
@@ -2693,9 +2712,11 @@ def _prepare_selected_period_artifacts(
     start_date: date,
     end_date: date,
     cloud_prob_max: int,
+    mask_mode: str,
     n_classes: int,
     cv_mask_threshold: float,
     apply_stability_mask: bool | None,
+    stability_adaptive: bool,
     min_valid_ratio: float,
     min_mapping_unit_ha: float,
     smooth_radius_m: float,
@@ -2750,6 +2771,7 @@ def _prepare_selected_period_artifacts(
             geometry,
             list(ordered_months),
             min_valid_ratio=min_valid_ratio,
+            mask_mode=mask_mode,
             cloud_prob_max=cloud_prob_max,
         )
         try:
@@ -2832,6 +2854,7 @@ def _prepare_selected_period_artifacts(
         start_date,
         end_date,
         cloud_prob_max,
+        mask_mode,
         min_valid_ratio,
     )
     if diag_guard is not None:
@@ -3083,23 +3106,6 @@ def _prepare_selected_period_artifacts(
     except Exception:  # pragma: no cover - logging guard
         logger.exception("Failed to compute NDVI percentile diagnostics")
 
-    stability_flag = (
-        APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
-    )
-    if stability_flag:
-        stability_image = _stability_mask(
-            ndvi_stats["cv"],
-            geometry,
-            STABILITY_THRESHOLD_SEQUENCE,
-            MIN_STABILITY_SURVIVAL_RATIO,
-            DEFAULT_SCALE,
-        )
-    else:
-        stability_image = ee.Image(1)
-    ndvi_stats["stability"] = stability_image
-
-    mean_float = _ensure_float_image(ndvi_stats["mean"])
-
     region_for_checks = region
     if region_for_checks is None and isinstance(geometry, ee.Geometry):
         try:
@@ -3114,28 +3120,28 @@ def _prepare_selected_period_artifacts(
     if region_for_checks is None:
         region_for_checks = geometry
 
+    ndvi_stack = monthly_ndvi_collection or ndvi_collection
+    if ndvi_stack is None:
+        try:
+            ndvi_stack = ee.ImageCollection(ndvi_images)
+        except Exception:
+            ndvi_stack = None
+
+    ndvi_mean: ee.Image | None = None
+    if ndvi_stack is not None:
+        try:
+            ndvi_mean = ndvi_stack.mean().select("NDVI").rename("NDVI")
+        except Exception:
+            ndvi_mean = None
+    if ndvi_mean is None:
+        ndvi_mean = ee.Image(ndvi_stats["mean"]).select("NDVI").rename("NDVI")
+
     coverage_before_value: float | None = None
-    coverage_ratio = None
-    total_px_number = None
     try:
-        valid_sum_before = mean_float.mask().reduceRegion(
-            ee.Reducer.sum(),
-            region_for_checks,
-            10,
-            maxPixels=1e9,
-            bestEffort=True,
-            tileScale=4,
+        coverage_before_value = float(
+            _cover_ratio(ndvi_mean, region_for_checks).getInfo()
         )
-        valid_before_number = ee.Number(
-            valid_sum_before.values().reduce(ee.Reducer.sum())
-        )
-        total_px_number = ee.Number(region_for_checks.area(1)).divide(
-            ee.Number(10).pow(2)
-        )
-        coverage_ratio = valid_before_number.divide(total_px_number)
-        coverage_before_value = float(coverage_ratio.getInfo())
     except Exception:
-        coverage_ratio = None
         coverage_before_value = None
 
     if guard is not None:
@@ -3147,9 +3153,6 @@ def _prepare_selected_period_artifacts(
         except Exception:
             pass
 
-    coverage_ok = coverage_before_value is not None and coverage_before_value >= float(
-        min_valid_ratio
-    )
     mask_tier_preview_payload = None
     if mask_tier_preview:
         mask_tier_preview_payload = [
@@ -3161,11 +3164,14 @@ def _prepare_selected_period_artifacts(
         "per_month_preview": per_month_preview,
         "mask_tiers": mask_tier_preview_payload,
     }
+    coverage_ok = coverage_before_value is not None and coverage_before_value >= float(
+        min_valid_ratio
+    )
     if guard is not None:
         guard.require(
             coverage_ok,
             "E_COVERAGE_LOW",
-            f"Too few valid pixels before stability masking (valid_ratio < {min_valid_ratio}). See per_month_preview/mask_tiers diagnostics for gaps.",
+            f"Too few valid pixels before stability (valid_ratio < {min_valid_ratio}).",
             "Relax masks or widen month range.",
             **coverage_ctx,
         )
@@ -3173,54 +3179,84 @@ def _prepare_selected_period_artifacts(
         raise PipelineError(
             code="E_COVERAGE_LOW",
             msg=(
-                "E_COVERAGE_LOW: Too few valid pixels before stability masking "
-                f"(valid_ratio < {min_valid_ratio}). See per_month_preview/mask_tiers diagnostics for gaps."
+                "E_COVERAGE_LOW: Too few valid pixels before stability "
+                f"(valid_ratio < {min_valid_ratio})."
             ),
             hints="Relax masks or widen month range.",
             ctx=coverage_ctx,
         )
 
-    update_mask = getattr(mean_float, "updateMask", None)
-    if callable(update_mask):
-        try:
-            masked_mean = update_mask(stability_image)
-        except Exception:  # pragma: no cover - defensive fallback
-            logger.exception("Failed to apply stability mask; using unmasked mean")
-            masked_mean = mean_float
-    else:
-        masked_mean = mean_float
+    stability_flag = (
+        APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
+    )
+    mean_before_stability = ndvi_mean
+    stability_image = ee.Image(1)
+    masked_mean = ndvi_mean
+    post_ratio_value: float | None = coverage_before_value
+    stability_applied_bool: bool | None = False
 
-    coverage_after_value: float | None = None
-    if guard is not None and stability_flag:
+    if stability_flag and ndvi_stack is not None:
+        std_img = ndvi_stack.reduce(ee.Reducer.stdDev()).select("NDVI_stdDev")
+        mean_img = ndvi_stack.reduce(ee.Reducer.mean()).select("NDVI")
+        cv = std_img.divide(mean_img.where(mean_img.eq(0), 1)).rename("NDVI_cv")
+        stable = cv.lte(cv_mask_threshold)
+        masked_mean_candidate = ndvi_mean.updateMask(stable)
+        post_ratio: ee.Number | None = None
         try:
-            valid_sum_after = masked_mean.mask().reduceRegion(
-                ee.Reducer.sum(),
-                region_for_checks,
-                10,
-                maxPixels=1e9,
-                bestEffort=True,
-                tileScale=4,
-            )
-            valid_after_number = ee.Number(
-                valid_sum_after.values().reduce(ee.Reducer.sum())
-            )
-            total_after = total_px_number
-            if total_after is None:
-                total_after = ee.Number(region_for_checks.area(1)).divide(
-                    ee.Number(10).pow(2)
-                )
-            coverage_after = valid_after_number.divide(total_after)
-            coverage_after_value = float(coverage_after.getInfo())
+            post_ratio = _cover_ratio(masked_mean_candidate, region_for_checks)
+            post_ratio_value = float(post_ratio.getInfo())
         except Exception:
-            coverage_after_value = None
+            post_ratio = None
+            post_ratio_value = None
+        ratio_for_decision = (
+            post_ratio
+            if post_ratio is not None
+            else ee.Number(
+                coverage_before_value if coverage_before_value is not None else 0
+            )
+        )
+        should_apply = ee.Boolean(
+            ee.Algorithms.If(
+                ee.Boolean(stability_adaptive),
+                ratio_for_decision.gte(min_valid_ratio),
+                True,
+            )
+        )
+        masked_mean = ee.Image(
+            ee.Algorithms.If(
+                should_apply,
+                masked_mean_candidate,
+                ndvi_mean,
+            )
+        )
+        stability_image = ee.Image(
+            ee.Algorithms.If(
+                should_apply,
+                stable,
+                ee.Image(1),
+            )
+        )
+        try:
+            stability_applied_bool = bool(should_apply.getInfo())
+        except Exception:
+            stability_applied_bool = False
+
+    if guard is not None:
         try:
             guard.record(
                 "coverage_after_stability",
-                valid_ratio=coverage_after_value,
+                valid_ratio=post_ratio_value,
             )
         except Exception:
             pass
+        try:
+            guard.record("stability_applied", applied=bool(stability_applied_bool))
+        except Exception:
+            pass
 
+    ndvi_stats["stability"] = stability_image
+    ndvi_stats["mean"] = masked_mean
+    mean_float = _ensure_float_image(masked_mean)
     if diag_guard is not None:
 
         def _extract_count(payload: Mapping[str, object] | None) -> int:
@@ -3245,7 +3281,7 @@ def _prepare_selected_period_artifacts(
         vb_cnt = 0
         va_cnt = 0
         try:
-            base_mask = ndvi_stats["mean"].mask()
+            base_mask = mean_before_stability.mask()
             vb_stats = base_mask.reduceRegion(
                 reducer=ee.Reducer.sum(),
                 geometry=geometry,
@@ -3259,7 +3295,7 @@ def _prepare_selected_period_artifacts(
         except Exception:
             vb_cnt = 0
         try:
-            stable_mask = ndvi_stats["mean"].updateMask(stability_image).mask()
+            stable_mask = mean_before_stability.updateMask(stability_image).mask()
             va_stats = stable_mask.reduceRegion(
                 reducer=ee.Reducer.sum(),
                 geometry=geometry,
@@ -4012,8 +4048,9 @@ def export_selected_period_zones(
     start_date: str | None = None,
     end_date: str | None = None,
     cloud_prob_max: int = 40,
+    mask_mode: str = "adaptive",
     n_classes: int = 5,
-    cv_mask_threshold: float | None = None,
+    cv_mask_threshold: float = DEFAULT_CV_THRESHOLD,
     mmu_ha: float = 2.0,
     min_mapping_unit_ha: float | None = None,
     smooth_radius_m: int = 30,
@@ -4029,6 +4066,7 @@ def export_selected_period_zones(
     include_zonal_stats: bool = True,
     include_stats: bool | None = None,
     apply_stability_mask: bool = True,
+    stability_adaptive: bool = True,
     min_valid_ratio: float = 0.25,
     method: str | None = None,
     diagnostics: bool = False,
@@ -4082,8 +4120,6 @@ def export_selected_period_zones(
     if start_date is not None and end_date is not None and end_date < start_date:
         raise ValueError("end_date must be on or after start_date")
 
-    if cv_mask_threshold is None:
-        cv_mask_threshold = DEFAULT_CV_THRESHOLD
     if min_mapping_unit_ha is not None:
         mmu_ha = float(min_mapping_unit_ha)
     if simplify_tolerance_m is not None:
@@ -4126,9 +4162,11 @@ def export_selected_period_zones(
             start_date=start_date,
             end_date=end_date,
             cloud_prob_max=cloud_prob_max,
+            mask_mode=mask_mode,
             n_classes=n_classes,
             cv_mask_threshold=cv_mask_threshold,
             apply_stability_mask=apply_stability_mask,
+            stability_adaptive=stability_adaptive,
             min_valid_ratio=min_valid_ratio,
             min_mapping_unit_ha=mmu_ha,
             smooth_radius_m=smooth_radius_m,
