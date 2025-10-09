@@ -89,16 +89,20 @@ class ProductionZonesRequest(_BaseAOIRequest):
         0.25,
         ge=0.0,
         le=1.0,
-        description="Minimum required valid-pixel ratio (0–1) BEFORE applying stability",
-    )
-    stability_adaptive: bool = Field(
-        True,
-        description="If true, only apply CV mask when coverage after stability remains acceptable",
+        description="Minimum required valid-pixel ratio before/after masks (0–1).",
     )
     cv_mask_threshold: float = Field(
         zone_service.DEFAULT_CV_THRESHOLD,
         ge=0.0,
-        description="CV threshold (std/mean) for stability mask",
+        description="CV threshold (std/mean) for stability mask; higher keeps more pixels.",
+    )
+    stability_adaptive: bool = Field(
+        True,
+        description="Only apply stability mask if post-coverage >= min_valid_ratio.",
+    )
+    stability_enforce: bool = Field(
+        False,
+        description="If true, fail with E_STABILITY_EMPTY when stability removes too many pixels; otherwise bypass stability.",
     )
     mmu_ha: float = Field(zone_service.DEFAULT_MIN_MAPPING_UNIT_HA, gt=0)
     smooth_radius_m: float = Field(zone_service.DEFAULT_SMOOTH_RADIUS_M, ge=0)
@@ -296,7 +300,6 @@ def create_production_zones(
             cloud_prob_max=request.cloud_prob_max,
             mask_mode=request.mask_mode,
             n_classes=request.n_classes,
-            cv_mask_threshold=request.cv_mask_threshold,
             min_mapping_unit_ha=request.mmu_ha,
             smooth_radius_m=request.smooth_radius_m,
             open_radius_m=request.open_radius_m,
@@ -308,6 +311,8 @@ def create_production_zones(
             include_stats=request.include_zonal_stats,
             apply_stability_mask=request.apply_stability_mask,
             stability_adaptive=request.stability_adaptive,
+            stability_enforce=request.stability_enforce,
+            cv_mask_threshold=request.cv_mask_threshold,
             min_valid_ratio=request.min_valid_ratio,
             diagnostics=diagnostics,
             debug_dump=request.debug_dump,
