@@ -51,6 +51,7 @@ DEFAULT_OPEN_RADIUS_M = 10
 DEFAULT_CLOSE_RADIUS_M = 10
 DEFAULT_SIMPLIFY_TOL_M = 5
 DEFAULT_SIMPLIFY_BUFFER_M = 3
+WEKA_MAX_ITERATIONS = 200
 DEFAULT_METHOD = "ndvi_kmeans"
 DEFAULT_SAMPLE_SIZE = 8000
 DEFAULT_SCALE = 10
@@ -2408,7 +2409,7 @@ def kmeans_classify(
 
     # 3) Fit k-means (wekaKMeans supports seed/maxIterations)
     clusterer = ee.Clusterer.wekaKMeans(
-        nClusters=n_classes, seed=seed, maxIterations=200
+        nClusters=n_classes, seed=seed, maxIterations=WEKA_MAX_ITERATIONS
     ).train(samp, ["NDVI"])
 
     # 4) Classify the image
