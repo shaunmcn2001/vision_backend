@@ -217,11 +217,10 @@ for the period.
 - **E_NDVI_BAND**: Expected a single band named `NDVI`. Ensure the NDVI helper renames to `NDVI` and monthly composites select it.
 - **E_MASK_SHAPE**: NDVI mask must be single-band. Use the intersection of `B8` and `B4` masks.
 - **E_COVERAGE_LOW**: Too few valid pixels before stability masking. Inspect diagnostics for `per_month_preview`/`mask_tiers` and widen the month window if needed.
-- **E_STABILITY_EMPTY**: Stability (CV) mask removed too many pixels. Either:
-  - set `"stability_adaptive": true` (default) to bypass when coverage drops,
-  - increase `"cv_mask_threshold"` (e.g., 0.35–0.45),
-  - widen the month range, or
-  - `"apply_stability_mask": false` to disable.
+- **E_STABILITY_EMPTY**: CV mask removed too many pixels.
+  - We now compute CV only where at least `min_obs_for_cv` months exist and clamp by tiny mean.
+  - With `"stability_adaptive": true` (default), the pipeline bypasses stability if post-coverage < `min_valid_ratio`.
+  - To force failure instead, set `"stability_enforce": true`.
 - **Coverage**: To improve coverage, expand the month range, relax SCL filters to include classes 3/7, raise `cloud_prob_max` into the 60–70 range, or temporarily disable the stability mask to gauge impact.
 - **E_RANGE_EMPTY**: NDVI_min == NDVI_max before classification. Fix by:
   - Ensuring NDVI uses B8/B4 float math (no visualize, no integer rounding).
