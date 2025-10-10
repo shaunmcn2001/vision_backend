@@ -33,6 +33,7 @@ from sklearn.cluster import KMeans
 from app import gee
 from app.exports import sanitize_name
 from app.services.image_stats import temporal_stats
+from app.services import zones_core
 from app.utils.diag import Guard, PipelineError
 from app.utils.geometry import area_ha
 from app.utils.logging_colors import install_color_handler
@@ -40,8 +41,6 @@ from app.utils.sanitization import sanitize_for_json
 
 logger = logging.getLogger(__name__)
 install_color_handler(logger)
-
-
 DEFAULT_CLOUD_PROB_MAX = 40
 DEFAULT_N_CLASSES = 5
 DEFAULT_CV_THRESHOLD = 0.5
@@ -65,6 +64,14 @@ DEFAULT_CRS = DEFAULT_EXPORT_CRS
 def _allow_init_failure() -> bool:
     flag = os.getenv("GEE_ALLOW_INIT_FAILURE", "")
     return flag.strip().lower() in {"1", "true", "yes"}
+
+
+def ensure_list(value):
+    return zones_core.ensure_list(value, ee)
+
+
+def remove_nulls(lst):
+    return zones_core.remove_nulls(lst, ee)
 
 
 def _to_ee_geometry(geojson: dict) -> ee.Geometry:
@@ -1703,7 +1710,7 @@ def _classify_by_percentiles(
     # Percentile cuts to request
     step = 100 / n_classes
     percentile_sequence = [step * i for i in range(1, n_classes)]
-    pct_breaks = ee.List(percentile_sequence)
+    pct_breaks = ensure_list(percentile_sequence)
     output_names = [f"cut_{i:02d}" for i in range(1, n_classes)]
 
     # Compute percentiles for this band
@@ -1761,7 +1768,7 @@ def _classify_by_percentiles(
         gt_band = image.gt(t)
         return current_img.add(gt_band)
 
-    summed = ee.List(thresholds).iterate(_accumulate, zero)
+    summed = ensure_list(thresholds).iterate(_accumulate, zero)
     classified = ee.Image(summed).add(1).toInt()
 
     return classified.rename("zone"), thresholds
@@ -2265,20 +2272,20 @@ def robust_quantile_breaks(
         bestEffort=True,
         tileScale=tile_scale,
     )
-    vals1 = ee.List(perc).map(lambda p: try1.get(f"NDVI_p{p}"))
+    vals1 = ensure_list(perc).map(lambda p: try1.get(f"NDVI_p{p}"))
 
     # de-dup & enforce increasing using ee logic
-    def _uniq_sort(l):
-        l2 = ee.List(l).sort()
+    def _uniq_sort(values):
+        l2 = ensure_list(values).sort()
         # remove nulls
-        l2 = l2.filter(ee.Filter.notNull([0]))  # works element-wise
+        l2 = remove_nulls(l2)
 
         # squash equal neighbors by adding epsilon steps
         def _dedup(idx, prev):
             idx = ee.Number(idx)
             prev_type = ee.String(ee.Algorithms.ObjectType(prev))
             prev_is_list = prev_type.compareTo("List").eq(0)
-            acc = ee.List(ee.Algorithms.If(prev_is_list, prev, ee.List([])))
+            acc = ensure_list(ee.Algorithms.If(prev_is_list, prev, ee.List([])))
             v = ee.Number(l2.get(idx))
             return ee.Algorithms.If(
                 acc.size().eq(0),
@@ -2291,7 +2298,7 @@ def robust_quantile_breaks(
             )
 
         # iterate
-        return ee.List(
+        return ensure_list(
             ee.List.sequence(0, l2.size().subtract(1)).iterate(_dedup, ee.List([]))
         )
 
@@ -2351,9 +2358,9 @@ def robust_quantile_breaks(
         brks = _uniq_sort(brks)
         return brks
 
-    uniq2 = ee.List(ee.Algorithms.If(ok1, uniq1, _hist_breaks()))
+    uniq2 = ensure_list(ee.Algorithms.If(ok1, uniq1, _hist_breaks()))
 
-    return ee.List(
+    return ensure_list(
         ee.Algorithms.If(uniq2.size().gte(n_classes - 1), uniq2, ee.List([]))
     )
 
@@ -2426,18 +2433,18 @@ def kmeans_classify(
         bestEffort=True,
         tileScale=tile_scale,
     )
-    groups = ee.List(ee.Dictionary(means.get("groups")).get("groups", ee.List([])))
+    groups = ensure_list(ee.Dictionary(means.get("groups")).get("groups", ee.List([])))
 
     def _pair(g):
         d = ee.Dictionary(g)
         return ee.List([ee.Number(d.get("label")), ee.Number(d.get("mean"))])
 
     pairs = groups.map(_pair)  # [[label, mean], ...]
-    pairs_sorted = ee.List(pairs).sort(1)  # ascending NDVI
-    orig = pairs_sorted.map(lambda p: ee.List(p).get(0))
+    pairs_sorted = ensure_list(pairs).sort(1)  # ascending NDVI
+    orig = pairs_sorted.map(lambda p: ensure_list(p).get(0))
     ranks = ee.List.sequence(1, ee.Number(pairs_sorted.size()))
-    remap_from = ee.List(orig)
-    remap_to = ee.List(ranks)
+    remap_from = ensure_list(orig)
+    remap_to = ensure_list(ranks)
 
     relabeled = raw_labels.remap(remap_from, remap_to, 1).rename("zones_kmeans")
 
@@ -2499,7 +2506,7 @@ def _rank_zones(
         tileScale=4,
         maxPixels=gee.MAX_PIXELS,
     )
-    groups = ee.List(grouped.get("groups", ee.List([])))
+    groups = ensure_list(grouped.get("groups", ee.List([])))
 
     def _cluster_value(item):
         info = ee.Dictionary(item)
@@ -2511,7 +2518,7 @@ def _rank_zones(
         )
 
     sorted_groups = groups.map(_cluster_value).sort("mean_ndvi")
-    source = ee.List(
+    source = ensure_list(
         sorted_groups.map(lambda g: ee.Number(ee.Dictionary(g).get("cluster")))
     )
     target = ee.List.sequence(1, source.size())
@@ -3891,7 +3898,7 @@ def _prepare_selected_period_artifacts(
                 elif isinstance(breaks, str):
                     brks_py = [breaks]
                 else:
-                    brks_py = ee.List(breaks).getInfo()
+                    brks_py = ensure_list(breaks).getInfo()
         except Exception:
             brks_py = None
 
