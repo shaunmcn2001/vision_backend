@@ -2054,7 +2054,7 @@ def _dissolve_vectors(
     vectors: ee.FeatureCollection, *, min_hole_area_ha: float
 ) -> ee.FeatureCollection:
     histogram = ee.Dictionary(vectors.aggregate_histogram("zone"))
-    zone_ids = ee.List(histogram.keys())
+    zone_ids = histogram.keys()
     hole_area_m2 = ee.Number(min_hole_area_ha).multiply(10_000)
 
     def _dissolve(zone_value: ee.ComputedObject) -> ee.Feature:
@@ -2137,7 +2137,7 @@ def _add_zonal_stats(
         )
     )
 
-    keys = ee.List(stats_dict.keys())
+    keys = stats_dict.keys()
 
     def _sanitize_value(key) -> ee.Dictionary:
         key_str = ee.String(key)
@@ -2276,7 +2276,9 @@ def robust_quantile_breaks(
         # squash equal neighbors by adding epsilon steps
         def _dedup(idx, prev):
             idx = ee.Number(idx)
-            acc = ee.List(ee.Algorithms.If(prev, prev, ee.List([])))
+            prev_type = ee.String(ee.Algorithms.ObjectType(prev))
+            prev_is_list = prev_type.compareTo("List").eq(0)
+            acc = ee.List(ee.Algorithms.If(prev_is_list, prev, ee.List([])))
             v = ee.Number(l2.get(idx))
             return ee.Algorithms.If(
                 acc.size().eq(0),
@@ -2352,7 +2354,7 @@ def robust_quantile_breaks(
     uniq2 = ee.List(ee.Algorithms.If(ok1, uniq1, _hist_breaks()))
 
     return ee.List(
-        ee.Algorithms.If(ee.List(uniq2).size().gte(n_classes - 1), uniq2, ee.List([]))
+        ee.Algorithms.If(uniq2.size().gte(n_classes - 1), uniq2, ee.List([]))
     )
 
 
@@ -3884,7 +3886,12 @@ def _prepare_selected_period_artifacts(
             elif isinstance(breaks, (list, tuple)):
                 brks_py = list(breaks)
             else:
-                brks_py = ee.List(breaks).getInfo()
+                if isinstance(breaks, (int, float)):
+                    brks_py = [float(breaks)]
+                elif isinstance(breaks, str):
+                    brks_py = [breaks]
+                else:
+                    brks_py = ee.List(breaks).getInfo()
         except Exception:
             brks_py = None
 
