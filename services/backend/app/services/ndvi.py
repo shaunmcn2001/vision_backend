@@ -206,9 +206,7 @@ def _maybe_log_collection_diagnostics(
         )
 
     try:
-        sample = ee.List(
-            ee.ImageCollection(collection).toList(10).map(_img_minmax)
-        ).getInfo()
+        sample = ee.ImageCollection(collection).toList(10).map(_img_minmax).getInfo()
         debug_logger.info(
             "EE debug [%s]: sample per-image min/max (first 10): %s",
             band_name,
