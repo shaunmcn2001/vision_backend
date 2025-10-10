@@ -2715,6 +2715,7 @@ def _prepare_selected_period_artifacts(
     mask_mode: str,
     n_classes: int,
     cv_mask_threshold: float,
+    min_obs_for_cv: int = 3,
     apply_stability_mask: bool | None,
     stability_adaptive: bool = True,
     stability_enforce: bool = False,
@@ -3120,12 +3121,55 @@ def _prepare_selected_period_artifacts(
         except Exception:
             region = geometry
 
-    def _coverage_ratio(
-        img: ee.Image, region: ee.Geometry, scale: int = 10, tile_scale: int = 4
-    ) -> ee.Number:
+    ndvi_stack = monthly_ndvi_collection or ndvi_collection
+    if ndvi_stack is None:
         try:
-            return _cover_ratio(img, region, scale=scale, tile_scale=tile_scale)
+            ndvi_stack = ee.ImageCollection(ndvi_images)
         except Exception:
+            ndvi_stack = None
+
+    ndvi_mean: ee.Image | None = None
+    if monthly_ndvi_collection is not None:
+        try:
+            ndvi_mean = monthly_ndvi_collection.mean().select("NDVI").rename("NDVI")
+        except Exception:
+            ndvi_mean = None
+    if ndvi_mean is None and ndvi_stack is not None:
+        try:
+            ndvi_mean = ndvi_stack.mean().select("NDVI").rename("NDVI")
+        except Exception:
+            ndvi_mean = None
+    if ndvi_mean is None:
+        ndvi_mean = ee.Image(ndvi_stats["mean"]).select("NDVI").rename("NDVI")
+
+    try:
+        region = ee.FeatureCollection(aoi_geojson).geometry().buffer(5).bounds(1)
+    except Exception:
+        try:
+            region = (
+                ee.FeatureCollection([ee.Feature(geometry)])
+                .geometry()
+                .buffer(5)
+                .bounds(1)
+            )
+        except Exception:
+            region = geometry
+
+    common_mask = ee.Image(1)
+    if monthly_ndvi_collection is not None:
+        try:
+            count_img = monthly_ndvi_collection.reduce(ee.Reducer.count()).select(
+                "NDVI_count"
+            )
+            common_mask = count_img.gte(min_obs_for_cv)
+        except Exception:
+            common_mask = ee.Image(1)
+
+    ndvi_mean = ee.Image(ndvi_mean).select("NDVI").rename("NDVI")
+    ndvi_mean = ndvi_mean.updateMask(common_mask)
+
+    def _coverage_ratio(img, region, scale=10, tile_scale=4):
+        try:
             valid_sum = img.mask().reduceRegion(
                 ee.Reducer.sum(),
                 region,
@@ -3138,22 +3182,8 @@ def _prepare_selected_period_artifacts(
             return ee.Number(valid_sum.values().reduce(ee.Reducer.sum())).divide(
                 total_px
             )
-
-    ndvi_stack = monthly_ndvi_collection or ndvi_collection
-    if ndvi_stack is None:
-        try:
-            ndvi_stack = ee.ImageCollection(ndvi_images)
         except Exception:
-            ndvi_stack = None
-
-    ndvi_mean: ee.Image | None = None
-    if ndvi_stack is not None:
-        try:
-            ndvi_mean = ndvi_stack.mean().select("NDVI").rename("NDVI")
-        except Exception:
-            ndvi_mean = None
-    if ndvi_mean is None:
-        ndvi_mean = ee.Image(ndvi_stats["mean"]).select("NDVI").rename("NDVI")
+            return _cover_ratio(img, region, scale=scale, tile_scale=tile_scale)
 
     pre_cov = _coverage_ratio(ndvi_mean, region)
     pre_cov_value: float | None = None
@@ -3188,7 +3218,7 @@ def _prepare_selected_period_artifacts(
             coverage_ok,
             "E_COVERAGE_LOW",
             f"Too few valid pixels before stability (valid_ratio < {min_valid_ratio}).",
-            "Relax SCL/cloud masks or widen the months window.",
+            "Relax masks or widen the month range.",
             **coverage_ctx,
         )
     elif not coverage_ok:
@@ -3198,7 +3228,7 @@ def _prepare_selected_period_artifacts(
                 "E_COVERAGE_LOW: Too few valid pixels before stability "
                 f"(valid_ratio < {min_valid_ratio})."
             ),
-            hints="Relax SCL/cloud masks or widen the months window.",
+            hints="Relax masks or widen the month range.",
             ctx=coverage_ctx,
         )
 
@@ -3208,22 +3238,32 @@ def _prepare_selected_period_artifacts(
     mean_before_stability = ndvi_mean
     stability_image = ee.Image(1)
     masked_mean = ndvi_mean
-    post_ratio_value: float | None = pre_cov_value
+    post_cov = pre_cov
+    post_cov_value: float | None = pre_cov_value
     stability_applied_bool: bool | None = False
     stability_applied_reason: str | None = None
 
-    if stability_flag and ndvi_stack is not None:
-        std_img = ndvi_stack.reduce(ee.Reducer.stdDev()).select("NDVI_stdDev")
-        mean_img = ndvi_stack.reduce(ee.Reducer.mean()).select("NDVI")
-        cv = std_img.divide(mean_img.where(mean_img.eq(0), 1)).rename("NDVI_cv")
+    if stability_flag and monthly_ndvi_collection is not None:
+        std_img = monthly_ndvi_collection.reduce(ee.Reducer.stdDev()).select(
+            "NDVI_stdDev"
+        )
+        mean_img = monthly_ndvi_collection.reduce(ee.Reducer.mean()).select("NDVI")
+
+        safe_mean = mean_img.where(mean_img.abs().lt(1e-6), 1e-6)
+
+        std_img = std_img.updateMask(common_mask)
+        safe_mean = safe_mean.updateMask(common_mask)
+
+        cv = std_img.divide(safe_mean).rename("NDVI_cv")
         stable = cv.lte(cv_mask_threshold)
+
         masked_candidate = ndvi_mean.updateMask(stable)
 
         post_cov = _coverage_ratio(masked_candidate, region)
         try:
-            post_ratio_value = float(post_cov.getInfo())
+            post_cov_value = float(post_cov.getInfo())
         except Exception:
-            post_ratio_value = None
+            post_cov_value = None
 
         if guard is not None:
             try:
@@ -3245,29 +3285,44 @@ def _prepare_selected_period_artifacts(
                             if isinstance(v, (int, float))
                         },
                     )
+                guard.record(
+                    "coverage_after_stability",
+                    valid_ratio=post_cov_value,
+                )
+                guard.record("min_obs_for_cv", value=min_obs_for_cv)
             except Exception:
                 pass
 
         if stability_adaptive:
-            should_apply = post_cov.gte(min_valid_ratio)
             masked_mean = ee.Image(
-                ee.Algorithms.If(should_apply, masked_candidate, ndvi_mean)
+                ee.Algorithms.If(
+                    post_cov.gte(min_valid_ratio),
+                    masked_candidate,
+                    ndvi_mean,
+                )
             )
             stability_image = ee.Image(
-                ee.Algorithms.If(should_apply, stable, ee.Image(1))
+                ee.Algorithms.If(post_cov.gte(min_valid_ratio), stable, ee.Image(1))
             )
             try:
-                stability_applied_bool = bool(ee.Number(should_apply).getInfo())
+                applied = bool(post_cov.gte(min_valid_ratio).getInfo())
             except Exception:
-                stability_applied_bool = (
-                    post_ratio_value is not None
-                    and post_ratio_value >= float(min_valid_ratio)
+                applied = post_cov_value is not None and post_cov_value >= float(
+                    min_valid_ratio
                 )
-            stability_applied_reason = (
-                "ok" if stability_applied_bool else "coverage_drop_bypass"
-            )
+            stability_applied_bool = applied
+            stability_applied_reason = "ok" if applied else "coverage_drop_bypass"
+            if guard is not None:
+                try:
+                    guard.record(
+                        "stability_applied",
+                        applied=applied,
+                        reason=stability_applied_reason,
+                    )
+                except Exception:
+                    pass
         else:
-            post_ok = post_ratio_value is not None and post_ratio_value >= float(
+            post_ok = post_cov_value is not None and post_cov_value >= float(
                 min_valid_ratio
             )
             if stability_enforce:
@@ -3276,34 +3331,62 @@ def _prepare_selected_period_artifacts(
                         post_ok,
                         "E_STABILITY_EMPTY",
                         "All pixels removed by stability mask.",
-                        "Raise cv_mask_threshold, widen months, or disable stability.",
+                        "Increase cv_mask_threshold, widen months, or disable stability.",
                     )
                 elif not post_ok:
                     raise PipelineError(
                         code="E_STABILITY_EMPTY",
                         msg="E_STABILITY_EMPTY: All pixels removed by stability mask.",
-                        hints="Raise cv_mask_threshold, widen months, or disable stability.",
+                        hints="Increase cv_mask_threshold, widen months, or disable stability.",
                     )
             masked_mean = masked_candidate
             stability_image = stable
             stability_applied_bool = True
             stability_applied_reason = "forced"
+            if guard is not None:
+                try:
+                    guard.record(
+                        "stability_applied",
+                        applied=True,
+                        reason=stability_applied_reason,
+                    )
+                except Exception:
+                    pass
+    elif stability_flag:
+        stability_applied_bool = False
+        stability_applied_reason = "no_monthly_collection"
+        stability_image = ee.Image(1)
+        masked_mean = ndvi_mean
+        if guard is not None:
+            try:
+                guard.record(
+                    "stability_applied",
+                    applied=False,
+                    reason=stability_applied_reason,
+                )
+            except Exception:
+                pass
 
-    if guard is not None:
+    if guard is not None and not (
+        stability_flag and monthly_ndvi_collection is not None
+    ):
         try:
             guard.record(
                 "coverage_after_stability",
-                valid_ratio=post_ratio_value,
+                valid_ratio=post_cov_value,
             )
         except Exception:
             pass
         try:
-            record_kwargs = {"applied": bool(stability_applied_bool)}
-            if stability_applied_reason is not None:
-                record_kwargs["reason"] = stability_applied_reason
-            guard.record("stability_applied", **record_kwargs)
+            guard.record(
+                "stability_applied",
+                applied=bool(stability_applied_bool),
+                reason=stability_applied_reason,
+            )
         except Exception:
             pass
+
+    masked_mean = ee.Image(masked_mean).select(["NDVI"]).rename("NDVI")
 
     ndvi_stats["stability"] = stability_image
     ndvi_stats["mean"] = masked_mean
@@ -3371,14 +3454,20 @@ def _prepare_selected_period_artifacts(
             vb_cnt,
             va_cnt,
         )
-        diag_guard.require(
-            va_cnt > 0,
-            "E_STABILITY_EMPTY",
-            "All pixels removed by stability mask.",
-            "Increase CV; relax mask; widen dates.",
-            before=vb_cnt,
-            after=va_cnt,
+        enforce_empty = (
+            stability_flag
+            and (not stability_adaptive or bool(stability_applied_bool))
+            and stability_enforce
         )
+        if enforce_empty:
+            diag_guard.require(
+                va_cnt > 0,
+                "E_STABILITY_EMPTY",
+                "All pixels removed by stability mask.",
+                "Increase cv_mask_threshold, widen months, or disable stability.",
+                before=vb_cnt,
+                after=va_cnt,
+            )
 
         try:
             rng = masked_mean.reduceRegion(
@@ -3983,6 +4072,7 @@ def build_zone_artifacts(
     cloud_prob_max: int = DEFAULT_CLOUD_PROB_MAX,
     n_classes: int = DEFAULT_N_CLASSES,
     cv_mask_threshold: float = DEFAULT_CV_THRESHOLD,
+    min_obs_for_cv: int = 3,
     apply_stability_mask: bool | None = None,
     min_valid_ratio: float = 0.25,
     min_mapping_unit_ha: float = DEFAULT_MIN_MAPPING_UNIT_HA,
@@ -4029,6 +4119,7 @@ def build_zone_artifacts(
         cloud_prob_max=cloud_prob_max,
         n_classes=n_classes,
         cv_mask_threshold=cv_mask_threshold,
+        min_obs_for_cv=min_obs_for_cv,
         apply_stability_mask=apply_stability_mask,
         min_valid_ratio=min_valid_ratio,
         min_mapping_unit_ha=min_mapping_unit_ha,
@@ -4102,6 +4193,7 @@ def export_selected_period_zones(
     mask_mode: str = "adaptive",
     n_classes: int = 5,
     cv_mask_threshold: float = DEFAULT_CV_THRESHOLD,
+    min_obs_for_cv: int = 3,
     stability_adaptive: bool = True,
     stability_enforce: bool = False,
     mmu_ha: float = 2.0,
@@ -4217,6 +4309,7 @@ def export_selected_period_zones(
             mask_mode=mask_mode,
             n_classes=n_classes,
             cv_mask_threshold=cv_mask_threshold,
+            min_obs_for_cv=min_obs_for_cv,
             apply_stability_mask=apply_stability_mask,
             stability_adaptive=stability_adaptive,
             stability_enforce=stability_enforce,

@@ -96,6 +96,11 @@ class ProductionZonesRequest(_BaseAOIRequest):
         ge=0.0,
         description="CV threshold (std/mean) for stability mask; higher keeps more pixels.",
     )
+    min_obs_for_cv: int = Field(
+        3,
+        ge=1,
+        description="Minimum per-pixel month count required to compute CV",
+    )
     stability_adaptive: bool = Field(
         True,
         description="Only apply stability mask if post-coverage >= min_valid_ratio.",
@@ -313,6 +318,7 @@ def create_production_zones(
             stability_adaptive=request.stability_adaptive,
             stability_enforce=request.stability_enforce,
             cv_mask_threshold=request.cv_mask_threshold,
+            min_obs_for_cv=request.min_obs_for_cv,
             min_valid_ratio=request.min_valid_ratio,
             diagnostics=diagnostics,
             debug_dump=request.debug_dump,
