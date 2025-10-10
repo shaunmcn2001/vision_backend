@@ -7,14 +7,22 @@ from typing import Any
 import ee
 
 
-def ensure_list(value, ee_api: Any | None = None):
-    """Wrap scalars or nested lists in an ``ee.List`` and flatten the result."""
+def ensure_list(value, ee_api: Any | None = None, *, flatten: bool = True):
+    """Coerce ``value`` into an ``ee.List`` with optional flattening."""
+
     api = ee_api or ee
-    candidate = api.List([value])
-    flatten = getattr(candidate, "flatten", None)
-    if callable(flatten):
+
+    if not flatten:
         try:
-            return flatten()
+            return api.List(value)
+        except Exception:  # pragma: no cover - defensive fallback
+            return api.List([value])
+
+    candidate = api.List([value])
+    flatten_attr = getattr(candidate, "flatten", None)
+    if callable(flatten_attr):
+        try:
+            return flatten_attr()
         except Exception:  # pragma: no cover - defensive fallback
             pass
     if isinstance(candidate, list):

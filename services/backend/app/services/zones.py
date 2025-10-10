@@ -66,8 +66,8 @@ def _allow_init_failure() -> bool:
     return flag.strip().lower() in {"1", "true", "yes"}
 
 
-def ensure_list(value):
-    return zones_core.ensure_list(value, ee)
+def ensure_list(value, *, flatten: bool = True):
+    return zones_core.ensure_list(value, ee, flatten=flatten)
 
 
 def remove_nulls(lst):
@@ -2440,7 +2440,7 @@ def kmeans_classify(
         return ee.List([ee.Number(d.get("label")), ee.Number(d.get("mean"))])
 
     pairs = groups.map(_pair)  # [[label, mean], ...]
-    pairs_sorted = ensure_list(pairs).sort(1)  # ascending NDVI
+    pairs_sorted = ensure_list(pairs, flatten=False).sort(1)  # ascending NDVI
     orig = pairs_sorted.map(lambda p: ensure_list(p).get(0))
     ranks = ee.List.sequence(1, ee.Number(pairs_sorted.size()))
     remap_from = ensure_list(orig)
