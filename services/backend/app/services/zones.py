@@ -3156,9 +3156,15 @@ def _prepare_selected_period_artifacts(
             region = geometry
 
     common_mask = ee.Image(1)
-    if monthly_ndvi_collection is not None:
+    stack_for_counts = monthly_ndvi_collection or ndvi_stack
+    if stack_for_counts is not None:
         try:
-            count_img = monthly_ndvi_collection.reduce(ee.Reducer.count()).select(
+            count_collection = (
+                stack_for_counts
+                if isinstance(stack_for_counts, ee.ImageCollection)
+                else ee.ImageCollection(stack_for_counts)
+            )
+            count_img = count_collection.reduce(ee.Reducer.count()).select(
                 "NDVI_count"
             )
             common_mask = count_img.gte(min_obs_for_cv)
@@ -3243,11 +3249,23 @@ def _prepare_selected_period_artifacts(
     stability_applied_bool: bool | None = False
     stability_applied_reason: str | None = None
 
-    if stability_flag and monthly_ndvi_collection is not None:
-        std_img = monthly_ndvi_collection.reduce(ee.Reducer.stdDev()).select(
-            "NDVI_stdDev"
-        )
-        mean_img = monthly_ndvi_collection.reduce(ee.Reducer.mean()).select("NDVI")
+    stability_collection_source = monthly_ndvi_collection or ndvi_stack
+
+    if stability_flag and stability_collection_source is not None:
+        try:
+            stability_collection = (
+                stability_collection_source
+                if isinstance(stability_collection_source, ee.ImageCollection)
+                else ee.ImageCollection(stability_collection_source)
+            )
+        except Exception:
+            stability_collection = None
+    else:
+        stability_collection = None
+
+    if stability_flag and stability_collection is not None:
+        std_img = stability_collection.reduce(ee.Reducer.stdDev()).select("NDVI_stdDev")
+        mean_img = stability_collection.reduce(ee.Reducer.mean()).select("NDVI")
 
         safe_mean = mean_img.where(mean_img.abs().lt(1e-6), 1e-6)
 
@@ -3354,7 +3372,7 @@ def _prepare_selected_period_artifacts(
                     pass
     elif stability_flag:
         stability_applied_bool = False
-        stability_applied_reason = "no_monthly_collection"
+        stability_applied_reason = "no_ndvi_collection"
         stability_image = ee.Image(1)
         masked_mean = ndvi_mean
         if guard is not None:
@@ -3368,7 +3386,7 @@ def _prepare_selected_period_artifacts(
                 pass
 
     if guard is not None and not (
-        stability_flag and monthly_ndvi_collection is not None
+        stability_flag and stability_collection is not None
     ):
         try:
             guard.record(
