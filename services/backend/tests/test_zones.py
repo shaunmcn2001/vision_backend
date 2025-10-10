@@ -519,26 +519,17 @@ def test_prepare_selected_period_artifacts_percentiles(
         def select(self, *_args, **_kwargs):
             return self
 
-        def select(self, *_args, **_kwargs):
-            return self
-
-        def select(self, *_args, **_kwargs):
-            return self
-
-        def select(self, *_args, **_kwargs):
-            return self
-
         def toFloat(self):
             return self
 
         def clip(self, _geometry):
             return self
 
-        def select(self, *_args, **_kwargs):
-            return self
-
         def mask(self):
             return FakeMask()
+
+        def updateMask(self, *_args, **_kwargs):
+            return self
 
         def reduceRegion(self, *_args, **_kwargs):
             return SimpleNamespace(get=lambda key: 0.2 if key == "NDVI_min" else 0.8)
@@ -992,6 +983,9 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
         def mask(self):
             return FakeMask()
 
+        def updateMask(self, *_args, **_kwargs):
+            return self
+
         def bandNames(self):
             class _Names:
                 def getInfo(self_inner):
@@ -1221,6 +1215,9 @@ def test_prepare_selected_period_artifacts_multiindex(
             return self
 
         def select(self, *_args, **_kwargs):
+            return self
+
+        def updateMask(self, *_args, **_kwargs):
             return self
 
     def fake_composites(_geometry, months, *_args, **_kwargs):
