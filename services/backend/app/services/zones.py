@@ -3205,7 +3205,7 @@ def _prepare_selected_period_artifacts(
         try:
             guard.record(
                 "ndvi_band_norm",
-                band_names=ee.List(ndvi_mean.bandNames()).getInfo(),
+                band_names=ndvi_mean.bandNames().getInfo(),
             )
         except Exception:
             pass
@@ -3650,7 +3650,7 @@ def _prepare_selected_period_artifacts(
         try:
             g.record(
                 "ndvi_input_health",
-                band_names=ee.List(bands).getInfo(),
+                band_names=bands.getInfo(),
                 mask_band_count=int(mask_bands.getInfo()),
                 valid_ratio=valid_ratio_val,
                 ndvi_min=ndvi_min_val,
@@ -3879,7 +3879,12 @@ def _prepare_selected_period_artifacts(
         brks_py = None
         try:
             breaks = robust_quantile_breaks(percentile_source, geometry, n_classes)
-            brks_py = ee.List(breaks).getInfo()
+            if hasattr(breaks, "getInfo"):
+                brks_py = breaks.getInfo()
+            elif isinstance(breaks, (list, tuple)):
+                brks_py = list(breaks)
+            else:
+                brks_py = ee.List(breaks).getInfo()
         except Exception:
             brks_py = None
 
