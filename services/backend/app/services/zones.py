@@ -2408,7 +2408,7 @@ def kmeans_classify(
 
     # 3) Fit k-means (wekaKMeans supports seed/maxIterations)
     clusterer = ee.Clusterer.wekaKMeans(
-        n_clusters=n_classes, seed=seed, max_iterations=200
+        nClusters=n_classes, seed=seed, max_iterations=200
     ).train(samp, ["NDVI"])
 
     # 4) Classify the image
