@@ -545,7 +545,7 @@ def test_prepare_selected_period_artifacts_percentiles(
                     )
 
                 def contains(self_inner, value):
-                    return value == "NDVI"
+                    return value in {"NDVI", "NDVI_mean"}
 
             return _Names()
 
@@ -771,6 +771,7 @@ def test_prepare_selected_period_artifacts_percentiles_without_fallback(
                 get=lambda idx: self.band_names[idx],
                 getInfo=lambda: list(self.band_names),
                 size=lambda: len(self.band_names),
+                contains=lambda value: value in self.band_names,
             )
 
         def clip(self, _geometry):  # pragma: no cover - interface guard
@@ -997,7 +998,7 @@ def test_prepare_selected_period_artifacts_ndvi_kmeans(
                     )
 
                 def contains(self_inner, value):
-                    return value == "NDVI"
+                    return value in {"NDVI", "NDVI_mean"}
 
             return _Names()
 
@@ -1220,6 +1221,18 @@ def test_prepare_selected_period_artifacts_multiindex(
         def updateMask(self, *_args, **_kwargs):
             return self
 
+        def bandNames(self):
+            class _Names:
+                @staticmethod
+                def getInfo():
+                    return ["NDVI_mean"]
+
+                @staticmethod
+                def contains(value):
+                    return value in {"NDVI", "NDVI_mean"}
+
+            return _Names()
+
     def fake_composites(_geometry, months, *_args, **_kwargs):
         return [("2024-01", object())], [], {"composite_mode": "monthly"}
 
@@ -1310,6 +1323,15 @@ def test_prepare_selected_period_artifacts_multiindex(
     monkeypatch.setattr(zones.ee, "Boolean", fake_boolean, raising=False)
     monkeypatch.setattr(zones.ee, "Image", lambda image: image, raising=False)
     monkeypatch.setattr(zones.ee, "String", lambda value: value, raising=False)
+    monkeypatch.setattr(
+        zones.ee,
+        "Algorithms",
+        SimpleNamespace(
+            If=lambda cond, on_true, on_false: (
+                on_true if (getattr(cond, "getInfo", lambda: cond)()) else on_false
+            )
+        ),
+    )
 
     aoi = {
         "type": "Polygon",

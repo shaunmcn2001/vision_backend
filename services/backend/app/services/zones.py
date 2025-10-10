@@ -1027,8 +1027,9 @@ def monthly_ndvi_composite(aoi, start, end) -> ee.Image:
         .map(apply_s2_cloud_mask)
         .map(compute_ndvi)
     )
-    ndvi_median = col.median().select("NDVI").rename("NDVI")
-    return ndvi_median.updateMask(ndvi_median.mask())
+    monthly = col.median()
+    monthly = _ndvi_1band(monthly)
+    return monthly.updateMask(monthly.mask())
 
 
 def build_monthly_ndvi_collection(
@@ -1056,10 +1057,8 @@ def build_monthly_ndvi_collection(
             min_valid_ratio=min_valid_ratio,
             cloud_prob_max=cloud_prob_max,
         )
-        monthly = (
-            monthly_image.select("NDVI")
-            .rename("NDVI")
-            .set({"ym": ym, "mask_tier": monthly_image.get("mask_tier")})
+        monthly = _ndvi_1band(monthly_image).set(
+            {"ym": ym, "mask_tier": monthly_image.get("mask_tier")}
         )
         images.append(monthly)
 
@@ -1163,14 +1162,16 @@ def _build_composite_series(
             month_start = ee.Date.fromYMD(month_dt.year, month_dt.month, 1)
             month_end = month_start.advance(1, "month")
 
-            ndvi_image = monthly_ndvi_adaptive(
-                geometry,
-                month_start,
-                month_end,
-                mask_mode=mask_mode,
-                min_valid_ratio=min_valid_ratio,
-                cloud_prob_max=cloud_prob_max,
-            ).select("NDVI")
+            ndvi_image = _ndvi_1band(
+                monthly_ndvi_adaptive(
+                    geometry,
+                    month_start,
+                    month_end,
+                    mask_mode=mask_mode,
+                    min_valid_ratio=min_valid_ratio,
+                    cloud_prob_max=cloud_prob_max,
+                )
+            )
 
             try:
                 valid_pixels = int(
@@ -1261,6 +1262,44 @@ def _ndvi_from(img: ee.Image) -> ee.Image:
     return ndvi.updateMask(b8.mask().And(b4.mask()))
 
 
+def _ndvi_1band(img: ee.Image) -> ee.Image:
+    # Accepts images that might have 'NDVI' or 'NDVI_mean'; returns single band named 'NDVI'
+    bnames = img.bandNames()
+    has_ndvi = bnames.contains("NDVI")
+    has_ndvi_mean = bnames.contains("NDVI_mean")
+    img2 = ee.Image(
+        ee.Algorithms.If(
+            has_ndvi,
+            img.select(["NDVI"]).rename(["NDVI"]),
+            ee.Algorithms.If(
+                has_ndvi_mean,
+                img.select(["NDVI_mean"]).rename(["NDVI"]),
+                img,  # fallback; will be caught by guards if wrong
+            ),
+        )
+    )
+    # Ensure single-band
+    return ee.Image(img2).select(["NDVI"]).rename(["NDVI"])
+
+
+def _ndvi_std(img: ee.Image) -> ee.Image:
+    # Returns a band named 'NDVI_stdDev' from either 'NDVI_stdDev' or 'NDVI'
+    bnames = img.bandNames()
+    has_std = bnames.contains("NDVI_stdDev")
+    has_ndvi = bnames.contains("NDVI")
+    return ee.Image(
+        ee.Algorithms.If(
+            has_std,
+            img.select(["NDVI_stdDev"]).rename(["NDVI_stdDev"]),
+            ee.Algorithms.If(
+                has_ndvi,
+                img.select(["NDVI"]).rename(["NDVI_stdDev"]),
+                img,
+            ),
+        )
+    )
+
+
 def _scl_mask(img: ee.Image, keep_codes: Sequence[int]) -> ee.Image:
     return (
         img.select("SCL").remap(keep_codes, [1] * len(keep_codes), 0).rename("SCL_keep")
@@ -1344,7 +1383,8 @@ def monthly_ndvi_adaptive(
         if tier_def is None:
             continue
         ndvi_ic = ee.ImageCollection(tier_def["apply"](base))
-        comp = ndvi_ic.median().select("NDVI").rename("NDVI")
+        comp = ndvi_ic.median()
+        comp = _ndvi_1band(comp)
         ratio = _cover_ratio(comp, region)
         comp = comp.set(
             {
@@ -1357,7 +1397,8 @@ def monthly_ndvi_adaptive(
 
     minimal_def = tiers_by_name["minimal"]
     minimal_ic = ee.ImageCollection(minimal_def["apply"](base))
-    minimal_comp = minimal_ic.median().select("NDVI").rename("NDVI")
+    minimal_comp = minimal_ic.median()
+    minimal_comp = _ndvi_1band(minimal_comp)
     minimal_ratio = _cover_ratio(minimal_comp, region)
     minimal_comp = minimal_comp.set(
         {
@@ -2937,11 +2978,7 @@ def _prepare_selected_period_artifacts(
         try:
             valid_mask = ndvi_collection.count().gt(0)
             mean_image = (
-                ndvi_collection.mean()
-                .select("NDVI")
-                .rename("NDVI")
-                .toFloat()
-                .updateMask(valid_mask)
+                _ndvi_1band(ndvi_collection.mean()).toFloat().updateMask(valid_mask)
             )
             neighbors = mean_image.focal_mean(radius=30, units="meters")
             fill_source = neighbors
@@ -2972,7 +3009,7 @@ def _prepare_selected_period_artifacts(
     if diag_guard is not None and monthly_ndvi_collection is not None:
         region = ee.FeatureCollection(geometry).geometry().buffer(5).bounds(1)
         valid_mask_sum = (
-            monthly_ndvi_collection.map(lambda im: ee.Image(im).select("NDVI").mask())
+            monthly_ndvi_collection.map(lambda im: _ndvi_1band(ee.Image(im)).mask())
             .sum()
             .reduceRegion(
                 ee.Reducer.sum(),
@@ -3009,9 +3046,7 @@ def _prepare_selected_period_artifacts(
         ndvi_mean_image = None
         if collection_for_stats is not None:
             try:
-                ndvi_mean_image = (
-                    collection_for_stats.mean().select("NDVI").rename("NDVI")
-                )
+                ndvi_mean_image = _ndvi_1band(collection_for_stats.mean())
             except Exception:
                 ndvi_mean_image = None
         stats_info = {}
@@ -3131,16 +3166,16 @@ def _prepare_selected_period_artifacts(
     ndvi_mean: ee.Image | None = None
     if monthly_ndvi_collection is not None:
         try:
-            ndvi_mean = monthly_ndvi_collection.mean().select("NDVI").rename("NDVI")
+            ndvi_mean = _ndvi_1band(monthly_ndvi_collection.mean())
         except Exception:
             ndvi_mean = None
     if ndvi_mean is None and ndvi_stack is not None:
         try:
-            ndvi_mean = ndvi_stack.mean().select("NDVI").rename("NDVI")
+            ndvi_mean = _ndvi_1band(ndvi_stack.mean())
         except Exception:
             ndvi_mean = None
     if ndvi_mean is None:
-        ndvi_mean = ee.Image(ndvi_stats["mean"]).select("NDVI").rename("NDVI")
+        ndvi_mean = _ndvi_1band(ee.Image(ndvi_stats["mean"]))
 
     try:
         region = ee.FeatureCollection(aoi_geojson).geometry().buffer(5).bounds(1)
@@ -3165,7 +3200,15 @@ def _prepare_selected_period_artifacts(
         except Exception:
             common_mask = ee.Image(1)
 
-    ndvi_mean = ee.Image(ndvi_mean).select("NDVI").rename("NDVI")
+    ndvi_mean = _ndvi_1band(ee.Image(ndvi_mean))
+    if guard is not None:
+        try:
+            guard.record(
+                "ndvi_band_norm",
+                band_names=ee.List(ndvi_mean.bandNames()).getInfo(),
+            )
+        except Exception:
+            pass
     ndvi_mean = ndvi_mean.updateMask(common_mask)
 
     def _coverage_ratio(img, region, scale=10, tile_scale=4):
@@ -3244,10 +3287,10 @@ def _prepare_selected_period_artifacts(
     stability_applied_reason: str | None = None
 
     if stability_flag and monthly_ndvi_collection is not None:
-        std_img = monthly_ndvi_collection.reduce(ee.Reducer.stdDev()).select(
-            "NDVI_stdDev"
-        )
-        mean_img = monthly_ndvi_collection.reduce(ee.Reducer.mean()).select("NDVI")
+        std_img = monthly_ndvi_collection.reduce(ee.Reducer.stdDev())
+        std_img = _ndvi_std(std_img)
+        mean_img = monthly_ndvi_collection.reduce(ee.Reducer.mean())
+        mean_img = _ndvi_1band(mean_img)
 
         safe_mean = mean_img.where(mean_img.abs().lt(1e-6), 1e-6)
 
@@ -3386,7 +3429,7 @@ def _prepare_selected_period_artifacts(
         except Exception:
             pass
 
-    masked_mean = ee.Image(masked_mean).select(["NDVI"]).rename("NDVI")
+    masked_mean = _ndvi_1band(ee.Image(masked_mean))
 
     ndvi_stats["stability"] = stability_image
     ndvi_stats["mean"] = masked_mean
@@ -3529,7 +3572,7 @@ def _prepare_selected_period_artifacts(
         raise PipelineError("E_METHOD_UNKNOWN", f"Unknown method: {method}")
 
     if method == "ndvi_kmeans":
-        masked_mean = ee.Image(masked_mean).select(["NDVI"]).rename("NDVI")
+        masked_mean = _ndvi_1band(ee.Image(masked_mean))
         g = guard if guard is not None else Guard()
         feature_payload: dict[str, ee.Image] = {"NDVI": masked_mean}
 
