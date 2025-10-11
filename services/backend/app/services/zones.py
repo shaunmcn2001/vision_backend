@@ -2336,7 +2336,9 @@ def robust_quantile_breaks(
             exc_info=True,
         )
         raise
-
+        if n_classes <= 1:
+            return ee.List([])  # Early return for invalid n_classes to avoid scalar issues
+  
     # de-dup & enforce increasing using ee logic
     def _uniq_sort(values):
         try:
@@ -2442,6 +2444,8 @@ def robust_quantile_breaks(
         )
 
     def _hist_quantiles(img, region, vmin, vmax, n_classes, scale, tile_scale):
+    if n_classes < 2:
+        return ee.List([])
         # 512 bins across observed range
         hist = img.reduceRegion(
             reducer=ee.Reducer.fixedHistogram(vmin, vmax, 512),
