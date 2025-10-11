@@ -32,8 +32,8 @@ from sklearn.cluster import KMeans
 
 from app import gee
 from app.exports import sanitize_name
+import app.services.ee_utils as ee_utils
 from app.services.image_stats import temporal_stats
-from app.services import zones_core
 from app.utils.diag import Guard, PipelineError
 from app.utils.geometry import area_ha
 from app.utils.logging_colors import install_color_handler
@@ -67,18 +67,23 @@ def _allow_init_failure() -> bool:
 
 
 def ensure_list(value):
-    zones_core.ee = ee
-    return zones_core.ensure_list(value)
+    ee_utils.ee = ee
+    return ee_utils.ensure_list(value)
 
 
 def remove_nulls(lst):
-    zones_core.ee = ee
-    return zones_core.remove_nulls(lst)
+    ee_utils.ee = ee
+    return ee_utils.remove_nulls(lst)
 
 
-def as_number(value):
-    zones_core.ee = ee
-    return zones_core.as_number(value)
+def ensure_number(value):
+    ee_utils.ee = ee
+    return ee_utils.ensure_number(value)
+
+
+def cat_one(lst, value):
+    ee_utils.ee = ee
+    return ee_utils.cat_one(lst, value)
 
 
 def _to_ee_geometry(geojson: dict) -> ee.Geometry:
@@ -2289,18 +2294,21 @@ def robust_quantile_breaks(
 
         # squash equal neighbors by adding epsilon steps
         def _dedup(idx, prev):
-            idx = ee.Number(idx)
+            idx = ensure_number(idx)
             prev_type = ee.String(ee.Algorithms.ObjectType(prev))
             prev_is_list = prev_type.compareTo("List").eq(0)
             acc = ensure_list(ee.Algorithms.If(prev_is_list, prev, ee.List([])))
-            v = ee.Number(l2.get(idx))
+            v = ensure_number(l2.get(idx))
             return ee.Algorithms.If(
                 acc.size().eq(0),
-                acc.add(v),
+                cat_one(acc, v),
                 ee.Algorithms.If(
-                    v.lte(ee.Number(acc.get(-1))),
-                    acc.add(ee.Number(acc.get(-1)).add(1e-8 * (idx.add(1)))),
-                    acc.add(v),
+                    v.lte(ensure_number(acc.get(-1))),
+                    cat_one(
+                        acc,
+                        ensure_number(acc.get(-1)).add(1e-8 * (idx.add(1))),
+                    ),
+                    cat_one(acc, v),
                 ),
             )
 
