@@ -33,5 +33,15 @@ The zones pipeline occasionally failed when scalars (e.g., `1`, `ee.Number`, or 
 
 **Testing:**  
 ✅ `pytest -q` passes  
-✅ Zone generation runs without `Invalid argument specified for ee.List(): 1`  
+✅ Zone generation runs without `Invalid argument specified for ee.List(): 1`
 ✅ Logs confirm all lists contain valid iterable values before being passed to Earth Engine.
+
+## 2025-10-11 – Fix: 'Invalid argument specified for ee.List(): 1' in zones
+- Root cause: Scalars (1/0/If results) being passed to ee.List().
+- Fixes:
+  - Added EE-safe helpers ensure_list/ensure_number/cat_one/remove_nulls.
+  - Stability replicated from GEE JS: thresholds mapped to images, combined via ImageCollection.max().
+  - Normalized reducer bands (NDVI_mean → NDVI) before k-means.
+- Tests:
+  - pytest -q passes locally.
+  - Zones run completes without ee.List() argument errors.

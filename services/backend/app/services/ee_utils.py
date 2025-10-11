@@ -34,33 +34,35 @@ def safe_ee_list(val):
 
 
 def ensure_list(x):
-    """Always return an ee.List, flattening nested lists."""
+    """
+    EE-safe: returns an ee.List whether x is scalar or already a list.
+    Implementation: wrap-then-flatten.
+    - If x is ee.List -> [x].flatten() == x
+    - If x is scalar (ee.Number/String/bool/int/float) -> [x]
+    """
 
-    return ee.List([x]).flatten()
+    wrapped = ee.List([x])
+    flatten = getattr(wrapped, "flatten", None)
+    if callable(flatten):
+        return flatten()
+    if isinstance(x, (list, tuple)):
+        return ee.List(x)
+    return wrapped
 
 
 def ensure_number(x):
-    """Convert x to ee.Number safely."""
+    """Normalize expression/scalar to ee.Number."""
 
-    try:
-        return ee.Number(x)
-    except Exception:  # pragma: no cover - keep legacy default behaviour
-        return ee.Number(0)
+    return ee.Number(x)
 
 
 def remove_nulls(lst):
-    """Remove nulls from ee.List or iterable."""
+    """Remove nulls from an ee.List (Filter.notNull is for collections)."""
 
-    try:
-        return ee.List(lst).removeAll([None])
-    except Exception:  # pragma: no cover - maintain compatibility
-        return ee.List([])
+    return ee.List(lst).removeAll([None])
 
 
-def cat_one(lst, val):
-    """Append val to lst safely."""
+def cat_one(lst, value):
+    """Append a single value (scalar or list) to an ee.List safely."""
 
-    try:
-        return ee.List(lst).cat(safe_ee_list(val))
-    except Exception:  # pragma: no cover - defensive fallback
-        return ee.List(lst)
+    return ee.List(lst).cat(ensure_list(value))
