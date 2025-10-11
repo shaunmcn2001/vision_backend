@@ -2,10 +2,13 @@
 from __future__ import annotations
 import ee
 
-def ensure_list(value):
-    obj_type = ee.Algorithms.ObjectType(value)
+def _ensure_list(value):
+    obj_type = ee.String(ee.Algorithms.ObjectType(value))  # Force ee.String to avoid client str
     is_list = obj_type.eq('List')
     return ee.Algorithms.If(is_list, value, ee.List([value]))
+
+def _cat_one(lst, value):
+    return ee.List(lst).cat(ee.List([value]))
 
 def ensure_number(x):
     """Normalize expression/scalar to ee.Number."""
@@ -18,7 +21,3 @@ def ensure_string(x):
 def remove_nulls(lst):
     """Remove nulls from an ee.List (Filter.notNull is for Collections)."""
     return ee.List(lst).removeAll([None])
-
-def cat_one(lst, value):
-    """Append a single value (scalar or list) to an ee.List safely."""
-    return ee.List(lst).cat(ee.List([value]))
