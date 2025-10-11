@@ -10,20 +10,13 @@ from app.services.image_stats import temporal_stats
 from app.services.indices import IndexDefinition, resolve_index
 
 # Reuse the same SA method you used for NDVI
-SA_EMAIL = os.getenv(
-    "EE_SERVICE_ACCOUNT", "ee-agri-worker@baradine-farm.iam.gserviceaccount.com"
-)
-
+SA_EMAIL = os.getenv("EE_SERVICE_ACCOUNT", "ee-agri-worker@baradine-farm.iam.gserviceaccount.com")
 
 def _find_or_write_keyfile() -> str:
     p = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     if p and os.path.exists(p):
         return p
-    for c in [
-        "/etc/secrets/ee-key.json",
-        "/etc/secrets/google-credentials.json",
-        "/opt/render/project/src/ee-key.json",
-    ]:
+    for c in ["/etc/secrets/ee-key.json", "/etc/secrets/google-credentials.json", "/opt/render/project/src/ee-key.json"]:
         if os.path.exists(c):
             return c
     key_json = os.getenv("EE_KEY_JSON")
@@ -31,22 +24,17 @@ def _find_or_write_keyfile() -> str:
         tmp = "/tmp/ee-key.json"
         pathlib.Path(tmp).write_text(json.dumps(json.loads(key_json)))
         return tmp
-    raise RuntimeError(
-        "No EE credentials. Set GOOGLE_APPLICATION_CREDENTIALS (file) or EE_KEY_JSON (env)."
-    )
-
+    raise RuntimeError("No EE credentials. Set GOOGLE_APPLICATION_CREDENTIALS (file) or EE_KEY_JSON (env).")
 
 def init_ee():
     creds = ServiceAccountCredentials(SA_EMAIL, _find_or_write_keyfile())
     ee.Initialize(credentials=creds, opt_url="https://earthengine.googleapis.com")
-
 
 DEFAULT_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
 _CLOUD_COVER_THRESHOLD = 60
 
 
 # ---------- Image builders ----------
-
 
 def _s2_index_collection(
     geom: ee.Geometry,
@@ -173,7 +161,6 @@ def ndvi_month_image(geometry_geojson: dict, year: int, month: int) -> ee.Image:
 
 # ---------- Tile URL factory ----------
 
-
 def _coerce_palette(value: Any) -> list[str]:
     if isinstance(value, str):
         items = [part.strip() for part in value.split(",") if part.strip()]
@@ -239,7 +226,6 @@ def get_tile_template_for_image(
         "tile_url": tile_url,
         "vis": vis,
     }
-
 
 def load_field_geometry(field_id: str) -> dict:
     path = f"fields/{field_id}/field.geojson"

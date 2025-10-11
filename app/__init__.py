@@ -6,7 +6,6 @@ failed with ``ModuleNotFoundError``. By customising ``__path__`` we delegate all
 submodule lookups to the real package without duplicating code or adjusting
 start commands.
 """
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,7 +16,8 @@ _backend_package = (
 
 if not _backend_package.is_dir():
     raise ImportError(
-        "The backend application package was not found at" f" {_backend_package!s}."
+        "The backend application package was not found at"
+        f" {_backend_package!s}."
     )
 
 __path__ = [str(_backend_package)]

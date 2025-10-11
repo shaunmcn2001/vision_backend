@@ -77,9 +77,7 @@ class Dataset:
                 "height": self._profile.height,
                 "count": self._profile.count,
                 "dtype": str(np.dtype(self._profile.dtype)),
-                "transform": (
-                    list(self._profile.transform) if self._profile.transform else None
-                ),
+                "transform": list(self._profile.transform) if self._profile.transform else None,
                 "crs": self._profile.crs,
                 "nodata": self._profile.nodata,
             }
@@ -145,9 +143,7 @@ def open(path: str | Path, mode: str = "r", **kwargs: Any) -> Dataset:
 
 
 class Affine:
-    def __init__(
-        self, a: float, b: float, c: float, d: float, e: float, f: float
-    ) -> None:
+    def __init__(self, a: float, b: float, c: float, d: float, e: float, f: float) -> None:
         self.a = a
         self.b = b
         self.c = c

@@ -7,7 +7,6 @@ app.main:app` (and similar entrypoints) to resolve correctly without requiring
 manual PYTHONPATH tweaks while keeping system-installed packages ahead of the
 repository modules.
 """
-
 from __future__ import annotations
 
 import sys
