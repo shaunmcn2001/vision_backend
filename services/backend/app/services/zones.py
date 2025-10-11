@@ -33,7 +33,18 @@ from sklearn.cluster import KMeans
 from app import gee
 from app.exports import sanitize_name
 from . import ee_utils
-from .ee_utils import safe_ee_list as _safe_ee_list
+from .ee_utils import (
+    cat_one as _cat_one,
+    ensure_list as _ensure_list,
+    ensure_number as _ensure_number,
+    remove_nulls as _remove_nulls,
+)
+from .zones_core import (
+    coverage_ratio,
+    normalize_ndvi_band,
+    stability_mask_from_cv,
+    stats_stack,
+)
 from app.services.image_stats import temporal_stats
 from app.utils.diag import Guard, PipelineError
 from app.utils.geometry import area_ha
@@ -69,27 +80,27 @@ def _allow_init_failure() -> bool:
 
 def ensure_list(value):
     ee_utils.ee = ee
-    return ee_utils.ensure_list(value)
+    return _ensure_list(value)
 
 
 def safe_ee_list(value):
     ee_utils.ee = ee
-    return _safe_ee_list(value)
+    return _ensure_list(value)
 
 
 def remove_nulls(lst):
     ee_utils.ee = ee
-    return ee_utils.remove_nulls(lst)
+    return _remove_nulls(lst)
 
 
 def ensure_number(value):
     ee_utils.ee = ee
-    return ee_utils.ensure_number(value)
+    return _ensure_number(value)
 
 
 def cat_one(lst, value):
     ee_utils.ee = ee
-    return ee_utils.cat_one(lst, value)
+    return _cat_one(lst, value)
 
 
 def _to_ee_geometry(geojson: dict) -> ee.Geometry:
@@ -3353,7 +3364,7 @@ def _prepare_selected_period_artifacts(
         except Exception:
             common_mask = ee.Image(1)
 
-    ndvi_mean = _ndvi_1band(ee.Image(ndvi_mean))
+    ndvi_mean = normalize_ndvi_band(ee.Image(ndvi_mean))
     if guard is not None:
         try:
             guard.record(
@@ -3366,18 +3377,7 @@ def _prepare_selected_period_artifacts(
 
     def _coverage_ratio(img, region, scale=10, tile_scale=4):
         try:
-            valid_sum = img.mask().reduceRegion(
-                ee.Reducer.sum(),
-                region,
-                scale,
-                maxPixels=1e9,
-                bestEffort=True,
-                tileScale=tile_scale,
-            )
-            total_px = region.area(1).divide(ee.Number(scale).pow(2))
-            return ee.Number(valid_sum.values().reduce(ee.Reducer.sum())).divide(
-                total_px
-            )
+            return coverage_ratio(img, region, scale=scale, tile_scale=tile_scale)
         except Exception:
             return _cover_ratio(img, region, scale=scale, tile_scale=tile_scale)
 
@@ -3440,22 +3440,25 @@ def _prepare_selected_period_artifacts(
     stability_applied_reason: str | None = None
 
     if stability_flag and monthly_ndvi_collection is not None:
-        std_img = monthly_ndvi_collection.reduce(ee.Reducer.stdDev())
-        std_img = _ndvi_std(std_img)
-        mean_img = monthly_ndvi_collection.reduce(ee.Reducer.mean())
-        mean_img = _ndvi_1band(mean_img)
+        stable_region = region or geometry
+        monthly_norm = monthly_ndvi_collection.map(normalize_ndvi_band)
+        stats_image = stats_stack(monthly_norm).updateMask(common_mask)
+        ndvi_cv = stats_image.select("NDVI_cv").updateMask(common_mask)
+        thresholds = ensure_list(cv_mask_threshold).cat(
+            ee.List(STABILITY_THRESHOLD_SEQUENCE)
+        )
+        stability_candidate = stability_mask_from_cv(
+            ndvi_cv,
+            stable_region,
+            thresholds,
+            scale=DEFAULT_SCALE,
+            tile_scale=4,
+            min_survival_ratio=MIN_STABILITY_SURVIVAL_RATIO,
+        )
 
-        safe_mean = mean_img.where(mean_img.abs().lt(1e-6), 1e-6)
+        masked_candidate = ndvi_mean.updateMask(stability_candidate)
 
-        std_img = std_img.updateMask(common_mask)
-        safe_mean = safe_mean.updateMask(common_mask)
-
-        cv = std_img.divide(safe_mean).rename("NDVI_cv")
-        stable = cv.lte(cv_mask_threshold)
-
-        masked_candidate = ndvi_mean.updateMask(stable)
-
-        post_cov = _coverage_ratio(masked_candidate, region)
+        post_cov = _coverage_ratio(masked_candidate, stable_region)
         try:
             post_cov_value = float(post_cov.getInfo())
         except Exception:
@@ -3463,9 +3466,9 @@ def _prepare_selected_period_artifacts(
 
         if guard is not None:
             try:
-                cv_stats = cv.reduceRegion(
+                cv_stats = ndvi_cv.reduceRegion(
                     ee.Reducer.minMax().combine(ee.Reducer.mean(), "", True),
-                    region,
+                    stable_region,
                     10,
                     maxPixels=1e9,
                     bestEffort=True,
@@ -3498,7 +3501,11 @@ def _prepare_selected_period_artifacts(
                 )
             )
             stability_image = ee.Image(
-                ee.Algorithms.If(post_cov.gte(min_valid_ratio), stable, ee.Image(1))
+                ee.Algorithms.If(
+                    post_cov.gte(min_valid_ratio),
+                    stability_candidate,
+                    ee.Image(1),
+                )
             )
             try:
                 applied = bool(post_cov.gte(min_valid_ratio).getInfo())
@@ -3536,7 +3543,7 @@ def _prepare_selected_period_artifacts(
                         hints="Increase cv_mask_threshold, widen months, or disable stability.",
                     )
             masked_mean = masked_candidate
-            stability_image = stable
+            stability_image = stability_candidate
             stability_applied_bool = True
             stability_applied_reason = "forced"
             if guard is not None:
@@ -3582,7 +3589,7 @@ def _prepare_selected_period_artifacts(
         except Exception:
             pass
 
-    masked_mean = _ndvi_1band(ee.Image(masked_mean))
+    masked_mean = normalize_ndvi_band(ee.Image(masked_mean))
 
     ndvi_stats["stability"] = stability_image
     ndvi_stats["mean"] = masked_mean
@@ -3877,7 +3884,9 @@ def _prepare_selected_period_artifacts(
             )
 
         eps = ee.Image.random(42).multiply(1e-6)
-        ndvi_for_kmeans = masked_mean.toFloat().add(eps).rename("NDVI")
+        ndvi_for_kmeans = (
+            normalize_ndvi_band(masked_mean.toFloat()).add(eps).rename("NDVI")
+        )
 
         zones_raw = kmeans_classify(
             ndvi_for_kmeans,
