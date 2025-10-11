@@ -40,7 +40,35 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.services.zones import ZoneArtifacts
 
-MAX_CONCURRENT_EXPORTS = 4
+
+def _log_task_status(
+    task: ee.batch.Task | None,
+    *,
+    action: str,
+    status: Mapping[str, object] | None = None,
+) -> None:
+    """Emit debug information about an EE export task."""
+
+    if task is None:
+        return
+
+    task_id = getattr(task, "id", None)
+    if status is None:
+        try:
+            status = task.status() or {}
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            logger.debug("ee_task:%s id=%s status_error=%s", action, task_id, exc)
+            return
+
+    state = status.get("state") if isinstance(status, Mapping) else None
+    logger.debug("ee_task:%s id=%s state=%s", action, task_id, state)
+    error = None
+    if isinstance(status, Mapping):
+        error = status.get("error_message") or status.get("error_details")
+    if error:
+        logger.debug("ee_task:%s id=%s error=%s", action, task_id, error)
+
+MAX_CONCURRENT_EXPORTS = 2
 TASK_POLL_SECONDS = 15
 IMAGERY_SCALE_M = 10
 
@@ -568,6 +596,7 @@ def _start_drive_task(item: ExportItem, job: ExportJob) -> ee.batch.Task:
         formatOptions=format_options,
     )
     task.start()
+    _log_task_status(task, action="drive_start")
     return task
 
 
@@ -593,6 +622,7 @@ def _start_gcs_task(item: ExportItem, job: ExportJob, bucket: str) -> ee.batch.T
         formatOptions=format_options,
     )
     task.start()
+    _log_task_status(task, action="gcs_start")
     return task
 
 
@@ -1233,6 +1263,8 @@ def _process_cloud_exports(job: ExportJob) -> None:
 
         for item in list(active):
             status = item.task.status() if item.task else {"state": "FAILED"}
+            if item.task is not None:
+                _log_task_status(item.task, action="poll", status=status)
             state = status.get("state")
             if state in {"COMPLETED", "SUCCEEDED", "COMPLETED_WITH_ERRORS"}:
                 uris = status.get("destination_uris", []) or []
