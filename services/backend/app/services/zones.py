@@ -3554,7 +3554,7 @@ def _prepare_selected_period_artifacts(
         monthly_norm = monthly_ndvi_collection.map(normalize_ndvi_band)
         stats_image = stats_stack(monthly_norm).updateMask(common_mask)
         ndvi_cv = stats_image.select("NDVI_cv").updateMask(common_mask)
-        thresholds = ensure_list(cv_mask_threshold).cat(
+        thresholds = ee.List(ensure_list(cv_mask_threshold)).cat(
             ee.List(STABILITY_THRESHOLD_SEQUENCE)
         )
         stability_candidate = stability_mask_from_cv(
