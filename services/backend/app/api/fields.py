@@ -9,22 +9,16 @@ from app.utils.geometry import area_m2
 router = APIRouter()
 MIN_FIELD_HA = float(os.getenv("MIN_FIELD_HA", "1.0"))  # default 1 ha
 
-
 def _validate_geometry(geom: dict):
     t = geom.get("type")
     if t not in ("Polygon", "MultiPolygon"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"geometry.type must be Polygon or MultiPolygon, got {t}",
-        )
+        raise HTTPException(status_code=400, detail=f"geometry.type must be Polygon or MultiPolygon, got {t}")
     # Additional checks (self-intersections fixed by make_valid in area calc)
-
 
 # ---- models ----
 class FieldCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     geometry: dict = Field(..., description="GeoJSON Polygon/MultiPolygon in EPSG:4326")
-
 
 class FieldSummary(BaseModel):
     id: str
@@ -32,10 +26,8 @@ class FieldSummary(BaseModel):
     area_ha: float
     created_at: str
 
-
 class FieldDetail(FieldSummary):
     geometry: dict
-
 
 # ---- endpoints ----
 @router.post("", response_model=FieldDetail)
@@ -46,7 +38,7 @@ def create_field(payload: FieldCreate):
     if area_ha < MIN_FIELD_HA:
         raise HTTPException(
             status_code=400,
-            detail=f"Field area {area_ha:.2f} ha is smaller than minimum {MIN_FIELD_HA} ha",
+            detail=f"Field area {area_ha:.2f} ha is smaller than minimum {MIN_FIELD_HA} ha"
         )
 
     field_id = uuid4().hex[:12]
@@ -70,14 +62,7 @@ def create_field(payload: FieldCreate):
     try:
         idx = download_json(index_path) if exists(index_path) else []
         # keep small summary only
-        idx.append(
-            {
-                "id": field_id,
-                "name": payload.name,
-                "area_ha": round(area_ha, 4),
-                "created_at": created_at,
-            }
-        )
+        idx.append({"id": field_id, "name": payload.name, "area_ha": round(area_ha, 4), "created_at": created_at})
         upload_json(idx, index_path)
     except Exception:
         # Non-fatal if index update fails
@@ -85,14 +70,12 @@ def create_field(payload: FieldCreate):
 
     return {**meta, "geometry": payload.geometry}
 
-
 @router.get("", response_model=list[FieldSummary])
 def list_fields():
     index_path = "fields/index.json"
     if not exists(index_path):
         return []
     return download_json(index_path)
-
 
 @router.get("/{field_id}", response_model=FieldDetail)
 def get_field(field_id: str):

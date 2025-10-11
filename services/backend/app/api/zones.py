@@ -6,29 +6,11 @@ import logging
 from datetime import date, datetime
 from typing import List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, root_validator, validator
 from shapely.geometry import shape
 
-try:
-    from app.utils.diag import PipelineError  # structured pipeline errors
-except Exception:  # defensive shim; do not break if helper not present
-
-    class PipelineError(Exception):
-        def __init__(
-            self, code: str, msg: str, hints: str | None = None, ctx: dict | None = None
-        ):
-            super().__init__(msg)
-            self.code = code
-            self.hints = hints
-            self.ctx = ctx or {}
-
-
 from app.services import zones as zone_service
-from app.services.zones_simple import (
-    SimpleZonesParams,
-    build_zones_simple_from_ndvi_tif,
-)
 from app.utils.sanitization import sanitize_for_json
 
 
@@ -62,76 +44,29 @@ class _BaseAOIRequest(BaseModel):
         return trimmed
 
 
-class ZonesSimpleRequest(BaseModel):
-    aoi_geojson: dict = Field(..., description="AOI Polygon/MultiPolygon")
-    aoi_name: str = Field(..., description="Name for outputs")
-    # Either pass a ready NDVI GeoTIFF path:
-    ndvi_tif_path: Optional[str] = Field(
-        None, description="Use existing NDVI GeoTIFF (single band)"
-    )
-    # Or pass dates to (later) wire an EE mean NDVI export:
-    start_date: Optional[str] = Field(None, description="YYYY-MM-DD")
-    end_date: Optional[str] = Field(None, description="YYYY-MM-DD")
-
-    # Simple cartography knobs:
-    n_classes: int = Field(5, ge=3, le=7)
-    classifier: Literal["quantiles", "kmeans"] = "quantiles"
-    mmu_ha: float = Field(2.0, gt=0)
-    simplify_tol_m: float = Field(5.0, ge=0)
-    output_format: Literal["gpkg", "geojson", "shp"] = "gpkg"
-
-
 class ProductionZonesRequest(_BaseAOIRequest):
     method: Literal["ndvi_percentiles", "ndvi_kmeans"] = Field(
-        "ndvi_kmeans",
+        "ndvi_percentiles",
         description="Classification method for production zones",
     )
-    months: Optional[List[str]] = Field(None, description="Months in YYYY-MM format")
+    months: Optional[List[str]] = Field(
+        None, description="Months in YYYY-MM format"
+    )
     start_month: Optional[str] = Field(
-        None,
-        description="Start month in YYYY-MM format (inclusive)",
+        None, description="Start month in YYYY-MM format (inclusive)",
     )
     end_month: Optional[str] = Field(
-        None,
-        description="End month in YYYY-MM format (inclusive)",
+        None, description="End month in YYYY-MM format (inclusive)",
     )
     start_date: Optional[date] = Field(
-        None,
-        description="Start date in YYYY-MM-DD format (inclusive)",
+        None, description="Start date in YYYY-MM-DD format (inclusive)",
     )
     end_date: Optional[date] = Field(
-        None,
-        description="End date in YYYY-MM-DD format (inclusive)",
+        None, description="End date in YYYY-MM-DD format (inclusive)",
     )
     cloud_prob_max: int = Field(zone_service.DEFAULT_CLOUD_PROB_MAX, ge=0, le=100)
     n_classes: int = Field(zone_service.DEFAULT_N_CLASSES, ge=3, le=7)
-    mask_mode: Literal["strict", "relaxed", "adaptive"] = Field(
-        "adaptive", description="SCL/cloud masking policy per month"
-    )
-    min_valid_ratio: float = Field(
-        0.25,
-        ge=0.0,
-        le=1.0,
-        description="Minimum required valid-pixel ratio before/after masks (0–1).",
-    )
-    cv_mask_threshold: float = Field(
-        zone_service.DEFAULT_CV_THRESHOLD,
-        ge=0.0,
-        description="CV threshold (std/mean) for stability mask; higher keeps more pixels.",
-    )
-    min_obs_for_cv: int = Field(
-        3,
-        ge=1,
-        description="Minimum per-pixel month count required to compute CV",
-    )
-    stability_adaptive: bool = Field(
-        True,
-        description="Only apply stability mask if post-coverage >= min_valid_ratio.",
-    )
-    stability_enforce: bool = Field(
-        False,
-        description="If true, fail with E_STABILITY_EMPTY when stability removes too many pixels; otherwise bypass stability.",
-    )
+    cv_mask_threshold: float = Field(zone_service.DEFAULT_CV_THRESHOLD, ge=0)
     mmu_ha: float = Field(zone_service.DEFAULT_MIN_MAPPING_UNIT_HA, gt=0)
     smooth_radius_m: float = Field(zone_service.DEFAULT_SMOOTH_RADIUS_M, ge=0)
     open_radius_m: float = Field(zone_service.DEFAULT_OPEN_RADIUS_M, ge=0)
@@ -141,18 +76,11 @@ class ProductionZonesRequest(_BaseAOIRequest):
     export_target: Literal["zip", "gcs", "drive"] = Field(
         "zip", description="Destination for exports"
     )
-    gcs_bucket: Optional[str] = Field(
-        None, description="Override GCS bucket for exports"
-    )
+    gcs_bucket: Optional[str] = Field(None, description="Override GCS bucket for exports")
     gcs_prefix: Optional[str] = Field(
         None, description="Optional prefix before zones/ when exporting to GCS"
     )
-    include_zonal_stats: bool = Field(
-        True, description="Export per-zone statistics CSV"
-    )
-    debug_dump: bool = Field(
-        False, description="Dump extended per-month NDVI diagnostics"
-    )
+    include_zonal_stats: bool = Field(True, description="Export per-zone statistics CSV")
     apply_stability_mask: Optional[bool] = Field(
         None,
         description=(
@@ -194,9 +122,7 @@ class ProductionZonesRequest(_BaseAOIRequest):
             try:
                 return datetime.strptime(month_str, "%Y-%m")
             except ValueError as exc:  # pragma: no cover - defensive
-                raise ValueError(
-                    f"Invalid month format for {field_name}: {value}"
-                ) from exc
+                raise ValueError(f"Invalid month format for {field_name}: {value}") from exc
 
         def _month_end(dt: datetime) -> date:
             last_day = calendar.monthrange(dt.year, dt.month)[1]
@@ -209,9 +135,7 @@ class ProductionZonesRequest(_BaseAOIRequest):
             try:
                 return date.fromisoformat(value_str)
             except ValueError as exc:
-                raise ValueError(
-                    f"Invalid date format for {field_name}: {value}"
-                ) from exc
+                raise ValueError(f"Invalid date format for {field_name}: {value}") from exc
 
         if months_provided:
             parsed_months: List[str] = []
@@ -235,9 +159,7 @@ class ProductionZonesRequest(_BaseAOIRequest):
 
         if month_range_provided:
             if start_month is None or end_month is None:
-                raise ValueError(
-                    "Both start_month and end_month must be provided together"
-                )
+                raise ValueError("Both start_month and end_month must be provided together")
             start_dt = _parse_month(start_month, "start_month")
             end_dt = _parse_month(end_month, "end_month")
             if end_dt < start_dt:
@@ -296,48 +218,8 @@ class ProductionZonesRequest(_BaseAOIRequest):
         return [month for month, _ in ordered]
 
 
-@router.post("/simple")
-def create_simple_zones(request: ZonesSimpleRequest):
-    try:
-        params = SimpleZonesParams(
-            n_classes=request.n_classes,
-            classifier=request.classifier,
-            mmu_ha=request.mmu_ha,
-            simplify_tol_m=request.simplify_tol_m,
-            output_format=request.output_format,
-        )
-        work_dir = os.path.join("/tmp", f"zones_simple_{request.aoi_name}")
-        os.makedirs(work_dir, exist_ok=True)
-
-        if request.ndvi_tif_path:
-            res = build_zones_simple_from_ndvi_tif(
-                ndvi_tif=request.ndvi_tif_path,
-                params=params,
-                out_dir=work_dir,
-            )
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="Provide ndvi_tif_path for the simple flow (EE wiring optional).",
-            )
-
-        return {
-            "ok": True,
-            "paths": {"zones_vector": res["vector"], "work_dir": work_dir},
-            "metadata": res["metadata"],
-        }
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # pragma: no cover - defensive
-        raise HTTPException(
-            status_code=500, detail=f"Zones simple failed: {exc}"
-        ) from exc
-
-
 @router.post("/production")
-def create_production_zones(
-    request: ProductionZonesRequest, diagnostics: bool = Query(False)
-):
+def create_production_zones(request: ProductionZonesRequest):
     resolved_bucket: Optional[str] = request.gcs_bucket
     if request.export_target == "gcs":
         resolved_bucket = (
@@ -364,8 +246,8 @@ def create_production_zones(
             start_date=request.start_date,
             end_date=request.end_date,
             cloud_prob_max=request.cloud_prob_max,
-            mask_mode=request.mask_mode,
             n_classes=request.n_classes,
+            cv_mask_threshold=request.cv_mask_threshold,
             min_mapping_unit_ha=request.mmu_ha,
             smooth_radius_m=request.smooth_radius_m,
             open_radius_m=request.open_radius_m,
@@ -376,31 +258,7 @@ def create_production_zones(
             gcs_prefix=request.gcs_prefix,
             include_stats=request.include_zonal_stats,
             apply_stability_mask=request.apply_stability_mask,
-            stability_adaptive=request.stability_adaptive,
-            stability_enforce=request.stability_enforce,
-            cv_mask_threshold=request.cv_mask_threshold,
-            min_obs_for_cv=request.min_obs_for_cv,
-            min_valid_ratio=request.min_valid_ratio,
-            diagnostics=diagnostics,
-            debug_dump=request.debug_dump,
         )
-    except PipelineError as exc:
-        logger.warning(
-            "Pipeline error: %s (aoi=%s target=%s)",
-            exc,
-            request.aoi_name,
-            request.export_target,
-            exc_info=True,
-        )
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": getattr(exc, "code", "E_PIPELINE"),
-                "message": str(exc),
-                "hints": getattr(exc, "hints", None),
-                "context": getattr(exc, "ctx", {}),
-            },
-        ) from exc
     except ValueError as exc:
         logger.warning(
             "Zone production request validation failed for AOI %s (target %s): %s",
@@ -419,20 +277,13 @@ def create_production_zones(
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    diagnostics_payload = result.get("diagnostics") if diagnostics else None
-    if diagnostics_payload is not None:
-        result.pop("diagnostics", None)
     result.pop("artifacts", None)
     metadata = result.get("metadata", {}) or {}
     used_months: List[str] = metadata.get("used_months") or request.months
     ym_start = used_months[0]
     ym_end = used_months[-1]
 
-    palette = (
-        result.get("palette") or metadata.get("palette")
-        if isinstance(metadata, dict)
-        else None
-    )
+    palette = result.get("palette") or metadata.get("palette") if isinstance(metadata, dict) else None
     thresholds = result.get("thresholds") or (
         metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
     )
@@ -445,9 +296,6 @@ def create_production_zones(
         "tasks": result.get("tasks", {}),
         "metadata": metadata,
     }
-
-    if diagnostics and diagnostics_payload is not None:
-        response["diagnostics"] = diagnostics_payload
 
     if palette is not None:
         response["palette"] = palette
@@ -463,16 +311,12 @@ def create_production_zones(
     if isinstance(debug_info, dict):
         stability_extra = debug_info.get("stability")
         if isinstance(stability_extra, dict):
-            stability_meta.update(
-                {k: v for k, v in stability_extra.items() if v is not None}
-            )
+            stability_meta.update({k: v for k, v in stability_extra.items() if v is not None})
 
     debug_payload = {
         "requested_months": request.months,
         "used_months": used_months,
-        "skipped_months": (
-            metadata.get("skipped_months", []) if isinstance(metadata, dict) else []
-        ),
+        "skipped_months": metadata.get("skipped_months", []) if isinstance(metadata, dict) else [],
         "retry_thresholds": stability_meta.get("thresholds_tested", []),
         "stability": stability_meta or None,
     }
@@ -500,3 +344,5 @@ def create_production_zones(
         response["debug"] = sanitize_for_json(response.get("debug"))
 
     return response
+
+

@@ -2,7 +2,6 @@
 import os
 from pydantic_settings import BaseSettings  # <-- changed
 
-
 class Settings(BaseSettings):
     GCP_PROJECT: str = os.getenv("GCP_PROJECT", "baradine-farm")
     GCP_REGION: str = os.getenv("GCP_REGION", "australia-southeast1")
@@ -16,6 +15,6 @@ class Settings(BaseSettings):
     BACKFILL_START: str | None = os.getenv("BACKFILL_START")
     EE_CREDENTIALS_SECRET: str | None = os.getenv("EE_CREDENTIALS_SECRET")
     SENTRY_DSN: str | None = os.getenv("SENTRY_DSN")
-
+   
     class Config:
         env_file = ".env"

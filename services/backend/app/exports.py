@@ -1,5 +1,4 @@
 """Export orchestration for Sentinel-2 index GeoTIFFs."""
-
 from __future__ import annotations
 
 import io
@@ -16,16 +15,7 @@ import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import (
-    Dict,
-    Iterable,
-    List,
-    Literal,
-    Mapping,
-    Optional,
-    Tuple,
-    TYPE_CHECKING,
-)
+from typing import Dict, Iterable, List, Literal, Optional, Tuple, TYPE_CHECKING
 
 import ee
 import requests
@@ -40,35 +30,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.services.zones import ZoneArtifacts
 
-
-def _log_task_status(
-    task: ee.batch.Task | None,
-    *,
-    action: str,
-    status: Mapping[str, object] | None = None,
-) -> None:
-    """Emit debug information about an EE export task."""
-
-    if task is None:
-        return
-
-    task_id = getattr(task, "id", None)
-    if status is None:
-        try:
-            status = task.status() or {}
-        except Exception as exc:  # pragma: no cover - diagnostic only
-            logger.debug("ee_task:%s id=%s status_error=%s", action, task_id, exc)
-            return
-
-    state = status.get("state") if isinstance(status, Mapping) else None
-    logger.debug("ee_task:%s id=%s state=%s", action, task_id, state)
-    error = None
-    if isinstance(status, Mapping):
-        error = status.get("error_message") or status.get("error_details")
-    if error:
-        logger.debug("ee_task:%s id=%s error=%s", action, task_id, error)
-
-MAX_CONCURRENT_EXPORTS = 2
+MAX_CONCURRENT_EXPORTS = 4
 TASK_POLL_SECONDS = 15
 IMAGERY_SCALE_M = 10
 
@@ -118,7 +80,6 @@ class ZoneExportConfig:
     close_radius_m: float
     simplify_tolerance_m: float
     simplify_buffer_m: float
-    method: str = "ndvi_kmeans"
     include_stats: bool = True
     apply_stability_mask: Optional[bool] = None
 
@@ -551,15 +512,11 @@ def _gcs_bucket() -> str:
     return bucket
 
 
-def _generate_signed_gcs_url(
-    bucket: str, path: str, expires_minutes: int = 60
-) -> Optional[str]:
+def _generate_signed_gcs_url(bucket: str, path: str, expires_minutes: int = 60) -> Optional[str]:
     try:
         client = _storage_client()
         blob = client.bucket(bucket).blob(path)
-        return blob.generate_signed_url(
-            expiration=timedelta(minutes=expires_minutes), method="GET"
-        )
+        return blob.generate_signed_url(expiration=timedelta(minutes=expires_minutes), method="GET")
     except Exception:
         return None
 
@@ -596,7 +553,6 @@ def _start_drive_task(item: ExportItem, job: ExportJob) -> ee.batch.Task:
         formatOptions=format_options,
     )
     task.start()
-    _log_task_status(task, action="drive_start")
     return task
 
 
@@ -622,7 +578,6 @@ def _start_gcs_task(item: ExportItem, job: ExportJob, bucket: str) -> ee.batch.T
         formatOptions=format_options,
     )
     task.start()
-    _log_task_status(task, action="gcs_start")
     return task
 
 
@@ -657,12 +612,10 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
             simplify_buffer_m=job.zone_config.simplify_buffer_m,
             destination="zip",
             include_stats=job.zone_config.include_stats,
-            method=job.zone_config.method,
         )
         artifacts = result.get("artifacts")
         metadata = result.get("metadata", {}) or {}
         prefix = result.get("prefix") or prefix
-        diagnostics_payload = result.get("diagnostics")
     except Exception as exc:
         logger.exception(
             "Failed to build zone artifacts for job %s (AOI %s): %s",
@@ -685,8 +638,6 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
         job.zone_state.error = None
         job.zone_state.prefix = prefix
         job.zone_state.metadata = metadata  # type: ignore[attr-defined]
-        if diagnostics_payload:
-            job.zone_state.metadata["diagnostics"] = diagnostics_payload
         job.touch()
 
 
@@ -757,13 +708,9 @@ def _download_zone_artifacts(
             )
         except Exception as exc:  # pragma: no cover - shapefile failure
             logger.warning("Failed to generate GeoJSON from shapefile: %s", exc)
-            geojson_path.write_text(
-                json.dumps({"type": "FeatureCollection", "features": []})
-            )
+            geojson_path.write_text(json.dumps({"type": "FeatureCollection", "features": []}))
     else:
-        geojson_path.write_text(
-            json.dumps({"type": "FeatureCollection", "features": []})
-        )
+        geojson_path.write_text(json.dumps({"type": "FeatureCollection", "features": []}))
 
     shapefile_zip_name = f"{prefix}_shp.zip"
     shapefile_zip_path = temp_dir / shapefile_zip_name
@@ -804,57 +751,6 @@ def _download_zone_artifacts(
         files.append((shapefile_zip_path, shapefile_zip_name))
     if stats_name and stats_path:
         files.append((stats_path, stats_name))
-
-    extra_files_map: Dict[str, bytes | str] = {}
-    extra_sources = getattr(artifacts, "extra_files", None)
-    if isinstance(extra_sources, Mapping):
-        try:
-            extra_files_map = {str(name): data for name, data in extra_sources.items()}
-        except Exception:
-            extra_files_map = {}
-
-    diagnostics_payload = None
-    if job.zone_state and isinstance(job.zone_state.metadata, dict):
-        diagnostics_payload = job.zone_state.metadata.get("diagnostics")
-    diag_rel_path = "diagnostics/diagnostics.json"
-    diag_blob = extra_files_map.pop(diag_rel_path, None)
-    if diag_blob is not None:
-        try:
-            diag_path = temp_dir / diag_rel_path
-            diag_path.parent.mkdir(parents=True, exist_ok=True)
-            if isinstance(diag_blob, (bytes, bytearray)):
-                diag_path.write_bytes(bytes(diag_blob))
-            else:
-                diag_path.write_text(str(diag_blob))
-            files.append((diag_path, diag_rel_path))
-            logger.info("zones:export added diagnostics.json to zip (inline)")
-        except Exception as exc:
-            logger.warning("zones:export diagnostics inline failed: %s", exc)
-    elif diagnostics_payload:
-        try:
-            diag_dir = temp_dir / "diagnostics"
-            diag_dir.mkdir(parents=True, exist_ok=True)
-            diag_path = diag_dir / "diagnostics.json"
-            diag_path.write_text(
-                json.dumps(diagnostics_payload, ensure_ascii=False, indent=2)
-            )
-            files.append((diag_path, diag_rel_path))
-            logger.info("zones:export added diagnostics.json to zip")
-        except Exception as exc:
-            logger.warning("zones:export diagnostics.json failed: %s", exc)
-
-    for rel_name, content in extra_files_map.items():
-        try:
-            extra_path = temp_dir / rel_name
-            extra_path.parent.mkdir(parents=True, exist_ok=True)
-            if isinstance(content, (bytes, bytearray)):
-                extra_path.write_bytes(bytes(content))
-            else:
-                extra_path.write_text(str(content))
-            files.append((extra_path, rel_name))
-            logger.info("zones:export added extra artifact %s", rel_name)
-        except Exception as exc:
-            logger.warning("zones:export extra artifact failed (%s): %s", rel_name, exc)
 
     paths = {
         "raster": raster_name,
@@ -916,9 +812,7 @@ def _poll_zone_tasks(
                 task_info["destination_uri"] = destination
                 if bucket and destination and destination.startswith(f"gs://{bucket}/"):
                     blob_path = destination[len(f"gs://{bucket}/") :]
-                    task_info["signed_url"] = _generate_signed_gcs_url(
-                        bucket, blob_path
-                    )
+                    task_info["signed_url"] = _generate_signed_gcs_url(bucket, blob_path)
                 elif destination:
                     task_info["signed_url"] = destination
                 active.pop(name, None)
@@ -932,9 +826,7 @@ def _poll_zone_tasks(
             job.zone_state.tasks[name] = task_info
         job.touch()
 
-    errors = [
-        info.get("error") for info in job.zone_state.tasks.values() if info.get("error")
-    ]
+    errors = [info.get("error") for info in job.zone_state.tasks.values() if info.get("error")]
     if errors:
         job.zone_state.status = "failed"
         job.zone_state.error = errors[0]
@@ -978,23 +870,14 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
                         ext: _to_gcs_uri(name) for ext, name in value.items() if name
                     }
                 else:
-                    mapped_paths[key] = (
-                        _to_gcs_uri(value) if isinstance(value, str) else value
-                    )
+                    mapped_paths[key] = _to_gcs_uri(value) if isinstance(value, str) else value
 
             if "geojson" not in mapped_paths:
                 mapped_paths["geojson"] = _to_gcs_uri(zone_paths.get("geojson"))
 
             job.zone_state.paths = mapped_paths
             job.zone_state.tasks = {}
-            for key in (
-                "raster",
-                "mean_ndvi",
-                "vectors",
-                "geojson",
-                "zonal_stats",
-                "vectors_zip",
-            ):
+            for key in ("raster", "mean_ndvi", "vectors", "geojson", "zonal_stats", "vectors_zip"):
                 destination = mapped_paths.get(key)
                 if not isinstance(destination, str):
                     continue
@@ -1024,10 +907,7 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
             _cleanup_zone_workdir(job)
             job.touch()
         elif job.export_target == "drive":
-            folder = (
-                os.getenv("GEE_DRIVE_FOLDER", "Sentinel2_Indices")
-                or "Sentinel2_Indices"
-            )
+            folder = os.getenv("GEE_DRIVE_FOLDER", "Sentinel2_Indices") or "Sentinel2_Indices"
             folder = folder.strip().rstrip("/") or "Sentinel2_Indices"
             if not folder.endswith("zones"):
                 folder = f"{folder}/zones"
@@ -1054,22 +934,13 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
                         ext: _to_drive_uri(name) for ext, name in value.items() if name
                     }
                 else:
-                    mapped_paths[key] = (
-                        _to_drive_uri(value) if isinstance(value, str) else value
-                    )
+                    mapped_paths[key] = _to_drive_uri(value) if isinstance(value, str) else value
 
             mapped_paths["geojson"] = _to_drive_uri(zone_paths.get("geojson"))
 
             job.zone_state.paths = mapped_paths
             job.zone_state.tasks = {}
-            for key in (
-                "raster",
-                "mean_ndvi",
-                "vectors",
-                "geojson",
-                "zonal_stats",
-                "vectors_zip",
-            ):
+            for key in ("raster", "mean_ndvi", "vectors", "geojson", "zonal_stats", "vectors_zip"):
                 destination = mapped_paths.get(key)
                 if not isinstance(destination, str):
                     continue
@@ -1087,9 +958,7 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
             job.touch()
         else:
             job.zone_state.status = "failed"
-            job.zone_state.error = (
-                f"Unsupported export target for zones: {job.export_target}"
-            )
+            job.zone_state.error = f"Unsupported export target for zones: {job.export_target}"
             if not job.error:
                 job.error = job.zone_state.error
             job.touch()
@@ -1108,8 +977,6 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
         job.touch()
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
-
-
 def _process_zip_exports(job: ExportJob) -> None:
     if job.temp_dir is None:
         job.temp_dir = Path(tempfile.mkdtemp(prefix="s2idx_"))
@@ -1153,9 +1020,7 @@ def _process_zip_exports(job: ExportJob) -> None:
                     for path, arcname in zone_files
                 ]
                 if zone_archive_entries:
-                    job.zone_state.metadata[ZONE_ARCHIVE_METADATA_KEY] = (
-                        zone_archive_entries
-                    )
+                    job.zone_state.metadata[ZONE_ARCHIVE_METADATA_KEY] = zone_archive_entries
                 _cleanup_zone_workdir(job)
             except Exception as exc:
                 logger.exception(
@@ -1180,9 +1045,7 @@ def _process_zip_exports(job: ExportJob) -> None:
                 job.error = job.zone_state.error
             job.touch()
 
-    successful = [
-        item for item in job.items if item.status == "completed" and item.local_path
-    ]
+    successful = [item for item in job.items if item.status == "completed" and item.local_path]
     zip_entries: List[tuple[Path, str]] = [
         (item.local_path, item.file_name)
         for item in successful
@@ -1194,9 +1057,7 @@ def _process_zip_exports(job: ExportJob) -> None:
     if zip_entries:
         output_dir = _output_dir()
         zip_path = output_dir / f"{job.safe_aoi_name}_sentinel2_indices.zip"
-        with zipfile.ZipFile(
-            zip_path, "w", compression=zipfile.ZIP_DEFLATED
-        ) as archive:
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path, arcname in zip_entries:
                 archive.write(path, arcname=arcname)
         job.zip_path = zip_path
@@ -1263,8 +1124,6 @@ def _process_cloud_exports(job: ExportJob) -> None:
 
         for item in list(active):
             status = item.task.status() if item.task else {"state": "FAILED"}
-            if item.task is not None:
-                _log_task_status(item.task, action="poll", status=status)
             state = status.get("state")
             if state in {"COMPLETED", "SUCCEEDED", "COMPLETED_WITH_ERRORS"}:
                 uris = status.get("destination_uris", []) or []
@@ -1273,9 +1132,7 @@ def _process_cloud_exports(job: ExportJob) -> None:
                     prefix = f"gs://{bucket_name}/"
                     if item.destination_uri.startswith(prefix):
                         blob_path = item.destination_uri[len(prefix) :]
-                        item.signed_url = _generate_signed_gcs_url(
-                            bucket_name, blob_path
-                        )
+                        item.signed_url = _generate_signed_gcs_url(bucket_name, blob_path)
                 elif job.export_target == "drive" and uris:
                     item.signed_url = uris[0]
                 item.status = "completed"
@@ -1283,11 +1140,7 @@ def _process_cloud_exports(job: ExportJob) -> None:
                 job.touch()
             elif state in {"FAILED", "CANCELLED"}:
                 item.status = "failed"
-                item.error = (
-                    status.get("error_message")
-                    or status.get("error_details")
-                    or str(status)
-                )
+                item.error = status.get("error_message") or status.get("error_details") or str(status)
                 active.remove(item)
                 job.touch()
 
@@ -1403,9 +1256,7 @@ def _run_job(job: ExportJob) -> None:
 
     try:
         for month in job.months:
-            collection, composite = gee.monthly_sentinel2_collection(
-                job.geometry, month, job.cloud_prob_max
-            )
+            collection, composite = gee.monthly_sentinel2_collection(job.geometry, month, job.cloud_prob_max)
             try:
                 size = int(collection.size().getInfo())
             except Exception:
@@ -1447,10 +1298,8 @@ def _run_job(job: ExportJob) -> None:
                 ]
                 if visual_items:
                     try:
-                        visual_image, is_visualized = (
-                            index_visualization.prepare_image_for_export(
-                                index_image, index_name, job.geometry, job.scale_m
-                            )
+                        visual_image, is_visualized = index_visualization.prepare_image_for_export(
+                            index_image, index_name, job.geometry, job.scale_m
                         )
                     except Exception as exc:
                         for item in visual_items:
@@ -1520,9 +1369,7 @@ def cleanup_job_files(job: ExportJob) -> None:
                     item.cleaned = True
 
             if job.zone_state is not None:
-                metadata_entries = job.zone_state.metadata.get(
-                    ZONE_ARCHIVE_METADATA_KEY
-                )
+                metadata_entries = job.zone_state.metadata.get(ZONE_ARCHIVE_METADATA_KEY)
                 if isinstance(metadata_entries, list):
                     for entry in metadata_entries:
                         if not isinstance(entry, dict):
@@ -1532,9 +1379,7 @@ def cleanup_job_files(job: ExportJob) -> None:
                         if path_str and (included is True or included is None):
                             paths_to_remove.append(Path(path_str))
                         entry["included_in_zip"] = False
-                    job.zone_state.metadata[ZONE_ARCHIVE_METADATA_KEY] = (
-                        metadata_entries
-                    )
+                    job.zone_state.metadata[ZONE_ARCHIVE_METADATA_KEY] = metadata_entries
 
             job.temp_dir = None
             job.zip_path = None

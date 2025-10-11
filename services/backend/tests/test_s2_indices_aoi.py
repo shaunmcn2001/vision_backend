@@ -1,5 +1,4 @@
 """Tests for AOI preparation endpoint used by Sentinel-2 exports."""
-
 from __future__ import annotations
 
 import io

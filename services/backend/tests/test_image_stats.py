@@ -8,18 +8,13 @@ TEST_DIR = Path(__file__).resolve().parent
 if str(TEST_DIR) not in sys.path:
     sys.path.append(str(TEST_DIR))
 
-from fake_ee import (
-    FakeMeanImage,
-    setup_fake_ee,
-)  # noqa: E402  pylint: disable=wrong-import-position
+from fake_ee import FakeMeanImage, setup_fake_ee  # noqa: E402  pylint: disable=wrong-import-position
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.append(str(BACKEND_DIR))
 
-from app.services import (
-    image_stats,
-)  # noqa: E402  pylint: disable=wrong-import-position
+from app.services import image_stats  # noqa: E402  pylint: disable=wrong-import-position
 
 
 def test_temporal_stats_uses_sum_and_count(monkeypatch):
@@ -39,9 +34,7 @@ def test_temporal_stats_uses_sum_and_count(monkeypatch):
     assert stats["median"].name == "NDVI_median"
     assert stats["median"].value == pytest.approx(0.4)
     assert stats["std"].name == "NDVI_stdDev"
-    expected_std = math.sqrt(
-        ((0.2 - 0.4) ** 2 + (0.4 - 0.4) ** 2 + (0.6 - 0.4) ** 2) / 3
-    )
+    expected_std = math.sqrt(((0.2 - 0.4) ** 2 + (0.4 - 0.4) ** 2 + (0.6 - 0.4) ** 2) / 3)
     assert stats["std"].value == pytest.approx(expected_std)
     assert stats["cv"].name == "NDVI_cv"
     assert stats["cv"].value == pytest.approx(expected_std / 0.4)
