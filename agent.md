@@ -20,3 +20,18 @@
 - Server-side filter: keep only images with band 'NDVI' (`listContains('system:band_names','NDVI')`).
 - Guard checks the first **valid** composite, not the first requested month.
 - Diagnostics saved: MASK_TIER, VALID_RATIO, NDVI_SPREAD, NDVI_min/max, and first valid month (ym).
+
+### Fix: Invalid argument specified for ee.List(): 1
+
+**Problem:**  
+The zones pipeline occasionally failed when scalars (e.g., `1`, `ee.Number`, or `If(...)` outputs) were passed to `ee.List()`.  
+
+**Fix Summary:**  
+- Added `safe_ee_list()` in `ee_utils.py` to wrap scalars safely.  
+- Replaced all `ee.List(...)` calls in `zones_core.py` and `zones.py` with `safe_ee_list()`.  
+- Added logging to track NDVI thresholds and list creation during runtime.  
+
+**Testing:**  
+✅ `pytest -q` passes  
+✅ Zone generation runs without `Invalid argument specified for ee.List(): 1`  
+✅ Logs confirm all lists contain valid iterable values before being passed to Earth Engine.

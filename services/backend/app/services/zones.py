@@ -32,7 +32,8 @@ from sklearn.cluster import KMeans
 
 from app import gee
 from app.exports import sanitize_name
-import app.services.ee_utils as ee_utils
+from . import ee_utils
+from .ee_utils import safe_ee_list as _safe_ee_list
 from app.services.image_stats import temporal_stats
 from app.utils.diag import Guard, PipelineError
 from app.utils.geometry import area_ha
@@ -69,6 +70,11 @@ def _allow_init_failure() -> bool:
 def ensure_list(value):
     ee_utils.ee = ee
     return ee_utils.ensure_list(value)
+
+
+def safe_ee_list(value):
+    ee_utils.ee = ee
+    return _safe_ee_list(value)
 
 
 def remove_nulls(lst):
@@ -1521,7 +1527,12 @@ def _stability_mask(
         .get(0)
     )
 
-    threshold_list = ensure_list([float(t) for t in thresholds])
+    logger.debug(
+        "Stability thresholds (type=%s): %s",
+        type(thresholds).__name__,
+        thresholds,
+    )
+    threshold_list = safe_ee_list([float(t) for t in thresholds])
     min_ratio = ee.Number(min_survival_ratio)
 
     def _mask_for_threshold(value):
@@ -1722,7 +1733,12 @@ def _classify_by_percentiles(
     # Percentile cuts to request
     step = 100 / n_classes
     percentile_sequence = [step * i for i in range(1, n_classes)]
-    pct_breaks = ensure_list(percentile_sequence)
+    logger.debug(
+        "Percentile sequence (type=%s): %s",
+        type(percentile_sequence).__name__,
+        percentile_sequence,
+    )
+    pct_breaks = safe_ee_list(percentile_sequence)
     output_names = [f"cut_{i:02d}" for i in range(1, n_classes)]
 
     # Compute percentiles for this band
@@ -1770,6 +1786,11 @@ def _classify_by_percentiles(
         previous = numeric
 
     thresholds = adjusted_thresholds
+    logger.debug(
+        "Adjusted percentile thresholds (type=%s): %s",
+        type(thresholds).__name__,
+        thresholds,
+    )
 
     # Now classify pixels relative to thresholds
     zero = image.multiply(0)
@@ -1780,7 +1801,7 @@ def _classify_by_percentiles(
         gt_band = image.gt(t)
         return current_img.add(gt_band)
 
-    summed = ensure_list(thresholds).iterate(_accumulate, zero)
+    summed = safe_ee_list(thresholds).iterate(_accumulate, zero)
     classified = ee.Image(summed).add(1).toInt()
 
     return classified.rename("zone"), thresholds
@@ -2268,9 +2289,7 @@ def robust_quantile_breaks(
     3) fallback: return ee.List([]) to trigger k-means
     """
     logger.debug(
-        "robust_quantile_breaks: starting with n_classes=%d, scale=%d",
-        n_classes,
-        scale
+        "robust_quantile_breaks: starting with n_classes=%d, scale=%d", n_classes, scale
     )
 
     region = ee.FeatureCollection(aoi).geometry().buffer(5).bounds(1)
@@ -2281,6 +2300,11 @@ def robust_quantile_breaks(
 
     # 1) native percentiles
     perc = [int(round(100 * i / n_classes)) for i in range(1, n_classes)]
+    logger.debug(
+        "Robust quantile percentiles (type=%s): %s",
+        type(perc).__name__,
+        perc,
+    )
     try1 = base.reduceRegion(
         reducer=ee.Reducer.percentile(perc, None),  # key order NDVI_pXX
         geometry=region,
@@ -2289,23 +2313,23 @@ def robust_quantile_breaks(
         bestEffort=True,
         tileScale=tile_scale,
     )
-    
+
     try:
-        vals1 = ensure_list(perc).map(lambda p: try1.get(f"NDVI_p{p}"))
+        vals1 = safe_ee_list(perc).map(lambda p: try1.get(f"NDVI_p{p}"))
         logger.debug("robust_quantile_breaks: percentile method succeeded")
     except Exception as e:
         logger.error(
             "robust_quantile_breaks: FAILED at percentile mapping | error=%s: %s",
             type(e).__name__,
             str(e),
-            exc_info=True
+            exc_info=True,
         )
         raise
 
     # de-dup & enforce increasing using ee logic
     def _uniq_sort(values):
         try:
-            l2 = ensure_list(values).sort()
+            l2 = safe_ee_list(values).sort()
             # remove nulls
             l2 = remove_nulls(l2)
             size = ee.Number(l2.size())
@@ -2315,7 +2339,7 @@ def robust_quantile_breaks(
                 "_uniq_sort: FAILED during sort/remove_nulls | error=%s: %s",
                 type(e).__name__,
                 str(e),
-                exc_info=True
+                exc_info=True,
             )
             raise
 
@@ -2325,7 +2349,7 @@ def robust_quantile_breaks(
                 idx = ensure_number(idx)
                 prev_type = ee.String(ee.Algorithms.ObjectType(prev))
                 prev_is_list = prev_type.compareTo("List").eq(0)
-                acc = ensure_list(ee.Algorithms.If(prev_is_list, prev, ee.List([])))
+                acc = safe_ee_list(ee.Algorithms.If(prev_is_list, prev, ee.List([])))
                 v = ensure_number(l2.get(idx))
                 return ee.Algorithms.If(
                     acc.size().eq(0),
@@ -2346,7 +2370,7 @@ def robust_quantile_breaks(
                     type(prev).__name__,
                     type(e).__name__,
                     str(e),
-                    exc_info=True
+                    exc_info=True,
                 )
                 raise
 
@@ -2359,7 +2383,7 @@ def robust_quantile_breaks(
                     _dedup, ee.List([])
                 ),
             )
-            result = ensure_list(deduped)
+            result = safe_ee_list(deduped)
             logger.debug("_uniq_sort: iterate completed successfully")
             return result
         except Exception as e:
@@ -2367,7 +2391,7 @@ def robust_quantile_breaks(
                 "_uniq_sort: FAILED during iterate | error=%s: %s",
                 type(e).__name__,
                 str(e),
-                exc_info=True
+                exc_info=True,
             )
             raise
 
@@ -2379,7 +2403,7 @@ def robust_quantile_breaks(
             "robust_quantile_breaks: FAILED calling _uniq_sort | error=%s: %s",
             type(e).__name__,
             str(e),
-            exc_info=True
+            exc_info=True,
         )
         raise
 
@@ -2437,9 +2461,9 @@ def robust_quantile_breaks(
         brks = _uniq_sort(brks)
         return brks
 
-    uniq2 = ensure_list(ee.Algorithms.If(ok1, uniq1, _hist_breaks()))
+    uniq2 = safe_ee_list(ee.Algorithms.If(ok1, uniq1, _hist_breaks()))
 
-    return ensure_list(
+    return safe_ee_list(
         ee.Algorithms.If(uniq2.size().gte(n_classes - 1), uniq2, ee.List([]))
     )
 
@@ -2513,44 +2537,46 @@ def kmeans_classify(
             bestEffort=True,
             tileScale=tile_scale,
         )
-        groups = ensure_list(ee.Dictionary(means.get("groups")).get("groups", ee.List([])))
+        groups = safe_ee_list(
+            ee.Dictionary(means.get("groups")).get("groups", ee.List([]))
+        )
         logger.debug("kmeans_classify: computed group means")
     except Exception as e:
         logger.error(
             "kmeans_classify: FAILED computing group means | error=%s: %s",
             type(e).__name__,
             str(e),
-            exc_info=True
+            exc_info=True,
         )
         raise
 
     def _pair(g):
         try:
             d = ee.Dictionary(g)
-            return ee.List([ee.Number(d.get("label")), ee.Number(d.get("mean"))])
+            return safe_ee_list([ee.Number(d.get("label")), ee.Number(d.get("mean"))])
         except Exception as e:
             logger.error(
                 "kmeans_classify._pair: FAILED | error=%s: %s",
                 type(e).__name__,
                 str(e),
-                exc_info=True
+                exc_info=True,
             )
             raise
 
     try:
         pairs = groups.map(_pair)  # [[label, mean], ...]
-        pairs_sorted = ensure_list(pairs).sort(1)  # ascending NDVI
-        orig = pairs_sorted.map(lambda p: ensure_list(p).get(0))
+        pairs_sorted = safe_ee_list(pairs).sort(1)  # ascending NDVI
+        orig = pairs_sorted.map(lambda p: safe_ee_list(p).get(0))
         ranks = ee.List.sequence(1, ee.Number(pairs_sorted.size()))
-        remap_from = ensure_list(orig)
-        remap_to = ensure_list(ranks)
+        remap_from = safe_ee_list(orig)
+        remap_to = safe_ee_list(ranks)
         logger.debug("kmeans_classify: computed remap lists")
     except Exception as e:
         logger.error(
             "kmeans_classify: FAILED building remap lists | error=%s: %s",
             type(e).__name__,
             str(e),
-            exc_info=True
+            exc_info=True,
         )
         raise
 
@@ -2562,7 +2588,7 @@ def kmeans_classify(
             "kmeans_classify: FAILED during remap | error=%s: %s",
             type(e).__name__,
             str(e),
-            exc_info=True
+            exc_info=True,
         )
         raise
 
@@ -2624,7 +2650,7 @@ def _rank_zones(
         tileScale=4,
         maxPixels=gee.MAX_PIXELS,
     )
-    groups = ensure_list(grouped.get("groups", ee.List([])))
+    groups = safe_ee_list(grouped.get("groups", ee.List([])))
 
     def _cluster_value(item):
         info = ee.Dictionary(item)
@@ -2636,7 +2662,7 @@ def _rank_zones(
         )
 
     sorted_groups = groups.map(_cluster_value).sort("mean_ndvi")
-    source = ensure_list(
+    source = safe_ee_list(
         sorted_groups.map(lambda g: ee.Number(ee.Dictionary(g).get("cluster")))
     )
     target = ee.List.sequence(1, source.size())
@@ -4006,6 +4032,11 @@ def _prepare_selected_period_artifacts(
         brks_py = None
         try:
             breaks = robust_quantile_breaks(percentile_source, geometry, n_classes)
+            logger.debug(
+                "Robust breaks raw value (type=%s): %s",
+                type(breaks).__name__,
+                breaks,
+            )
             if hasattr(breaks, "getInfo"):
                 brks_py = breaks.getInfo()
             elif isinstance(breaks, (list, tuple)):
@@ -4016,7 +4047,7 @@ def _prepare_selected_period_artifacts(
                 elif isinstance(breaks, str):
                     brks_py = [breaks]
                 else:
-                    brks_py = ensure_list(breaks).getInfo()
+                    brks_py = safe_ee_list(breaks).getInfo()
         except Exception:
             brks_py = None
 
