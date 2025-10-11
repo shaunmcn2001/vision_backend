@@ -22,6 +22,12 @@ def test_ensure_list_scalar_and_list():
     assert ee.List(ensure_list(ee.List([1, 2, 3]))).size().getInfo() == 3
 
 
+def test_ensure_list_python_list():
+    """Test that ensure_list handles plain Python lists correctly."""
+    result = ensure_list([1, 2, 3])
+    assert ee.List(result).size().getInfo() == 3
+
+
 def test_remove_nulls():
     y = remove_nulls(ee.List([1, None, 2, None, 3]))
     assert ee.List(y).size().getInfo() == 3
