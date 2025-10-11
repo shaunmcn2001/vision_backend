@@ -7,9 +7,12 @@ is performed client-side using Python isinstance checks.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import ee
+
+logger = logging.getLogger(__name__)
 
 
 def _is_ee_object(value: Any) -> bool:
@@ -68,7 +71,36 @@ def ensure_list(value: Any) -> ee.List:
         return ee.List(value)
     
     # For all other values (primitives, ee objects, ComputedObjects), wrap in a list
-    return ee.List([value])
+    try:
+        return ee.List([value])
+    except (TypeError, AttributeError) as e:
+        value_type = type(value).__name__
+        value_str = str(value)[:100]
+        logger.warning(
+            "ensure_list: ee.List([x]) failed with %s: %s at type=%s, trying fallback",
+            type(e).__name__,
+            str(e),
+            value_type
+        )
+        # Try alternative: if it's a ComputedObject, try wrapping differently
+        try:
+            # Last resort: try to create a list with the value directly passed to ee.List
+            if hasattr(value, 'getInfo'):
+                # It's an EE object, try to wrap it in a list
+                return ee.List([value])
+            # If it's a plain primitive that failed, log and re-raise
+            raise
+        except Exception as fallback_error:
+            logger.error(
+                "ensure_list: ALL FALLBACKS FAILED at line=ee_utils.py:ensure_list | "
+                "input type=%s, value=%s, error=%s: %s",
+                value_type,
+                value_str,
+                type(fallback_error).__name__,
+                str(fallback_error),
+                exc_info=True
+            )
+            raise
 
 
 def ensure_number(value: Any) -> ee.Number | int | float:
@@ -105,7 +137,21 @@ def ensure_number(value: Any) -> ee.Number | int | float:
         return value
     
     # For other ee objects or ComputedObjects, wrap in ee.Number
-    return ee.Number(value)
+    try:
+        return ee.Number(value)
+    except Exception as e:
+        value_type = type(value).__name__
+        value_str = str(value)[:100]
+        logger.error(
+            "ensure_number: FAILED at line=ee_utils.py:ensure_number | "
+            "input type=%s, value=%s, error=%s: %s",
+            value_type,
+            value_str,
+            type(e).__name__,
+            str(e),
+            exc_info=True
+        )
+        raise
 
 
 def cat_one(lst: Any, value: Any) -> ee.List:
@@ -137,7 +183,21 @@ def cat_one(lst: Any, value: Any) -> ee.List:
         lst = ee.List(lst) if isinstance(lst, (list, tuple)) else ee.List([lst])
     
     # Simple concatenation: wrap value in a list and cat
-    return lst.cat(ee.List([value]))
+    try:
+        return lst.cat(ee.List([value]))
+    except Exception as e:
+        lst_type = type(lst).__name__
+        value_type = type(value).__name__
+        logger.error(
+            "cat_one: FAILED at line=ee_utils.py:cat_one | "
+            "list type=%s, value type=%s, error=%s: %s",
+            lst_type,
+            value_type,
+            type(e).__name__,
+            str(e),
+            exc_info=True
+        )
+        raise
 
 
 def remove_nulls(lst: Any) -> ee.List:
@@ -171,6 +231,39 @@ def remove_nulls(lst: Any) -> ee.List:
         is_ee_list = lst.__class__.__name__ == 'List' and hasattr(lst, 'filter')
     
     if not is_ee_list:
-        lst = ee.List(lst)
+        try:
+            lst = ee.List(lst)
+        except (TypeError, AttributeError) as e:
+            lst_type = type(lst).__name__
+            logger.warning(
+                "remove_nulls: ee.List(lst) failed with %s: %s at type=%s, trying ensure_list",
+                type(e).__name__,
+                str(e),
+                lst_type
+            )
+            # Try using ensure_list as fallback
+            try:
+                lst = ensure_list(lst)
+            except Exception as fallback_error:
+                logger.error(
+                    "remove_nulls: ALL FALLBACKS FAILED at line=ee_utils.py:remove_nulls | "
+                    "input type=%s, error=%s: %s",
+                    lst_type,
+                    type(fallback_error).__name__,
+                    str(fallback_error),
+                    exc_info=True
+                )
+                raise
     
-    return lst.filter(ee.Filter.notNull(['item']))
+    try:
+        return lst.filter(ee.Filter.notNull(['item']))
+    except Exception as e:
+        logger.error(
+            "remove_nulls: filter failed at line=ee_utils.py:remove_nulls | "
+            "list type=%s, error=%s: %s",
+            type(lst).__name__,
+            type(e).__name__,
+            str(e),
+            exc_info=True
+        )
+        raise
