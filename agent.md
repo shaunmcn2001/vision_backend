@@ -51,3 +51,20 @@ The zones pipeline occasionally failed when scalars (e.g., `1`, `ee.Number`, or 
 - Rewrote stability mask builder to return Images on all branches; safe ImageCollection.fromImages usage (stability_mask.py).
 - Applied mechanical fixes: replaced risky ee.List(...) casts, ensured .map(...) returns Images, and added optional input guards.
 - Purpose: eliminate "Invalid argument specified for ee.List(): 1" and mixed-type ImageCollection errors without changing business logic.
+
+## 2025-10-11 – Simple Production Zones (NumPy+rasterio+shapely)
+- New `zones_simple.py` implements a minimal local cartography pipeline:
+  1) Read NDVI GeoTIFF (1 band, [0..1]).
+  2) Classify to N classes (default quantiles; optional k-means).
+  3) Polygonize (rasterio.features.shapes).
+  4) Apply MMU (ha) and simplify (m).
+  5) Export to GPKG/GeoJSON/SHP.
+
+- API: POST /zones/simple
+  Payload:
+    { aoi_geojson, aoi_name, ndvi_tif_path, n_classes, classifier, mmu_ha, simplify_tol_m, output_format }
+  Returns: { ok, paths.zones_vector, metadata{ breaks/classifier/n_classes/mmu/simplify } }
+
+- Notes:
+  - Prefer giving `ndvi_tif_path` (mean NDVI) from your existing NDVI pipeline.
+  - EE wiring for a single mean NDVI export can be added later; simple flow does not depend on EE.
