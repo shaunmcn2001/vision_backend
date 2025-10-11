@@ -4,10 +4,14 @@ import pathlib
 from typing import Any, Mapping
 
 import ee
+from app.services.ee_patches import apply_ee_runtime_patches
+from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
 from ee import ServiceAccountCredentials
 from app.services.gcs import download_json, exists
 from app.services.image_stats import temporal_stats
 from app.services.indices import IndexDefinition, resolve_index
+
+apply_ee_runtime_patches()
 
 # Reuse the same SA method you used for NDVI
 SA_EMAIL = os.getenv(

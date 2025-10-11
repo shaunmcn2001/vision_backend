@@ -1,6 +1,11 @@
 from __future__ import annotations
 import ee
+from app.services.ee_patches import apply_ee_runtime_patches
+from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
 from .ee_utils import ensure_list
+
+
+apply_ee_runtime_patches()
 
 
 def stability_mask_from_cv(

@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 import ee
+from app.services.ee_patches import apply_ee_runtime_patches
+from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
+
+apply_ee_runtime_patches()
 
 S2_SR_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
 S2_CLOUD_PROB_COLLECTION = "COPERNICUS/S2_CLOUD_PROBABILITY"

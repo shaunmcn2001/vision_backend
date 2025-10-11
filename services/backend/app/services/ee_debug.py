@@ -1,10 +1,10 @@
-# services/backend/app/services/ee_debug.py
 from __future__ import annotations
 import traceback
 import inspect
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 def debug_trace(error: Exception, prefix: str = "EE TRACE") -> None:
     """
@@ -14,13 +14,14 @@ def debug_trace(error: Exception, prefix: str = "EE TRACE") -> None:
       at zones_core.py:224 (build_zone_thresholds)
       line:   l2 = ee.List(l).sort()
 
-    - Logs to console + FastAPI logs.
+    Logs to console + FastAPI logs.
     """
     tb = traceback.extract_tb(error.__traceback__)
     for frame in reversed(tb):
-        # find first line inside your services/backend code
+        # find the first frame inside our backend code
         if "services/backend" in frame.filename:
             fname = frame.filename.split("services/backend")[-1].lstrip("/")
+            module_name = inspect.getmodulename(frame.filename) or "unknown"
             print(f"[{prefix}] {error}")
             print(f"  at {fname}:{frame.lineno} ({frame.name})")
             try:
@@ -29,10 +30,12 @@ def debug_trace(error: Exception, prefix: str = "EE TRACE") -> None:
                     print(f"  line:   {src}")
             except Exception:
                 pass
-            logger.error(f"[{prefix}] {error} at {fname}:{frame.lineno} ({frame.name})")
+            logger.error(
+                f"[{prefix}] {error} at {fname}:{frame.lineno} ({frame.name}) [module={module_name}]"
+            )
             break
     else:
-        # fallback if we didn't find a matching frame
+        # fallback if no internal frame matched
         print(f"[{prefix}] {error}")
         traceback.print_exc()
         logger.exception("[%s] %s", prefix, error)
@@ -42,16 +45,18 @@ def debug_wrap(func):
     """
     Decorator: wrap any function that calls Earth Engine.
     On failure, prints EE traceback info.
+
     Usage:
         @debug_wrap
         def my_zone_fn(...):
             ...
     """
+
     def _inner(*args, **kwargs):
         try:
             return func(*args, **kwargs)
         except Exception as exc:
             debug_trace(exc)
             raise
+
     return _inner
-ee_debug.py
