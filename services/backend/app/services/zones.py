@@ -2267,6 +2267,11 @@ def robust_quantile_breaks(
     2) histogram-based quantiles (fixedHistogram)
     3) fallback: return ee.List([]) to trigger k-means
     """
+    logger.debug(
+        "robust_quantile_breaks: starting with n_classes=%d, scale=%d",
+        n_classes,
+        scale
+    )
 
     region = ee.FeatureCollection(aoi).geometry().buffer(5).bounds(1)
     # ensure a stable band name for reducer outputs
@@ -2284,40 +2289,93 @@ def robust_quantile_breaks(
         bestEffort=True,
         tileScale=tile_scale,
     )
-    vals1 = ensure_list(perc).map(lambda p: try1.get(f"NDVI_p{p}"))
+    
+    try:
+        vals1 = ensure_list(perc).map(lambda p: try1.get(f"NDVI_p{p}"))
+        logger.debug("robust_quantile_breaks: percentile method succeeded")
+    except Exception as e:
+        logger.error(
+            "robust_quantile_breaks: FAILED at percentile mapping | error=%s: %s",
+            type(e).__name__,
+            str(e),
+            exc_info=True
+        )
+        raise
 
     # de-dup & enforce increasing using ee logic
     def _uniq_sort(values):
-        l2 = ensure_list(values).sort()
-        # remove nulls
-        l2 = remove_nulls(l2)
+        try:
+            l2 = ensure_list(values).sort()
+            # remove nulls
+            l2 = remove_nulls(l2)
+            logger.debug("_uniq_sort: sorted and removed nulls")
+        except Exception as e:
+            logger.error(
+                "_uniq_sort: FAILED during sort/remove_nulls | error=%s: %s",
+                type(e).__name__,
+                str(e),
+                exc_info=True
+            )
+            raise
 
         # squash equal neighbors by adding epsilon steps
         def _dedup(idx, prev):
-            idx = ensure_number(idx)
-            prev_type = ee.String(ee.Algorithms.ObjectType(prev))
-            prev_is_list = prev_type.compareTo("List").eq(0)
-            acc = ensure_list(ee.Algorithms.If(prev_is_list, prev, ee.List([])))
-            v = ensure_number(l2.get(idx))
-            return ee.Algorithms.If(
-                acc.size().eq(0),
-                cat_one(acc, v),
-                ee.Algorithms.If(
-                    v.lte(ensure_number(acc.get(-1))),
-                    cat_one(
-                        acc,
-                        ensure_number(acc.get(-1)).add(1e-8 * (idx.add(1))),
-                    ),
+            try:
+                idx = ensure_number(idx)
+                prev_type = ee.String(ee.Algorithms.ObjectType(prev))
+                prev_is_list = prev_type.compareTo("List").eq(0)
+                acc = ensure_list(ee.Algorithms.If(prev_is_list, prev, ee.List([])))
+                v = ensure_number(l2.get(idx))
+                return ee.Algorithms.If(
+                    acc.size().eq(0),
                     cat_one(acc, v),
-                ),
-            )
+                    ee.Algorithms.If(
+                        v.lte(ensure_number(acc.get(-1))),
+                        cat_one(
+                            acc,
+                            ensure_number(acc.get(-1)).add(1e-8 * (idx.add(1))),
+                        ),
+                        cat_one(acc, v),
+                    ),
+                )
+            except Exception as e:
+                logger.error(
+                    "_dedup: FAILED at line=zones.py:_dedup | idx type=%s, prev type=%s, error=%s: %s",
+                    type(idx).__name__,
+                    type(prev).__name__,
+                    type(e).__name__,
+                    str(e),
+                    exc_info=True
+                )
+                raise
 
         # iterate
-        return ensure_list(
-            ee.List.sequence(0, l2.size().subtract(1)).iterate(_dedup, ee.List([]))
-        )
+        try:
+            result = ensure_list(
+                ee.List.sequence(0, l2.size().subtract(1)).iterate(_dedup, ee.List([]))
+            )
+            logger.debug("_uniq_sort: iterate completed successfully")
+            return result
+        except Exception as e:
+            logger.error(
+                "_uniq_sort: FAILED during iterate | error=%s: %s",
+                type(e).__name__,
+                str(e),
+                exc_info=True
+            )
+            raise
 
-    uniq1 = _uniq_sort(vals1)
+    try:
+        uniq1 = _uniq_sort(vals1)
+        logger.debug("robust_quantile_breaks: _uniq_sort completed")
+    except Exception as e:
+        logger.error(
+            "robust_quantile_breaks: FAILED calling _uniq_sort | error=%s: %s",
+            type(e).__name__,
+            str(e),
+            exc_info=True
+        )
+        raise
 
     # If we still don't have K-1 distinct thresholds, try histogram route
     ok1 = uniq1.size().gte(n_classes - 1)
@@ -2440,28 +2498,67 @@ def kmeans_classify(
 
     # 5) Relabel to contiguous 1..K by sorting cluster means (low NDVI → 1, high → K)
     # Compute mean NDVI per label
-    means = xj.addBands(raw_labels).reduceRegion(
-        reducer=ee.Reducer.mean().group(groupField=1, groupName="label"),
-        geometry=region,
-        scale=sample_scale,
-        maxPixels=1e9,
-        bestEffort=True,
-        tileScale=tile_scale,
-    )
-    groups = ensure_list(ee.Dictionary(means.get("groups")).get("groups", ee.List([])))
+    try:
+        means = xj.addBands(raw_labels).reduceRegion(
+            reducer=ee.Reducer.mean().group(groupField=1, groupName="label"),
+            geometry=region,
+            scale=sample_scale,
+            maxPixels=1e9,
+            bestEffort=True,
+            tileScale=tile_scale,
+        )
+        groups = ensure_list(ee.Dictionary(means.get("groups")).get("groups", ee.List([])))
+        logger.debug("kmeans_classify: computed group means")
+    except Exception as e:
+        logger.error(
+            "kmeans_classify: FAILED computing group means | error=%s: %s",
+            type(e).__name__,
+            str(e),
+            exc_info=True
+        )
+        raise
 
     def _pair(g):
-        d = ee.Dictionary(g)
-        return ee.List([ee.Number(d.get("label")), ee.Number(d.get("mean"))])
+        try:
+            d = ee.Dictionary(g)
+            return ee.List([ee.Number(d.get("label")), ee.Number(d.get("mean"))])
+        except Exception as e:
+            logger.error(
+                "kmeans_classify._pair: FAILED | error=%s: %s",
+                type(e).__name__,
+                str(e),
+                exc_info=True
+            )
+            raise
 
-    pairs = groups.map(_pair)  # [[label, mean], ...]
-    pairs_sorted = ensure_list(pairs).sort(1)  # ascending NDVI
-    orig = pairs_sorted.map(lambda p: ensure_list(p).get(0))
-    ranks = ee.List.sequence(1, ee.Number(pairs_sorted.size()))
-    remap_from = ensure_list(orig)
-    remap_to = ensure_list(ranks)
+    try:
+        pairs = groups.map(_pair)  # [[label, mean], ...]
+        pairs_sorted = ensure_list(pairs).sort(1)  # ascending NDVI
+        orig = pairs_sorted.map(lambda p: ensure_list(p).get(0))
+        ranks = ee.List.sequence(1, ee.Number(pairs_sorted.size()))
+        remap_from = ensure_list(orig)
+        remap_to = ensure_list(ranks)
+        logger.debug("kmeans_classify: computed remap lists")
+    except Exception as e:
+        logger.error(
+            "kmeans_classify: FAILED building remap lists | error=%s: %s",
+            type(e).__name__,
+            str(e),
+            exc_info=True
+        )
+        raise
 
-    relabeled = raw_labels.remap(remap_from, remap_to, 1).rename("zones_kmeans")
+    try:
+        relabeled = raw_labels.remap(remap_from, remap_to, 1).rename("zones_kmeans")
+        logger.debug("kmeans_classify: relabeling completed")
+    except Exception as e:
+        logger.error(
+            "kmeans_classify: FAILED during remap | error=%s: %s",
+            type(e).__name__,
+            str(e),
+            exc_info=True
+        )
+        raise
 
     return relabeled.clip(region)
 
