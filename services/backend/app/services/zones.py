@@ -67,11 +67,18 @@ def _allow_init_failure() -> bool:
 
 
 def ensure_list(value):
-    return zones_core.ensure_list(value, ee)
+    zones_core.ee = ee
+    return zones_core.ensure_list(value)
 
 
 def remove_nulls(lst):
-    return zones_core.remove_nulls(lst, ee)
+    zones_core.ee = ee
+    return zones_core.remove_nulls(lst)
+
+
+def as_number(value):
+    zones_core.ee = ee
+    return zones_core.as_number(value)
 
 
 def _to_ee_geometry(geojson: dict) -> ee.Geometry:
