@@ -45,3 +45,9 @@ The zones pipeline occasionally failed when scalars (e.g., `1`, `ee.Number`, or 
 - Tests:
   - pytest -q passes locally.
   - Zones run completes without ee.List() argument errors.
+## 2025-10-11 – Hotfix: EE list/collection safety + NDVI normalization + stability mask
+- Added helpers: ensure_list/ensure_number/remove_nulls/cat_one (ee_utils.py).
+- Normalized NDVI reducer outputs so classifier always selects a single band 'NDVI' (ndvi_helpers.py).
+- Rewrote stability mask builder to return Images on all branches; safe ImageCollection.fromImages usage (stability_mask.py).
+- Applied mechanical fixes: replaced risky ee.List(...) casts, ensured .map(...) returns Images, and added optional input guards.
+- Purpose: eliminate "Invalid argument specified for ee.List(): 1" and mixed-type ImageCollection errors without changing business logic.
