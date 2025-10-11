@@ -30,9 +30,7 @@ class IndexDefinition:
     parameter_builder: ParameterBuilder = field(default=_default_parameter_builder)
     default_scale: int = 10
 
-    def prepare_parameters(
-        self, params: Mapping[str, Any] | None = None
-    ) -> Dict[str, Any]:
+    def prepare_parameters(self, params: Mapping[str, Any] | None = None) -> Dict[str, Any]:
         return self.parameter_builder(params)
 
     def default_visualization(self) -> Dict[str, Any]:
@@ -51,20 +49,15 @@ def _normalized_difference(band_pair: Tuple[str, str], name: str) -> IndexComput
     return _compute
 
 
-def compute_ndvi(img: ee.Image) -> ee.Image:
-    b8 = img.select("B8").toFloat()
-    b4 = img.select("B4").toFloat()
-    ndvi = b8.subtract(b4).divide(b8.add(b4).add(1e-6)).rename("NDVI")
-    return ndvi.updateMask(b8.mask().And(b4.mask()))
-
-
 def _compute_evi(image: ee.Image, params: Mapping[str, Any]) -> ee.Image:
     nir = image.select("B8")
     red = image.select("B4")
     blue = image.select("B2")
     numerator = nir.subtract(red).multiply(2.5)
     denominator = (
-        nir.add(red.multiply(6)).subtract(blue.multiply(7.5)).add(ee.Image.constant(1))
+        nir.add(red.multiply(6))
+        .subtract(blue.multiply(7.5))
+        .add(ee.Image.constant(1))
     )
     return numerator.divide(denominator).rename("EVI")
 

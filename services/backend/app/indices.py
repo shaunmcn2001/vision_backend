@@ -4,7 +4,6 @@ This module provides helpers to build index images at a consistent scale and
 sanity-check utilities that can be evaluated locally for unit tests without an
 Earth Engine session.
 """
-
 from __future__ import annotations
 
 from typing import Callable, Dict, Iterable, Mapping
@@ -48,9 +47,7 @@ def _safe_sqrt(image: ee.Image) -> ee.Image:
     return image.updateMask(mask).sqrt()
 
 
-def _finish(
-    image: ee.Image, name: str, geometry: ee.Geometry, scale_m: int
-) -> ee.Image:
+def _finish(image: ee.Image, name: str, geometry: ee.Geometry, scale_m: int) -> ee.Image:
     wrapped = ee.Image(image)
     return (
         wrapped.rename(name)
@@ -285,7 +282,7 @@ def _scalar_msavi(values: ScalarBands) -> float:
     nir = values["B8"]
     red = values["B4"]
     two_nir_plus_one = 2 * nir + 1
-    radicand = two_nir_plus_one**2 - 8 * (nir - red)
+    radicand = two_nir_plus_one ** 2 - 8 * (nir - red)
     if radicand < 0:
         return math.nan
     return (two_nir_plus_one - math.sqrt(radicand)) / 2
@@ -293,38 +290,23 @@ def _scalar_msavi(values: ScalarBands) -> float:
 
 SCALAR_BUILDERS: Dict[str, ScalarFunction] = {
     "NDVI": lambda v: _scalar_safe_divide(v["B8"] - v["B4"], v["B8"] + v["B4"]),
-    "EVI": lambda v: _scalar_safe_divide(
-        2.5 * (v["B8"] - v["B4"]), v["B8"] + 6 * v["B4"] - 7.5 * v["B2"] + 1
-    ),
+    "EVI": lambda v: _scalar_safe_divide(2.5 * (v["B8"] - v["B4"]), v["B8"] + 6 * v["B4"] - 7.5 * v["B2"] + 1),
     "GNDVI": lambda v: _scalar_safe_divide(v["B8"] - v["B3"], v["B8"] + v["B3"]),
     "NDRE": lambda v: _scalar_safe_divide(v["B8"] - v["B5"], v["B8"] + v["B5"]),
-    "SAVI": lambda v: 1.5
-    * _scalar_safe_divide(v["B8"] - v["B4"], v["B8"] + v["B4"] + 0.5),
+    "SAVI": lambda v: 1.5 * _scalar_safe_divide(v["B8"] - v["B4"], v["B8"] + v["B4"] + 0.5),
     "MSAVI": _scalar_msavi,
-    "VARI": lambda v: _scalar_safe_divide(
-        v["B3"] - v["B4"], v["B3"] + v["B4"] - v["B2"]
-    ),
-    "MCARI": lambda v: ((v["B5"] - v["B4"]) - 0.2 * (v["B5"] - v["B3"]))
-    * _scalar_safe_divide(v["B5"], v["B4"]),
-    "NDWI_McFeeters": lambda v: _scalar_safe_divide(
-        v["B3"] - v["B8"], v["B3"] + v["B8"]
-    ),
+    "VARI": lambda v: _scalar_safe_divide(v["B3"] - v["B4"], v["B3"] + v["B4"] - v["B2"]),
+    "MCARI": lambda v: ((v["B5"] - v["B4"]) - 0.2 * (v["B5"] - v["B3"])) * _scalar_safe_divide(v["B5"], v["B4"]),
+    "NDWI_McFeeters": lambda v: _scalar_safe_divide(v["B3"] - v["B8"], v["B3"] + v["B8"]),
     "NDWI_Gao": lambda v: _scalar_safe_divide(v["B8"] - v["B11"], v["B8"] + v["B11"]),
     "NDMI": lambda v: _scalar_safe_divide(v["B8"] - v["B11"], v["B8"] + v["B11"]),
     "MSI": lambda v: _scalar_safe_divide(v["B11"], v["B8"]),
-    "GVMI": lambda v: _scalar_safe_divide(
-        (v["B8"] + 0.1) - (v["B11"] + 0.02), (v["B8"] + 0.1) + (v["B11"] + 0.02)
-    ),
+    "GVMI": lambda v: _scalar_safe_divide((v["B8"] + 0.1) - (v["B11"] + 0.02), (v["B8"] + 0.1) + (v["B11"] + 0.02)),
     "NBR": lambda v: _scalar_safe_divide(v["B8"] - v["B12"], v["B8"] + v["B12"]),
     "PSRI": lambda v: _scalar_safe_divide(v["B4"] - v["B3"], v["B6"]),
-    "ARI": lambda v: _scalar_safe_divide(1.0, v["B3"])
-    - _scalar_safe_divide(1.0, v["B5"]),
-    "CRI": lambda v: _scalar_safe_divide(1.0, v["B2"])
-    - _scalar_safe_divide(1.0, v["B5"]),
-    "BSI": lambda v: _scalar_safe_divide(
-        (v["B11"] + v["B4"]) - (v["B8"] + v["B2"]),
-        (v["B11"] + v["B4"]) + (v["B8"] + v["B2"]),
-    ),
+    "ARI": lambda v: _scalar_safe_divide(1.0, v["B3"]) - _scalar_safe_divide(1.0, v["B5"]),
+    "CRI": lambda v: _scalar_safe_divide(1.0, v["B2"]) - _scalar_safe_divide(1.0, v["B5"]),
+    "BSI": lambda v: _scalar_safe_divide((v["B11"] + v["B4"]) - (v["B8"] + v["B2"]), (v["B11"] + v["B4"]) + (v["B8"] + v["B2"])),
     "SBI": lambda v: math.sqrt(max((v["B4"] ** 2 + v["B3"] ** 2) / 2, 0)),
     "NDSI_Soil": lambda v: _scalar_safe_divide(v["B11"] - v["B4"], v["B11"] + v["B4"]),
     "NDTI": lambda v: _scalar_safe_divide(v["B11"] - v["B12"], v["B11"] + v["B12"]),
@@ -332,9 +314,7 @@ SCALAR_BUILDERS: Dict[str, ScalarFunction] = {
 }
 
 
-def compute_index(
-    image: ee.Image, name: str, geometry: ee.Geometry, scale_m: int
-) -> ee.Image:
+def compute_index(image: ee.Image, name: str, geometry: ee.Geometry, scale_m: int) -> ee.Image:
     builder = INDEX_BUILDERS.get(name)
     if builder is None:
         raise KeyError(f"Unsupported index: {name}")
@@ -346,3 +326,4 @@ def compute_scalar_index(name: str, values: ScalarBands) -> float:
     if builder is None:
         raise KeyError(f"Unsupported index: {name}")
     return builder(values)
+

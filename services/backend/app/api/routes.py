@@ -20,12 +20,10 @@ from .export import router as export_router
 
 router = APIRouter()
 
-
 # Simple ping endpoint
 @router.get("/ping")
 def ping():
     return {"message": "pong"}
-
 
 # Earth Engine health check
 @router.get("/ee/health")
@@ -37,7 +35,6 @@ def ee_health():
         return {"ok": True, "project": os.getenv("GCP_PROJECT")}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"EE init failed: {str(e)}")
-
 
 SupportedIndex = Literal["ndvi", "evi", "gndvi", "ndre"]
 
@@ -90,16 +87,12 @@ def ndvi_monthly(req: MonthlyIndexRequest):
 
     return {"ok": True, **result}
 
-
 @router.get("/ndvi/cache/{field_id}/{year}")
 def ndvi_cache_get(field_id: str, year: int, index: SupportedIndex = Query("ndvi")):
     path = gcs_index_path(index, field_id, year)
     if not exists(path):
-        raise HTTPException(
-            status_code=404, detail="No cached index for this field/year"
-        )
+        raise HTTPException(status_code=404, detail="No cached index for this field/year")
     return download_json(path)
-
 
 @router.post("/ndvi/monthly/by-field/{field_id}")
 def ndvi_monthly_by_field(
@@ -124,7 +117,6 @@ def ndvi_monthly_by_field(
         force=force,
     )
 
-
 @router.get("/ndvi/years/{field_id}")
 def ndvi_years(field_id: str, index: SupportedIndex = Query("ndvi")):
     return {
@@ -133,22 +125,14 @@ def ndvi_years(field_id: str, index: SupportedIndex = Query("ndvi")):
         "years": list_cached_years(field_id, index),
     }
 
-
 @router.get("/ndvi/links/{field_id}/{year}")
 def ndvi_links(field_id: str, year: int, index: SupportedIndex = Query("ndvi")):
     json_path = gcs_index_path(index, field_id, year)
     csv_path = gcs_index_csv_path(index, field_id, year)
     return {
         "index": index,
-        "json": {
-            "gs": f"gs://{os.getenv('GCS_BUCKET')}/{json_path}",
-            "signed": sign_url(json_path),
-        },
-        "csv": {
-            "gs": f"gs://{os.getenv('GCS_BUCKET')}/{csv_path}",
-            "signed": sign_url(csv_path),
-        },
+        "json": {"gs": f"gs://{os.getenv('GCS_BUCKET')}/{json_path}", "signed": sign_url(json_path)},
+        "csv":  {"gs": f"gs://{os.getenv('GCS_BUCKET')}/{csv_path}",  "signed": sign_url(csv_path)}
     }
-
 
 router.include_router(export_router, prefix="/export", tags=["export"])

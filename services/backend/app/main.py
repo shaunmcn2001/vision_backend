@@ -14,7 +14,10 @@ from app import gee
 import os
 
 app = FastAPI(
-    title="Agri NDVI Backend", version="0.1.0", docs_url="/docs", redoc_url="/redoc"
+    title="Agri NDVI Backend",
+    version="0.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
 # Allow all origins (adjust later if needed)
@@ -38,7 +41,6 @@ def _startup_init_gee() -> None:
     except Exception as exc:  # pragma: no cover - best effort
         logger.warning("Earth Engine initialisation skipped: %s", exc)
 
-
 @app.get("/healthz")
 def healthz():
     return {
@@ -47,7 +49,6 @@ def healthz():
         "project": os.getenv("GCP_PROJECT"),
         "region": os.getenv("GCP_REGION"),
     }
-
 
 @app.get("/")
 def root():
@@ -1057,9 +1058,8 @@ def export_ui():
             simplify_buffer_m: zoneParams.simplify_buffer_m,
             export_target: exportTarget,
             include_zonal_stats: zoneParams.include_zonal_stats,
-            method: zoneParams.method || 'ndvi_kmeans',
           }),
-        });
+         });
          if (!response.ok) {
            throw new Error(await readError(response));
          }
@@ -1195,7 +1195,6 @@ def export_ui():
             simplify_tol_m: simplify,
             simplify_buffer_m: ZONE_SIMPLIFY_BUFFER_M,
             include_zonal_stats: true,
-            method: 'ndvi_kmeans',
           };
         }
         const aoiName = aoiNameInput.value.trim();
@@ -1264,7 +1263,6 @@ def export_ui():
                     close_radius_m: zoneParams.close_radius_m,
                     simplify_tol_m: zoneParams.simplify_tol_m,
                     simplify_buffer_m: zoneParams.simplify_buffer_m,
-                    method: zoneParams.method || 'ndvi_kmeans',
                   }
                 : { enabled: false },
             }),
@@ -1368,8 +1366,8 @@ async def require_api_key(req: Request, call_next):
         "/healthz",
         "/docs",
         "/redoc",
-        "/openapi.json",  # needed for Swagger UI to load
-        "/docs/oauth2-redirect",  # docs assets
+        "/openapi.json",           # needed for Swagger UI to load
+        "/docs/oauth2-redirect",   # docs assets
         "/docs/swagger-ui",
         "/docs/swagger-ui-init.js",
         "/docs/swagger-ui-bundle.js",
@@ -1383,7 +1381,6 @@ async def require_api_key(req: Request, call_next):
         return JSONResponse(status_code=401, content={"detail": "Invalid API key"})
     return await call_next(req)
 
-
 # Mount API routes
 app.include_router(api_router, prefix="/api")
 app.include_router(fields_router, prefix="/api/fields")
@@ -1392,3 +1389,4 @@ app.include_router(tiles_router, prefix="/api")
 app.include_router(s2_indices_router)
 app.include_router(zones_router, prefix="/api")
 app.include_router(export_shapefile_router)
+

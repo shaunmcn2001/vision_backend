@@ -165,24 +165,3 @@ be exercised end-to-end via the bundled UI or HTTP clients.
 - CI expectations mirror the above `pytest` run; add new tests under
   `services/backend/tests/` alongside the existing fakes when expanding
   functionality.
-
-## Editing Policy for Code Agent (Surgical Mode)
-
-Perform anchor-based diffs; never replace a whole file unless explicitly asked.
-
-Preserve existing imports, validators, models, and logging.
-
-If an anchor isn’t found, stop and report rather than guessing.
-
-Keep whitespace and formatting stable; avoid noisy diffs.
-
-## Zones Diagnostics & Error Codes
-
-The /zones/production endpoint accepts diagnostics: bool (query param).
-
-The service layer may raise PipelineError with fields {code, message, hints, context}.
-
-API maps PipelineError to HTTP 422; existing 400/500 behavior is unchanged.
-
-Error codes to use downstream:
-E_INPUT_AOI, E_NO_MONTHS, E_FIRST_MONTH_EMPTY, E_MEAN_EMPTY, E_MEAN_CONSTANT, E_STABILITY_EMPTY, E_BREAKS_COLLAPSED, E_FEW_CLASSES, E_VECT_EMPTY, E_EXPORT_FAIL_*.

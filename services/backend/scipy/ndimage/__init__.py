@@ -1,6 +1,5 @@
 import numpy as np
 
-
 def generate_binary_structure(rank: int, connectivity: int) -> np.ndarray:
     if rank != 2:
         raise ValueError("Only 2D structures are supported in this stub")
@@ -55,9 +54,7 @@ def sum(input_array: np.ndarray, labels: np.ndarray, index) -> np.ndarray:
     return np.array(results)
 
 
-def generic_filter(
-    array: np.ndarray, function, size: int, mode: str = "nearest"
-) -> np.ndarray:
+def generic_filter(array: np.ndarray, function, size: int, mode: str = "nearest") -> np.ndarray:
     data = np.asarray(array)
     pad = size // 2
     if mode != "nearest":
