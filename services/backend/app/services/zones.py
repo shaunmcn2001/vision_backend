@@ -1085,91 +1085,34 @@ def _build_composite_series(
 
 
 def _compute_ndvi(image: ee.Image) -> ee.Image:
-    try:
-        base = ee.Image(image)
-    except Exception:  # pragma: no cover - fake EE fallback
-        base = image
-    bands = base.select(["B8", "B4"])
-    if hasattr(bands, "toFloat"):
-        bands = bands.toFloat()
+    base = image
+    bands = base.select(["B8", "B4"]).toFloat()
+    ndvi = bands.normalizedDifference(["B8", "B4"]).rename("NDVI").toFloat()
 
-    ndvi = bands.normalizedDifference(["B8", "B4"]).rename("NDVI")
-    if hasattr(ndvi, "toFloat"):
-        ndvi = ndvi.toFloat()
+    ndvi_range_mask = ndvi.lt(1)
 
-    ndvi_range_mask = None
-    if hasattr(ndvi, "lt"):
-        try:
-            ndvi_range_mask = ndvi.lt(1)
-        except Exception:  # pragma: no cover - defensive guard for fake EE objects
-            ndvi_range_mask = None
-
-    mask_source = bands if hasattr(bands, "mask") else base
-    mask_image = mask_source.mask() if hasattr(mask_source, "mask") else None
-
-    def _safe_constant(value: float):
-        constant = getattr(ee.Image, "constant", None)
-        if callable(constant):
-            try:
-                return ee.Image.constant(value)
-            except Exception:  # pragma: no cover - fake EE fallback
-                pass
-        return value
-
-    if mask_image is None:
-        if ndvi_range_mask is not None:
-            try:
-                combined_mask = ee.Image(ndvi_range_mask)
-            except Exception:  # pragma: no cover - fake EE fallback
-                combined_mask = ndvi_range_mask
-        else:
-            combined_mask = _safe_constant(1)
-    else:
+    source_mask = bands.mask()
+    combined_mask = ndvi_range_mask
+    if source_mask is not None:
+        mask_image = source_mask
         if hasattr(mask_image, "reduce"):
             try:
                 mask_image = mask_image.reduce(ee.Reducer.min())
             except Exception:  # pragma: no cover - defensive guard for fake EE objects
                 pass
         if hasattr(mask_image, "rename"):
-            try:
-                mask_image = mask_image.rename("mask")
-            except Exception:  # pragma: no cover - defensive guard for fake EE objects
-                pass
-        combined_mask = mask_image
-        if ndvi_range_mask is not None:
-            try:
-                range_mask = ee.Image(ndvi_range_mask)
-            except Exception:  # pragma: no cover - fake EE fallback
-                range_mask = ndvi_range_mask
-            if hasattr(combined_mask, "And"):
-                try:
-                    combined_mask = combined_mask.And(range_mask)
-                except Exception:  # pragma: no cover - defensive fallback
-                    combined_mask = range_mask
-            elif hasattr(range_mask, "And"):
-                try:
-                    combined_mask = range_mask.And(combined_mask)
-                except Exception:  # pragma: no cover - defensive fallback
-                    combined_mask = combined_mask
-            else:
-                combined_mask = range_mask
-        try:
-            combined_mask = ee.Image(combined_mask)
-        except Exception:  # pragma: no cover - fake EE fallback
-            pass
+            mask_image = mask_image.rename("mask")
+        if hasattr(mask_image, "gt"):
+            mask_image = mask_image.gt(0)
 
-    if combined_mask is None:
-        combined_mask = _safe_constant(1)
+        if hasattr(mask_image, "And"):
+            combined_mask = mask_image.And(ndvi_range_mask)
+        elif hasattr(ndvi_range_mask, "And"):
+            combined_mask = ndvi_range_mask.And(mask_image)
+        else:
+            combined_mask = mask_image
 
-    if hasattr(combined_mask, "gt"):
-        try:
-            boolean_mask = combined_mask.gt(0)
-        except Exception:  # pragma: no cover - defensive fallback
-            boolean_mask = combined_mask
-    else:  # pragma: no cover - defensive fallback
-        boolean_mask = _safe_constant(1)
-
-    return ndvi.updateMask(boolean_mask)
+    return ndvi.updateMask(combined_mask)
 
 
 def _compute_ndre(image: ee.Image) -> ee.Image:
@@ -1192,17 +1135,7 @@ def _compute_bsi(image: ee.Image) -> ee.Image:
     ).rename("BSI")
 
 
-def _as_image_collection(
-    images: Sequence[ee.Image] | ee.ImageCollection,
-) -> ee.ImageCollection:
-    if hasattr(images, "map") and hasattr(images, "size"):
-        return ee.ImageCollection(images)
-    return ee.ImageCollection(list(images))
-
-
-def _ndvi_temporal_stats(
-    images: Sequence[ee.Image] | ee.ImageCollection,
-) -> Mapping[str, ee.Image]:
+def _ndvi_temporal_stats(images: Sequence[ee.Image]) -> Mapping[str, ee.Image]:
     stats = temporal_stats(
         images,
         band_name="NDVI",
@@ -2005,15 +1938,10 @@ def _rank_zones(cluster_image: ee.Image, ndvi_mean: ee.Image, geometry: ee.Geome
 
 
 def _build_ndvi_feature_images(
-    ndvi_images: Sequence[ee.Image] | ee.ImageCollection,
+    ndvi_images: Sequence[ee.Image],
     ndvi_stats: Mapping[str, ee.Image],
 ) -> Dict[str, ee.Image]:
-    base_collection = _as_image_collection(ndvi_images)
-
-    def _prepare(image: ee.Image) -> ee.Image:
-        return ee.Image(image).select(["NDVI"]).toFloat().rename("NDVI")
-
-    collection = base_collection.map(_prepare)
+    collection = ee.ImageCollection([image.rename("NDVI") for image in ndvi_images])
     percentiles = collection.reduce(ee.Reducer.percentile([10, 90]))
     mean_image = ndvi_stats["mean"].rename("NDVI_mean")
     mask = mean_image.mask()
@@ -2051,7 +1979,7 @@ def _train_weka_kmeans_classifier(
 
 def _build_ndvi_kmeans_zones(
     *,
-    ndvi_images: Sequence[ee.Image] | ee.ImageCollection,
+    ndvi_images: Sequence[ee.Image],
     ndvi_stats: Mapping[str, ee.Image],
     geometry: ee.Geometry,
     n_classes: int,
@@ -2258,18 +2186,15 @@ def _prepare_selected_period_artifacts(
     if not composites:
         raise ValueError("No valid Sentinel-2 scenes were found for the selected months")
 
-    composite_images = [image for _, image in composites]
+    ndvi_images = [_compute_ndvi(image) for _, image in composites]
 
-    ndvi_collection: ee.ImageCollection | None = None
     try:
-        base_collection = ee.ImageCollection(composite_images)
-        ndvi_collection = base_collection.map(_compute_ndvi)
-        ndvi_images: Sequence[ee.Image] | ee.ImageCollection = ndvi_collection
+        ndvi_collection = ee.ImageCollection(ndvi_images)
     except Exception:
         ndvi_collection = None
-        ndvi_images = [_compute_ndvi(image) for image in composite_images]
 
-    ndvi_stats = dict(_ndvi_temporal_stats(ndvi_images))
+    stats_source = ndvi_collection if ndvi_collection is not None else ndvi_images
+    ndvi_stats = dict(_ndvi_temporal_stats(stats_source))
 
     if ndvi_collection is not None:
         try:
@@ -2282,14 +2207,8 @@ def _prepare_selected_period_artifacts(
                 .rename("NDVI_mean")
             )
             ndvi_stats["mean"] = mean_image
-            ndvi_stats["valid_mask"] = valid_mask
         except Exception:  # pragma: no cover - logging guard
             logger.exception("Failed to compute mean NDVI image from collection")
-    else:
-        try:
-            ndvi_stats["mean"] = ndvi_stats["mean"].toFloat().clip(geometry)
-        except Exception:  # pragma: no cover - logging guard
-            logger.exception("Failed to clip fallback NDVI mean image")
 
     diag_region = geometry
     if ndvi_collection is not None:
@@ -2336,18 +2255,6 @@ def _prepare_selected_period_artifacts(
         logger.info("Zone NDVI histogram: %s", histogram_info)
     except Exception:  # pragma: no cover - logging guard
         logger.exception("Failed to compute NDVI histogram diagnostics")
-
-    try:
-        percentiles = ndvi_stats["mean"].reduceRegion(
-            reducer=ee.Reducer.percentile([5, 25, 50, 75, 95]),
-            **diag_kwargs,
-        )
-        percentile_info = (
-            percentiles.getInfo() if hasattr(percentiles, "getInfo") else percentiles
-        )
-        logger.info("Zone NDVI percentiles: %s", percentile_info)
-    except Exception:  # pragma: no cover - logging guard
-        logger.exception("Failed to compute NDVI percentile diagnostics")
 
     stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
     if stability_flag:
