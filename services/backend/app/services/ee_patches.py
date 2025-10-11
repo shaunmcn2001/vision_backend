@@ -2,6 +2,15 @@
 from __future__ import annotations
 import logging
 import ee
+import sys
+from app.services.ee_debug import debug_trace
+
+def _hook(type_, value, tb):
+    if "ee" in str(type_) or "ee." in str(value):
+        debug_trace(value)
+    sys.__excepthook__(type_, value, tb)
+
+sys.excepthook = _hook
 
 logger = logging.getLogger(__name__)
 
