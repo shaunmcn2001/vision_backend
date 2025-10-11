@@ -130,13 +130,18 @@ class ProductionZonesRequest(_BaseAOIRequest):
     )
     # Legacy fields kept for NDVI raster production (not used for vectorization)
     open_radius_m: float = Field(
-        zone_service.DEFAULT_OPEN_RADIUS_M, ge=0, description="[DEPRECATED] Not used in PyQGIS flow"
+        zone_service.DEFAULT_OPEN_RADIUS_M,
+        ge=0,
+        description="[DEPRECATED] Not used in PyQGIS flow",
     )
     close_radius_m: float = Field(
-        zone_service.DEFAULT_CLOSE_RADIUS_M, ge=0, description="[DEPRECATED] Not used in PyQGIS flow"
+        zone_service.DEFAULT_CLOSE_RADIUS_M,
+        ge=0,
+        description="[DEPRECATED] Not used in PyQGIS flow",
     )
     simplify_buffer_m: float = Field(
-        zone_service.DEFAULT_SIMPLIFY_BUFFER_M, description="[DEPRECATED] Not used in PyQGIS flow"
+        zone_service.DEFAULT_SIMPLIFY_BUFFER_M,
+        description="[DEPRECATED] Not used in PyQGIS flow",
     )
     export_target: Literal["zip", "gcs", "drive"] = Field(
         "zip", description="Destination for exports"

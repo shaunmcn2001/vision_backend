@@ -7,15 +7,11 @@ MMU enforcement, smoothing, and simplification for production zones.
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import rasterio
-from rasterio.transform import from_origin
-from shapely.geometry import shape as shapely_shape
 from sklearn.cluster import KMeans
 
 logger = logging.getLogger(__name__)
@@ -56,16 +52,11 @@ def build_zones_with_pyqgis(
     try:
         from qgis.core import (
             QgsApplication,
-            QgsVectorLayer,
-            QgsRasterLayer,
-            QgsGeometry,
-            QgsFeature,
-            QgsField,
-            QgsFields,
-            QgsVectorFileWriter,
             QgsCoordinateReferenceSystem,
+            QgsFeature,
+            QgsVectorFileWriter,
+            QgsVectorLayer,
         )
-        from qgis.PyQt.QtCore import QVariant
         import processing
         from processing.core.Processing import Processing
 
@@ -91,7 +82,6 @@ def build_zones_with_pyqgis(
 
         with rasterio.open(ndvi_path) as src:
             ndvi_data = src.read(1, masked=True)
-            transform = src.transform
             crs_wkt = src.crs.to_wkt() if src.crs else None
             profile = src.profile.copy()
 
@@ -201,7 +191,9 @@ def build_zones_with_pyqgis(
             )
 
             if writer.hasError() != QgsVectorFileWriter.NoError:
-                raise RuntimeError(f"Failed to create filtered layer: {writer.errorMessage()}")
+                raise RuntimeError(
+                    f"Failed to create filtered layer: {writer.errorMessage()}"
+                )
 
             for feature in filtered_features:
                 writer.addFeature(feature)
@@ -249,14 +241,18 @@ def build_zones_with_pyqgis(
             )
 
             if writer.hasError() != QgsVectorFileWriter.NoError:
-                raise RuntimeError(f"Failed to create simplified layer: {writer.errorMessage()}")
+                raise RuntimeError(
+                    f"Failed to create simplified layer: {writer.errorMessage()}"
+                )
 
             for feature in simplified_features:
                 writer.addFeature(feature)
 
             del writer
 
-            vector_layer = QgsVectorLayer(str(temp_simplified), "zones_simplified", "ogr")
+            vector_layer = QgsVectorLayer(
+                str(temp_simplified), "zones_simplified", "ogr"
+            )
             if not vector_layer.isValid():
                 raise RuntimeError("Failed to reload simplified layer")
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import rasterio
 import shapefile
 from rasterio.transform import from_origin
@@ -879,12 +880,6 @@ def test_prepare_selected_period_artifacts_percentiles_without_fallback(
         "type": "Polygon",
         "coordinates": [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]],
     }
-
-    fake_guard = SimpleNamespace(
-        record=lambda *args, **kwargs: None,
-        require=lambda *args, **kwargs: None,
-        warn=lambda *args, **kwargs: None,
-    )
 
     artifacts, metadata = zones._prepare_selected_period_artifacts(
         aoi,
@@ -1825,7 +1820,9 @@ def test_export_selected_period_zones_preserves_thresholds_for_kmeans(
     assert "thresholds" not in result or result["thresholds"] is None
 
 
-@pytest.mark.skip(reason="Legacy GEE percentile classification removed; PyQGIS now handles classification")
+@pytest.mark.skip(
+    reason="Legacy GEE percentile classification removed; PyQGIS now handles classification"
+)
 def test_classify_by_percentiles_handles_duplicate_thresholds(monkeypatch) -> None:
     reducer_payload = {
         "cut_01": 0.2,

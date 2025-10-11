@@ -147,11 +147,23 @@ def test_pyqgis_zones_basic_flow_with_mock(tmp_path, monkeypatch):
             return (0, None)
 
     # Monkeypatch QGIS modules
-    monkeypatch.setattr("app.services.zones_pyqgis.QgsApplication", MockQgsApplication, raising=False)
-    monkeypatch.setattr("app.services.zones_pyqgis.Processing", MockProcessing, raising=False)
-    monkeypatch.setattr("app.services.zones_pyqgis.QgsVectorLayer", MockVectorLayer, raising=False)
-    monkeypatch.setattr("app.services.zones_pyqgis.QgsVectorFileWriter", MockVectorFileWriter, raising=False)
-    monkeypatch.setattr("app.services.zones_pyqgis.processing", MockProcessing, raising=False)
+    monkeypatch.setattr(
+        "app.services.zones_pyqgis.QgsApplication", MockQgsApplication, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.zones_pyqgis.Processing", MockProcessing, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.zones_pyqgis.QgsVectorLayer", MockVectorLayer, raising=False
+    )
+    monkeypatch.setattr(
+        "app.services.zones_pyqgis.QgsVectorFileWriter",
+        MockVectorFileWriter,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.zones_pyqgis.processing", MockProcessing, raising=False
+    )
 
     # Bypass the QGIS import check by mocking the imports
     import sys
@@ -206,7 +218,9 @@ def test_pyqgis_zones_basic_flow_with_mock(tmp_path, monkeypatch):
 
 
 # Skip actual PyQGIS tests if QGIS is not installed
-pytestmark = pytest.mark.skip(reason="PyQGIS tests require QGIS system package installation")
+pytestmark = pytest.mark.skip(
+    reason="PyQGIS tests require QGIS system package installation"
+)
 
 
 def test_pyqgis_zones_kmeans_classification(tmp_path):

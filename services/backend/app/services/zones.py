@@ -110,9 +110,9 @@ def safe_ee_list(value):
                     return _FallbackList(
                         sorted(
                             self,
-                            key=lambda item: item[key]
-                            if isinstance(item, (list, tuple))
-                            else item,
+                            key=lambda item: (
+                                item[key] if isinstance(item, (list, tuple)) else item
+                            ),
                         )
                     )
                 return _FallbackList(sorted(self))
@@ -187,9 +187,7 @@ def _parse_bool_env(value: str | None, default: bool) -> bool:
 APPLY_STABILITY = _parse_bool_env(os.getenv("APPLY_STABILITY"), True)
 
 
-def _normalize_choice(
-    value: str | None, *, default: str, allowed: set[str]
-) -> str:
+def _normalize_choice(value: str | None, *, default: str, allowed: set[str]) -> str:
     """Return a normalised lower-case string drawn from *allowed* choices."""
 
     if value is None:
@@ -2350,7 +2348,7 @@ def robust_quantile_breaks(
         if n_classes < 2:
             logger.debug("_hist_quantiles: n_classes <2, returning empty list")
             return ee.List([])
-        
+
         # 512 bins across observed range
         hist = img.reduceRegion(
             reducer=ee.Reducer.fixedHistogram(vmin, vmax, 512),
@@ -2386,7 +2384,8 @@ def robust_quantile_breaks(
     return safe_ee_list(
         ee.Algorithms.If(uniq2.size().gte(n_classes - 1), uniq2, ee.List([]))
     )
-    
+
+
 def kmeans_classify(
     ndvi_img: ee.Image,
     aoi_geom,
@@ -3352,7 +3351,9 @@ def _prepare_selected_period_artifacts(
         monthly_norm = monthly_ndvi_collection.map(normalize_ndvi_band)
         stats_image = stats_stack(monthly_norm).updateMask(common_mask)
         ndvi_cv = stats_image.select("NDVI_cv").updateMask(common_mask)
-        thresholds = ee.List(ensure_list(cv_mask_threshold)).cat(ee.List(STABILITY_THRESHOLD_SEQUENCE))
+        thresholds = ee.List(ensure_list(cv_mask_threshold)).cat(
+            ee.List(STABILITY_THRESHOLD_SEQUENCE)
+        )
         stability_candidate = stability_mask_from_cv(
             ndvi_cv,
             stable_region,
