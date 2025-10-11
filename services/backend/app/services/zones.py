@@ -47,6 +47,8 @@ from app.utils.diag import Guard, PipelineError
 from app.utils.geometry import area_ha
 from app.utils.logging_colors import install_color_handler
 from app.utils.sanitization import sanitize_for_json
+from app.services.ee_patches import apply_ee_runtime_patches  # noqa: F401
+apply_ee_runtime_patches()
 
 logger = logging.getLogger(__name__)
 install_color_handler(logger)
