@@ -1521,7 +1521,7 @@ def _stability_mask(
         .get(0)
     )
 
-    threshold_list = ee.List([float(t) for t in thresholds])
+    threshold_list = ensure_list([float(t) for t in thresholds])
     min_ratio = ee.Number(min_survival_ratio)
 
     def _mask_for_threshold(value):
@@ -2308,6 +2308,7 @@ def robust_quantile_breaks(
             l2 = ensure_list(values).sort()
             # remove nulls
             l2 = remove_nulls(l2)
+            size = ee.Number(l2.size())
             logger.debug("_uniq_sort: sorted and removed nulls")
         except Exception as e:
             logger.error(
@@ -2351,9 +2352,14 @@ def robust_quantile_breaks(
 
         # iterate
         try:
-            result = ensure_list(
-                ee.List.sequence(0, l2.size().subtract(1)).iterate(_dedup, ee.List([]))
+            deduped = ee.Algorithms.If(
+                ee.Number(size).eq(0),
+                ee.List([]),
+                ee.List.sequence(0, ee.Number(size).subtract(1)).iterate(
+                    _dedup, ee.List([])
+                ),
             )
+            result = ensure_list(deduped)
             logger.debug("_uniq_sort: iterate completed successfully")
             return result
         except Exception as e:
