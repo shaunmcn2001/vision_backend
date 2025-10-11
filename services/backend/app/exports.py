@@ -549,7 +549,6 @@ def _start_drive_task(item: ExportItem, job: ExportJob) -> ee.batch.Task:
         crs="EPSG:4326",
         fileFormat="GeoTIFF",
         maxPixels=gee.MAX_PIXELS,
-        filePerBand=False,
         formatOptions=format_options,
     )
     task.start()
