@@ -21,8 +21,6 @@ from typing import Any
 from urllib.request import urlopen
 
 import ee
-from app.services.ee_patches import apply_ee_runtime_patches
-from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
 from app.services import ee_utils as ee_utils_module
 from app.services.ee_utils import (
     cat_one as _cat_one,
@@ -49,8 +47,7 @@ from app.utils.diag import Guard, PipelineError
 from app.utils.geometry import area_ha
 from app.utils.logging_colors import install_color_handler
 from app.utils.sanitization import sanitize_for_json
-
-
+from app.services.ee_patches import apply_ee_runtime_patches  # noqa: F401
 apply_ee_runtime_patches()
 
 logger = logging.getLogger(__name__)
@@ -1098,7 +1095,6 @@ def _mask_sentinel2_scene(image: ee.Image, cloud_prob_max: int) -> ee.Image:
 
 
 # --- NDVI & SCL helpers (strict) --------------------------------------------
-@debug_wrap
 def apply_s2_cloud_mask(img: ee.Image) -> ee.Image:
     # Keep vegetation/bare/water; strict baseline
     scl = img.select("SCL")
@@ -1106,7 +1102,6 @@ def apply_s2_cloud_mask(img: ee.Image) -> ee.Image:
     return img.updateMask(keep)
 
 
-@debug_wrap
 def monthly_ndvi_composite(aoi, start, end) -> ee.Image:
     col = (
         ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
@@ -1120,7 +1115,6 @@ def monthly_ndvi_composite(aoi, start, end) -> ee.Image:
     return monthly.updateMask(monthly.mask())
 
 
-@debug_wrap
 def build_monthly_ndvi_collection(
     aoi,
     months: list[str],
@@ -2271,7 +2265,6 @@ def _build_percentile_zones(
 
 
 # --- Robust quantile breaks with self-healing --------------------------------
-@debug_wrap
 def robust_quantile_breaks(
     ndvi_img: ee.Image,
     aoi,
@@ -2728,7 +2721,6 @@ def _train_weka_kmeans_classifier(
     return ee.Clusterer.wekaKMeans(n_classes).train(training)
 
 
-@debug_wrap
 def _build_ndvi_kmeans_zones(
     *,
     ndvi_images: Sequence[ee.Image] | ee.ImageCollection,

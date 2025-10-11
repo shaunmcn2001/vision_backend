@@ -8,10 +8,6 @@ from typing import Any
 
 try:  # pragma: no cover - optional dependency for unit tests
     import ee  # type: ignore
-    from app.services.ee_patches import apply_ee_runtime_patches
-    from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
-
-    apply_ee_runtime_patches()
 except Exception:  # pragma: no cover - allow running without ee installed
     ee = None  # type: ignore[assignment]
 

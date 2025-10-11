@@ -1,12 +1,9 @@
 # services/backend/app/services/zones_core.py
 from __future__ import annotations
 import ee
-from app.services.ee_patches import apply_ee_runtime_patches
-from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
 from .ndvi_helpers import normalize_ndvi_band
 from .stability_mask import stability_mask_from_cv
-
-
+from app.services.ee_patches import apply_ee_runtime_patches  # noqa: F401
 apply_ee_runtime_patches()
 
 
@@ -19,7 +16,6 @@ __all__ = [
 ]
 
 
-@debug_wrap
 def std_band(img: ee.Image) -> ee.Image:
     """
     Ensure a band named 'NDVI_stdDev' exists for CV.
@@ -43,7 +39,6 @@ def std_band(img: ee.Image) -> ee.Image:
 # --- Coverage ---
 
 
-@debug_wrap
 def coverage_ratio(
     img: ee.Image, region: ee.Geometry, scale=10, tile_scale=4
 ) -> ee.Number:
@@ -64,7 +59,6 @@ def coverage_ratio(
 # --- NDVI stats stack ---
 
 
-@debug_wrap
 def stats_stack(ndvi_ic: ee.ImageCollection) -> ee.Image:
     """
     Builds mean/stdDev/CV bands with consistent names:

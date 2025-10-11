@@ -6,8 +6,6 @@ import urllib.error
 import urllib.request
 
 import ee
-from app.services.ee_patches import apply_ee_runtime_patches
-from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
 from ee.ee_exception import EEException
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -18,9 +16,6 @@ from app.services.image_stats import temporal_stats
 from app.services.indices import UnsupportedIndexError, resolve_index
 from app.services.tiles import init_ee
 from app.utils.shapefile import shapefile_zip_to_geojson
-
-
-apply_ee_runtime_patches()
 
 
 DEFAULT_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"

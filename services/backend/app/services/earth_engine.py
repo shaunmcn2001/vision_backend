@@ -3,10 +3,6 @@ import os
 
 import ee
 from functools import lru_cache
-from app.services.ee_patches import apply_ee_runtime_patches
-from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
-
-apply_ee_runtime_patches()
 
 
 @lru_cache(maxsize=1)
