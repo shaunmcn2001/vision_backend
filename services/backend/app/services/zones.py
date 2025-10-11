@@ -240,7 +240,7 @@ class ZoneArtifacts:
 
 @dataclass(frozen=True)
 class ImageExportResult:
-    """Result of staging an image locally while queueing an EE export task."""
+    """Result of downloading an EE image to a local path."""
 
     path: Path
     task: ee.batch.Task | None = None
@@ -334,29 +334,10 @@ def _download_image_to_path(
     image: ee.Image, geometry: ee.Geometry, target: Path
 ) -> ImageExportResult:
     region_coords = _geometry_region(geometry)
-    ee_region = ee.Geometry.Polygon(region_coords)
     sanitized_name = sanitize_name(target.stem or "export")
-    description = f"zones_{sanitized_name}"[:100]
-    folder = os.getenv("GEE_DRIVE_FOLDER", "Sentinel2_Zones")
-
-    task: ee.batch.Task | None = None
-    try:
-        task = ee.batch.Export.image.toDrive(
-            image=image,
-            description=description,
-            folder=folder,
-            fileNamePrefix=sanitized_name,
-            region=ee_region,
-            scale=DEFAULT_SCALE,
-            crs=DEFAULT_EXPORT_CRS,
-            fileFormat="GeoTIFF",
-            maxPixels=gee.MAX_PIXELS,
-            filePerBand=False,
-        )
-        task.start()
-    except Exception:  # pragma: no cover - diagnostic logging
-        logger.exception("Failed to start Drive export for %s", sanitized_name)
-        task = None
+    logger.debug(
+        "zones:download starting direct download sanitized_name=%s", sanitized_name
+    )
 
     params = {
         "scale": DEFAULT_SCALE,
@@ -383,7 +364,8 @@ def _download_image_to_path(
     else:
         with target.open("wb") as output:
             output.write(payload)
-    return ImageExportResult(path=target, task=task)
+    logger.debug("zones:download completed sanitized_name=%s", sanitized_name)
+    return ImageExportResult(path=target, task=None)
 
 
 def _majority_filter(data: np.ndarray, radius: int) -> np.ndarray:
