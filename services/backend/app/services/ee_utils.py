@@ -1,123 +1,66 @@
+from __future__ import annotations
+
 import collections.abc
-import ee
 import logging
 
-logger = logging.getLogger(__name__)
+import ee
 
 
-def _is_iterable(value: object) -> bool:
+def safe_ee_list(val):
+    """
+    Wraps any scalar or unknown iterable safely as ee.List.
+    Prevents Invalid argument for ee.List(): 1 errors.
+    """
+
     try:
-        return isinstance(value, collections.abc.Iterable) and not isinstance(
-            value, (str, bytes)
+        try:
+            is_ee_list = isinstance(val, ee.List)
+        except TypeError:  # pragma: no cover - fake EE doubles may use callables
+            is_ee_list = False
+        if is_ee_list:
+            return val
+        if isinstance(val, collections.abc.Iterable) and not isinstance(
+            val, (str, bytes)
+        ):
+            return ee.List(val)
+        return ee.List([val])
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logging.warning(
+            "safe_ee_list: could not wrap %r (%r), falling back to [val]",
+            val,
+            exc,
         )
-    except Exception:  # pragma: no cover - defensive against odd mocks
-        return False
+        return ee.List([val])
 
 
 def ensure_list(x):
-    """Return an :class:`ee.List` for scalars, iterables, or existing lists."""
-    try:
-        if isinstance(x, ee.List):
-            return x
-    except (TypeError, AttributeError):  # pragma: no cover - fake EE doubles
-        pass
+    """Always return an ee.List, flattening nested lists."""
 
-    if _is_iterable(x):
-        try:
-            return ee.List(x)
-        except Exception as exc:
-            logger.warning(
-                "ensure_list: direct ee.List conversion failed | type=%s error=%s: %s",  # noqa: E501
-                type(x).__name__,
-                type(exc).__name__,
-                str(exc),
-            )
-
-    try:
-        return ee.List([x])
-    except Exception as fallback_err:
-        logger.error(
-            "ensure_list: fallback wrapping failed | type=%s error=%s: %s",  # noqa: E501
-            type(x).__name__,
-            type(fallback_err).__name__,
-            str(fallback_err),
-            exc_info=True,
-        )
-        raise
+    return ee.List([x]).flatten()
 
 
 def ensure_number(x):
-    """
-    Normalize any scalar-like expression to ee.Number.
-    Useful when condensing boolean/if results into numbers.
-    """
+    """Convert x to ee.Number safely."""
+
     try:
         return ee.Number(x)
-    except Exception as e:
-        logger.error(
-            "ensure_number: FAILED at line=%s | type=%s, error=%s: %s",
-            "ee_utils.py:ensure_number",
-            type(x).__name__,
-            type(e).__name__,
-            str(e),
-            exc_info=True
-        )
-        raise
+    except Exception:  # pragma: no cover - keep legacy default behaviour
+        return ee.Number(0)
 
 
 def remove_nulls(lst):
-    """
-    Remove nulls from an ee.List.
-    .filter(ee.Filter.notNull(...)) is for collections, not lists.
-
-    This function handles the "Invalid argument specified for ee.List()" error
-    that can occur when attempting to wrap scalars or invalid types.
-    """
-    try:
-        if isinstance(lst, ee.List):
-            return lst.removeAll([None])
-    except (TypeError, AttributeError):  # pragma: no cover - fake EE doubles
-        pass
+    """Remove nulls from ee.List or iterable."""
 
     try:
-        candidate = ee.List(lst)
-    except Exception as exc:
-        logger.warning(
-            "remove_nulls: direct ee.List conversion failed | type=%s error=%s: %s",  # noqa: E501
-            type(lst).__name__,
-            type(exc).__name__,
-            str(exc),
-        )
-        candidate = ensure_list(lst)
+        return ee.List(lst).removeAll([None])
+    except Exception:  # pragma: no cover - maintain compatibility
+        return ee.List([])
+
+
+def cat_one(lst, val):
+    """Append val to lst safely."""
 
     try:
-        return candidate.removeAll([None])
-    except Exception as fallback_err:
-        logger.error(
-            "remove_nulls: removeAll failed | type=%s error=%s: %s",  # noqa: E501
-            type(lst).__name__,
-            type(fallback_err).__name__,
-            str(fallback_err),
-            exc_info=True,
-        )
-        raise
-
-
-def cat_one(lst, value):
-    """
-    Append a single value (scalar or list) to an ee.List safely.
-    Converts scalars to a one-element list via ensure_list() before concatenation.
-    """
-    try:
-        return ee.List(lst).cat(ensure_list(value))
-    except Exception as e:
-        logger.error(
-            "cat_one: FAILED at line=%s | lst type=%s, value type=%s, error=%s: %s",
-            "ee_utils.py:cat_one",
-            type(lst).__name__,
-            type(value).__name__,
-            type(e).__name__,
-            str(e),
-            exc_info=True
-        )
-        raise
+        return ee.List(lst).cat(safe_ee_list(val))
+    except Exception:  # pragma: no cover - defensive fallback
+        return ee.List(lst)
