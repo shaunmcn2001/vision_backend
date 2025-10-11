@@ -25,4 +25,4 @@ def remove_nulls(lst):
 
 def cat_one(lst, value):
     """Append a single value (scalar or list) to an ee.List safely."""
-    return ee.List(lst).cat(ensure_list(value))
+    return ee.List(lst).cat(ee.List([value]))
