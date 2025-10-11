@@ -15,3 +15,4 @@ fastkml>=0.12
 python-multipart>=0.0.9
 requests
 scikit-learn
+fiona==1.9.6
