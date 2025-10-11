@@ -3,6 +3,8 @@ from __future__ import annotations
 import ee
 from .ndvi_helpers import normalize_ndvi_band
 from .stability_mask import stability_mask_from_cv
+from app.services.ee_patches import apply_ee_runtime_patches  # noqa: F401
+apply_ee_runtime_patches()
 
 
 __all__ = [
