@@ -11,8 +11,6 @@ from datetime import date
 from typing import Any, Dict, Mapping, Optional
 
 import ee
-from app.services.ee_patches import apply_ee_runtime_patches
-from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
 from ee import ServiceAccountCredentials
 
 from app.services.gcs import (
@@ -24,8 +22,7 @@ from app.services.gcs import (
 )
 from app.services.image_stats import temporal_stats
 from app.services.indices import normalize_index_code, resolve_index
-
-
+from app.services.ee_patches import apply_ee_runtime_patches  # noqa: F401
 apply_ee_runtime_patches()
 
 
@@ -375,14 +372,12 @@ def _find_or_write_keyfile() -> str:
     )
 
 
-@debug_wrap
 def init_ee():
     keyfile = _find_or_write_keyfile()
     creds = ServiceAccountCredentials(SA_EMAIL, keyfile)
     ee.Initialize(credentials=creds, opt_url="https://earthengine.googleapis.com")
 
 
-@debug_wrap
 def compute_monthly_index(
     geometry: dict,
     *,
@@ -542,7 +537,6 @@ def compute_monthly_index(
     }
 
 
-@debug_wrap
 def compute_monthly_index_for_year(
     geometry: dict,
     year: int,

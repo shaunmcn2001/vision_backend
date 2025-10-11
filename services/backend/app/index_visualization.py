@@ -6,10 +6,6 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, Tuple
 
 import ee
-from app.services.ee_patches import apply_ee_runtime_patches
-from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
-
-apply_ee_runtime_patches()
 
 
 @dataclass(frozen=True)
