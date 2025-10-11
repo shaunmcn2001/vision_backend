@@ -3,10 +3,7 @@ from typing import Any, Literal, get_args
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-import ee
-import os
-from app.services.ee_patches import apply_ee_runtime_patches
-from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
+import ee, os
 from app.services.gcs import download_json, exists, sign_url
 from app.services.indices import SUPPORTED_INDICES
 from app.services.ndvi import (
@@ -22,9 +19,6 @@ from app.services.tiles import init_ee
 from .export import router as export_router
 
 router = APIRouter()
-
-
-apply_ee_runtime_patches()
 
 
 # Simple ping endpoint

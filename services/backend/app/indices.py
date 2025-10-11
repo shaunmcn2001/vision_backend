@@ -11,10 +11,6 @@ from typing import Callable, Dict, Iterable, Mapping
 import math
 
 import ee
-from app.services.ee_patches import apply_ee_runtime_patches
-from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
-
-apply_ee_runtime_patches()
 
 TEN_METER_BANDS = {"B2", "B3", "B4", "B8"}
 TWENTY_METER_BANDS = {"B5", "B6", "B7", "B8A", "B11", "B12"}

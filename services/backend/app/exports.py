@@ -28,8 +28,6 @@ from typing import (
 )
 
 import ee
-from app.services.ee_patches import apply_ee_runtime_patches
-from app.services.ee_debug import debug_trace, debug_wrap  # noqa: F401
 import requests
 import shapefile
 from google.cloud import storage
@@ -38,8 +36,6 @@ from app import gee, index_visualization, indices
 
 
 logger = logging.getLogger(__name__)
-
-apply_ee_runtime_patches()
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.services.zones import ZoneArtifacts
