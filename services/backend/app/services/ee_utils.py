@@ -2,14 +2,10 @@
 from __future__ import annotations
 import ee
 
-def ensure_list(x):
-    """
-    EE-safe: return an ee.List whether x is scalar or already a list.
-    Implementation: wrap then flatten.
-      - If x is ee.List -> [x].flatten() == x
-      - If x is scalar (ee.Number/String/bool/int/float) -> [x]
-    """
-    return ee.List([x]).flatten()
+def ensure_list(value):
+    obj_type = ee.Algorithms.ObjectType(value)
+    is_list = obj_type.eq('List')
+    return ee.Algorithms.If(is_list, value, ee.List([value]))
 
 def ensure_number(x):
     """Normalize expression/scalar to ee.Number."""
