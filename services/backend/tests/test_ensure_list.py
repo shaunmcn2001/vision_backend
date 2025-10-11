@@ -27,6 +27,12 @@ def test_ensure_list_scalar_and_list():
     assert ee.List(ensure_list(ee.List([1, 2, 3]))).size().getInfo() == 3
 
 
+def test_ensure_list_handles_if_scalar():
+    conditional = ee.Algorithms.If(ee.Number(1).eq(1), 1, 0)
+    lst = ensure_list(conditional)
+    assert ee.List(lst).size().getInfo() == 1
+
+
 def test_remove_nulls():
     y = remove_nulls(ee.List([1, None, 2, None, 3]))
     assert ee.List(y).size().getInfo() == 3

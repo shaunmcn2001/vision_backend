@@ -6,6 +6,9 @@ import logging
 import ee
 
 
+logger = logging.getLogger(__name__)
+
+
 def safe_ee_list(val):
     """
     Wraps any scalar or unknown iterable safely as ee.List.
@@ -25,7 +28,7 @@ def safe_ee_list(val):
             return ee.List(val)
         return ee.List([val])
     except Exception as exc:  # pragma: no cover - defensive guard
-        logging.warning(
+        logger.warning(
             "safe_ee_list: could not wrap %r (%r), falling back to [val]",
             val,
             exc,
@@ -41,12 +44,17 @@ def ensure_list(x):
     - If x is scalar (ee.Number/String/bool/int/float) -> [x]
     """
 
-    wrapped = ee.List([x])
+    wrapped = safe_ee_list(x)
     flatten = getattr(wrapped, "flatten", None)
     if callable(flatten):
-        return flatten()
-    if isinstance(x, (list, tuple)):
-        return ee.List(x)
+        try:
+            return flatten()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning(
+                "ensure_list: flatten() failed for %r (%r); returning wrapped list",
+                x,
+                exc,
+            )
     return wrapped
 
 
@@ -59,10 +67,10 @@ def ensure_number(x):
 def remove_nulls(lst):
     """Remove nulls from an ee.List (Filter.notNull is for collections)."""
 
-    return ee.List(lst).removeAll([None])
+    return safe_ee_list(lst).removeAll([None])
 
 
 def cat_one(lst, value):
     """Append a single value (scalar or list) to an ee.List safely."""
 
-    return ee.List(lst).cat(ensure_list(value))
+    return ensure_list(lst).cat(ensure_list(value))
