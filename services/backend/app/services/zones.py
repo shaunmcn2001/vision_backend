@@ -21,6 +21,15 @@ from typing import Any
 from urllib.request import urlopen
 
 import ee
+from app.services import ee_utils as ee_utils_module
+from app.services.ee_utils import (
+    cat_one as _cat_one,
+    ensure_list as _ensure_list,
+    ensure_number as _ensure_number,
+    remove_nulls as _remove_nulls,
+)
+from app.services.ndvi_helpers import normalize_ndvi_band
+from app.services.stability_mask import stability_mask_from_cv
 import numpy as np
 import rasterio
 import shapefile
@@ -32,19 +41,7 @@ from sklearn.cluster import KMeans
 
 from app import gee
 from app.exports import sanitize_name
-from . import ee_utils
-from .ee_utils import (
-    cat_one as _cat_one,
-    ensure_list as _ensure_list,
-    ensure_number as _ensure_number,
-    remove_nulls as _remove_nulls,
-)
-from .zones_core import (
-    coverage_ratio,
-    normalize_ndvi_band,
-    stability_mask_from_cv,
-    stats_stack,
-)
+from .zones_core import coverage_ratio, stats_stack
 from app.services.image_stats import temporal_stats
 from app.utils.diag import Guard, PipelineError
 from app.utils.geometry import area_ha
@@ -79,77 +76,27 @@ def _allow_init_failure() -> bool:
 
 
 def ensure_list(value):
-    ee_utils.ee = ee
+    ee_utils_module.ee = ee
     return _ensure_list(value)
 
 
-def safe_ee_list(value):
-    ee_utils.ee = ee
-    try:
-        return _ensure_list(value)
-    except AttributeError:
-        if hasattr(value, "iterate"):
-            return value
-
-        class _FallbackList(list):
-            def iterate(self, func, first):
-                result = first
-                for item in self:
-                    result = func(result, item)
-                return result
-
-            def map(self, func):
-                return _FallbackList(func(item) for item in self)
-
-            def sort(self, key=None):
-                if key is None:
-                    return _FallbackList(sorted(self))
-                if callable(key):
-                    return _FallbackList(sorted(self, key=key))
-                if isinstance(key, int):
-                    return _FallbackList(
-                        sorted(
-                            self,
-                            key=lambda item: item[key]
-                            if isinstance(item, (list, tuple))
-                            else item,
-                        )
-                    )
-                return _FallbackList(sorted(self))
-
-            def get(self, index):
-                return self[index]
-
-            def size(self):
-                return len(self)
-
-            def getInfo(self):
-                return list(self)
-
-            def contains(self, value):
-                return value in self
-
-            def cat(self, items):
-                return _FallbackList(self + list(items))
-
-        if isinstance(value, (list, tuple)):
-            return _FallbackList(value)
-        return _FallbackList([value])
-
-
 def remove_nulls(lst):
-    ee_utils.ee = ee
+    ee_utils_module.ee = ee
     return _remove_nulls(lst)
 
 
 def ensure_number(value):
-    ee_utils.ee = ee
+    ee_utils_module.ee = ee
     return _ensure_number(value)
 
 
 def cat_one(lst, value):
-    ee_utils.ee = ee
+    ee_utils_module.ee = ee
     return _cat_one(lst, value)
+
+
+def safe_ee_list(value):
+    return ensure_list(value)
 
 
 def _to_ee_geometry(geojson: dict) -> ee.Geometry:
@@ -187,9 +134,7 @@ def _parse_bool_env(value: str | None, default: bool) -> bool:
 APPLY_STABILITY = _parse_bool_env(os.getenv("APPLY_STABILITY"), True)
 
 
-def _normalize_choice(
-    value: str | None, *, default: str, allowed: set[str]
-) -> str:
+def _normalize_choice(value: str | None, *, default: str, allowed: set[str]) -> str:
     """Return a normalised lower-case string drawn from *allowed* choices."""
 
     if value is None:
@@ -1399,23 +1344,7 @@ def _ndvi_from(img: ee.Image) -> ee.Image:
 
 
 def _ndvi_1band(img: ee.Image) -> ee.Image:
-    # Accepts images that might have 'NDVI' or 'NDVI_mean'; returns single band named 'NDVI'
-    bnames = img.bandNames()
-    has_ndvi = bnames.contains("NDVI")
-    has_ndvi_mean = bnames.contains("NDVI_mean")
-    img2 = ee.Image(
-        ee.Algorithms.If(
-            has_ndvi,
-            img.select(["NDVI"]).rename(["NDVI"]),
-            ee.Algorithms.If(
-                has_ndvi_mean,
-                img.select(["NDVI_mean"]).rename(["NDVI"]),
-                img,  # fallback; will be caught by guards if wrong
-            ),
-        )
-    )
-    # Ensure single-band
-    return ee.Image(img2).select(["NDVI"]).rename(["NDVI"])
+    return normalize_ndvi_band(img)
 
 
 def _ndvi_std(img: ee.Image) -> ee.Image:
@@ -1626,73 +1555,20 @@ def _stability_mask(
     min_survival_ratio: float,
     scale: int,
 ) -> ee.Image:
-    total = ee.Number(
-        cv_image.reduceRegion(
-            reducer=ee.Reducer.count(),
-            geometry=geometry,
-            scale=scale,
-            bestEffort=True,
-            tileScale=4,
-            maxPixels=gee.MAX_PIXELS,
-        )
-        .values()
-        .get(0)
-    )
-
     logger.debug(
         "Stability thresholds (type=%s): %s",
         type(thresholds).__name__,
         thresholds,
     )
-    threshold_list = safe_ee_list([float(t) for t in thresholds])
-    min_ratio = ee.Number(min_survival_ratio)
-
-    def _mask_for_threshold(value):
-        t = ee.Number(value)
-        raw_mask = cv_image.lte(t)
-        masked = ee.Image(raw_mask).selfMask()
-        surviving = ee.Number(
-            masked.reduceRegion(
-                reducer=ee.Reducer.count(),
-                geometry=geometry,
-                scale=scale,
-                bestEffort=True,
-                tileScale=4,
-                maxPixels=gee.MAX_PIXELS,
-            )
-            .values()
-            .get(0)
-        )
-        ratio = surviving.divide(total.max(1))
-        return ee.Image(
-            ee.Algorithms.If(
-                ratio.gte(min_ratio),
-                masked,
-                ee.Image(0).selfMask(),
-            )
-        )
-
-    masks = threshold_list.map(_mask_for_threshold)
-    combined = ee.ImageCollection.fromImages(masks).max()
-
-    combined_masked = ee.Image(combined).selfMask()
-    combined_count = ee.Number(
-        combined_masked.reduceRegion(
-            reducer=ee.Reducer.count(),
-            geometry=geometry,
-            scale=scale,
-            bestEffort=True,
-            tileScale=4,
-            maxPixels=gee.MAX_PIXELS,
-        )
-        .values()
-        .get(0)
+    threshold_list = ensure_list([float(t) for t in thresholds])
+    return stability_mask_from_cv(
+        cv_image,
+        geometry,
+        thresholds=threshold_list,
+        scale=scale,
+        tile_scale=4,
+        min_survival_ratio=min_survival_ratio,
     )
-
-    pass_through = ee.Image(1)
-    return ee.Image(
-        ee.Algorithms.If(combined_count.lte(0), pass_through, combined_masked)
-    ).selfMask()
 
 
 def _pixel_count(
@@ -2552,7 +2428,7 @@ def robust_quantile_breaks(
         if n_classes < 2:
             logger.debug("_hist_quantiles: n_classes <2, returning empty list")
             return ee.List([])
-        
+
         # 512 bins across observed range
         hist = img.reduceRegion(
             reducer=ee.Reducer.fixedHistogram(vmin, vmax, 512),
@@ -2588,7 +2464,8 @@ def robust_quantile_breaks(
     return safe_ee_list(
         ee.Algorithms.If(uniq2.size().gte(n_classes - 1), uniq2, ee.List([]))
     )
-    
+
+
 def kmeans_classify(
     ndvi_img: ee.Image,
     aoi_geom,
@@ -3554,7 +3431,9 @@ def _prepare_selected_period_artifacts(
         monthly_norm = monthly_ndvi_collection.map(normalize_ndvi_band)
         stats_image = stats_stack(monthly_norm).updateMask(common_mask)
         ndvi_cv = stats_image.select("NDVI_cv").updateMask(common_mask)
-        thresholds = ee.List(ensure_list(cv_mask_threshold)).cat(ee.List(STABILITY_THRESHOLD_SEQUENCE))
+        thresholds = ensure_list(cv_mask_threshold).cat(
+            ensure_list(STABILITY_THRESHOLD_SEQUENCE)
+        )
         stability_candidate = stability_mask_from_cv(
             ndvi_cv,
             stable_region,
