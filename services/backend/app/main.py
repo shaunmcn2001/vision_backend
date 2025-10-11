@@ -12,11 +12,6 @@ from app.api.s2_indices import router as s2_indices_router
 from app.api.zones import router as zones_router
 from app import gee
 import os
-from app.services.ee_patches import apply_ee_runtime_patches
-from app.services.ee_debug import debug_trace  # noqa: F401
-
-apply_ee_runtime_patches()
-print("[Init] EE runtime patches + debug tracing active")
 
 app = FastAPI(
     title="Agri NDVI Backend", version="0.1.0", docs_url="/docs", redoc_url="/redoc"
