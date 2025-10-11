@@ -45,3 +45,14 @@ The zones pipeline occasionally failed when scalars (e.g., `1`, `ee.Number`, or 
 - Tests:
   - pytest -q passes locally.
   - Zones run completes without ee.List() argument errors.
+
+## 2025-10-11 – Remove legacy GEE zones creation; PyQGIS only
+- **Removed old GEE-based zones vectorization**: Eliminated percentile thresholds + GEE polygonization (reduceToVectors).
+- **Zones are now created with PyQGIS** from the NDVI GeoTIFF: k-means/quantiles → polygonize → MMU → smooth/simplify → export.
+- **API fields removed**: `method` (legacy), `palette`/`thresholds` tied to GEE vectorization outputs.
+- **API fields kept/added**: `n_classes`, `classifier` ("kmeans" or "quantiles"), `mmu_ha`, `smooth_radius_m`, `simplify_tol_m`, `export_vector_format` ("gpkg", "geojson", "shp").
+- **Response now includes**: `paths.zones_vector` (gpkg/geojson/shp path), `metadata.zones_pyqgis` (PyQGIS metadata).
+- **NDVI production (Earth Engine)** remains unchanged; only vectorization moved to PyQGIS.
+- **Removed functions**: `_prepare_vectors`, `_dissolve_vectors`, `_simplify_vectors`, `_build_percentile_zones`, `_classify_by_percentiles`.
+- **Runtime dependency**: QGIS/GDAL must be available on the server/container (QGIS_PREFIX_PATH etc.). PyQGIS is not pip-installable; it relies on system-installed QGIS.
+- **Tests**: Updated to remove assertions for legacy `palette`/`percentile_thresholds`. Added `test_zones_pyqgis.py` for PyQGIS flow (requires QGIS or mocking).

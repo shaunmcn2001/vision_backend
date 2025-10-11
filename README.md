@@ -91,13 +91,22 @@ Responses:
 * `GET  /export/s2/indices/{job_id}/download` → ZIP stream when
   `export_target=zip`, or the same JSON status document for Drive/GCS jobs.
 
-### `/zones/production` – production zone exports
+### `/zones/production` – production zone exports (PyQGIS-only)
 
 Use `POST /zones/production` to build NDVI-based production zones for a period
-of months. The endpoint accepts either an explicit `months[]` array or a
+of months using PyQGIS classification and vectorization. The backend:
+
+1. **Generates mean NDVI raster** via Earth Engine for the selected months
+2. **Classifies zones with PyQGIS** using k-means or quantiles on the local NDVI GeoTIFF
+3. **Polygonizes, applies MMU, simplifies** using QGIS/GDAL tools
+4. **Exports zones** as GeoPackage, GeoJSON, or Shapefile
+
+**Runtime dependency**: QGIS must be installed on the server/container (e.g., `qgis/qgis:release-3_34` Docker image). PyQGIS is not pip-installable.
+
+The endpoint accepts either an explicit `months[]` array or a
 `start_month`/`end_month` range which is expanded server-side:
 
-*Explicit month selection*
+*Example with explicit month selection and PyQGIS options*
 
 ```bash
 curl -X POST http://localhost:8000/api/zones/production \
@@ -107,16 +116,27 @@ curl -X POST http://localhost:8000/api/zones/production \
         "aoi_name": "Lot1_RP12345",
         "months": ["2024-03", "2024-04", "2024-05"],
         "n_classes": 5,
-        "cv_mask_threshold": 0.25,
+        "classifier": "kmeans",
         "mmu_ha": 3,
         "smooth_radius_m": 15,
-        "open_radius_m": 10,
-        "close_radius_m": 10,
         "simplify_tol_m": 5,
-        "simplify_buffer_m": 0,
+        "export_vector_format": "gpkg",
         "export_target": "zip"
       }'
 ```
+
+**PyQGIS-specific fields:**
+
+- `classifier`: `"kmeans"` or `"quantiles"` (default: `"kmeans"`)
+- `export_vector_format`: `"gpkg"`, `"geojson"`, or `"shp"` (default: `"gpkg"`)
+- `mmu_ha`: Minimum Mapping Unit in hectares (filters small polygons)
+- `smooth_radius_m`: QGIS smoothing radius in meters (0 to disable)
+- `simplify_tol_m`: Douglas-Peucker simplification tolerance in meters (0 to disable)
+
+**Legacy fields removed:**
+
+- `method` (replaced by `classifier`)
+- `palette` and `thresholds` (GEE percentile outputs, no longer used)
 
 *Month range expansion*
 
@@ -128,9 +148,8 @@ curl -X POST http://localhost:8000/api/zones/production \
         "aoi_name": "Lot1_RP12345",
         "start_month": "2024-01",
         "end_month": "2024-04",
-        "smooth_radius_m": 15,
-        "open_radius_m": 10,
-        "close_radius_m": 10,
+        "classifier": "quantiles",
+        "mmu_ha": 2,
         "simplify_tol_m": 5,
         "simplify_buffer_m": 0,
         "export_target": "gcs",

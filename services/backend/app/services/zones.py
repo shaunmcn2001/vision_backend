@@ -261,8 +261,7 @@ ZONE_PALETTE: tuple[str, ...] = (
 STABILITY_THRESHOLD_SEQUENCE = [0.5, 1.0, 1.5, 2.0]
 MIN_STABILITY_SURVIVAL_RATIO = 0.0
 
-NDVI_PERCENTILE_MIN = 0.0
-NDVI_PERCENTILE_MAX = 0.6
+# TODO removed legacy: NDVI_PERCENTILE_MIN/MAX were used for GEE percentile classification
 
 NDVI_MASK_EMPTY_ERROR = (
     "No NDVI pixels were available for the selected period. Try expanding the date range "
