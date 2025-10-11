@@ -2303,6 +2303,11 @@ def robust_quantile_breaks(
         "robust_quantile_breaks: starting with n_classes=%d, scale=%d", n_classes, scale
     )
 
+    # Guard: Early return for invalid n_classes
+    if n_classes <= 1:
+        logger.debug("robust_quantile_breaks: n_classes <=1, returning empty list")
+        return ee.List([])
+
     region = ee.FeatureCollection(aoi).geometry().buffer(5).bounds(1)
     # ensure a stable band name for reducer outputs
     base_band = ndvi_img.select([0]).rename("NDVI")
@@ -2336,9 +2341,7 @@ def robust_quantile_breaks(
             exc_info=True,
         )
         raise
-        if n_classes <= 1:
-            return ee.List([])  # Early return for invalid n_classes to avoid scalar issues
-  
+
     # de-dup & enforce increasing using ee logic
     def _uniq_sort(values):
         try:
@@ -2444,8 +2447,11 @@ def robust_quantile_breaks(
         )
 
     def _hist_quantiles(img, region, vmin, vmax, n_classes, scale, tile_scale):
-    if n_classes < 2:
-        return ee.List([])
+        # Guard: Early return for small n_classes
+        if n_classes < 2:
+            logger.debug("_hist_quantiles: n_classes <2, returning empty list")
+            return ee.List([])
+        
         # 512 bins across observed range
         hist = img.reduceRegion(
             reducer=ee.Reducer.fixedHistogram(vmin, vmax, 512),
@@ -2481,8 +2487,7 @@ def robust_quantile_breaks(
     return safe_ee_list(
         ee.Algorithms.If(uniq2.size().gte(n_classes - 1), uniq2, ee.List([]))
     )
-
-
+    
 def kmeans_classify(
     ndvi_img: ee.Image,
     aoi_geom,
