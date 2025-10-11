@@ -209,11 +209,9 @@ def _normalize_mask_mode(mask_mode: str | None) -> str:
 
 
 def _normalize_zone_method(method: str | None) -> str:
-    return _normalize_choice(
-        method,
-        default=DEFAULT_METHOD,
-        allowed={"ndvi_kmeans", "ndvi_percentiles", "multiindex_kmeans"},
-    )
+    # PyQGIS-only: always use kmeans for NDVI raster generation
+    # Actual classification (kmeans/quantiles) is done by PyQGIS
+    return "ndvi_kmeans"
 
 
 def _normalize_export_target(target: str | None) -> str:
@@ -1252,6 +1250,10 @@ def _vectorize_zones(*_args, **_kwargs):  # pragma: no cover - compatibility shi
     raise NotImplementedError("_vectorize_zones is not implemented in this module")
 
 
+# TODO removed legacy: GEE-based vectorization functions (_prepare_vectors, _dissolve_vectors, _simplify_vectors)
+# These used ee.Image.reduceToVectors which is replaced by PyQGIS polygonization.
+
+
 def _zonal_statistics(*_args, **_kwargs):  # pragma: no cover - compatibility shim
     raise NotImplementedError("_zonal_statistics is not implemented in this module")
 
@@ -1822,101 +1824,8 @@ def _percentile_thresholds(
     return thresholds
 
 
-def _classify_by_percentiles(
-    image: ee.Image, geometry: ee.Geometry, n_classes: int
-) -> tuple[ee.Image, list[float]]:
-    """
-    Classify an NDVI image into percentile-based zones.
-
-    Steps:
-    - ReduceRegion computes percentile thresholds (n_classes - 1 cuts).
-    - _percentile_thresholds interprets both bare 'cut_XX' and band-prefixed keys.
-    - Classify pixels by counting how many thresholds their value exceeds.
-    """
-
-    # Ensure image has a known band name
-    band_name_obj = ee.String(image.bandNames().get(0))
-    image = image.rename(band_name_obj)
-    if hasattr(band_name_obj, "getInfo"):
-        band_label = band_name_obj.getInfo()
-    else:
-        band_label = str(band_name_obj)
-
-    # Percentile cuts to request
-    step = 100 / n_classes
-    percentile_sequence = [step * i for i in range(1, n_classes)]
-    logger.debug(
-        "Percentile sequence (type=%s): %s",
-        type(percentile_sequence).__name__,
-        percentile_sequence,
-    )
-    pct_breaks = safe_ee_list(percentile_sequence)
-    output_names = [f"cut_{i:02d}" for i in range(1, n_classes)]
-
-    # Compute percentiles for this band
-    reducer_dict = image.reduceRegion(
-        reducer=ee.Reducer.percentile(pct_breaks, outputNames=output_names),
-        geometry=geometry,
-        scale=DEFAULT_SCALE,
-        bestEffort=True,
-        tileScale=4,
-        maxPixels=gee.MAX_PIXELS,
-    )
-
-    # Convert reducer result into Python dict (safe)
-    reducer_info = reducer_dict.getInfo() or {}
-
-    # Extract thresholds with robust handling of bare/prefixed keys
-    thresholds: list[float]
-    try:
-        thresholds = _percentile_thresholds(
-            reducer_info, percentile_sequence, band_label
-        )
-    except ValueError as exc:
-        raise ValueError(STABILITY_MASK_EMPTY_ERROR) from exc
-
-    adjusted_thresholds: list[float] = []
-    previous = -math.inf
-    for raw_value in thresholds:
-        try:
-            numeric = float(raw_value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Percentile thresholds must be numeric") from exc
-
-        if not math.isfinite(numeric):
-            raise ValueError("Percentile thresholds must be finite values")
-
-        if numeric <= previous:
-            nudged = math.nextafter(previous, math.inf)
-            if not math.isfinite(nudged) or nudged <= previous:
-                raise ValueError(
-                    "Unable to derive strictly increasing percentile thresholds"
-                )
-            numeric = nudged
-
-        adjusted_thresholds.append(numeric)
-        previous = numeric
-
-    thresholds = adjusted_thresholds
-    logger.debug(
-        "Adjusted percentile thresholds (type=%s): %s",
-        type(thresholds).__name__,
-        thresholds,
-    )
-
-    # Now classify pixels relative to thresholds
-    zero = image.multiply(0)
-
-    def _accumulate(current, threshold):
-        current_img = ee.Image(current)
-        t = ee.Number(threshold)
-        gt_band = image.gt(t)
-        return current_img.add(gt_band)
-
-    summed = safe_ee_list(thresholds).iterate(_accumulate, zero)
-    classified = ee.Image(summed).add(1).toInt()
-
-    return classified.rename("zone"), thresholds
+# TODO removed legacy: _classify_by_percentiles used for GEE-side percentile classification
+# PyQGIS now handles classification using k-means or quantiles locally.
 
 
 def _connected_component_area(classified: ee.Image, n_classes: int) -> ee.Image:
@@ -2178,81 +2087,8 @@ def _clean_zones(
         return image.clip(geometry)
 
 
-def _simplify_vectors(
-    vectors: ee.FeatureCollection, tolerance_m: float, buffer_m: float
-) -> ee.FeatureCollection:
-    def _simplify(feature: ee.Feature) -> ee.Feature:
-        geom = feature.geometry()
-        if tolerance_m > 0:
-            geom = geom.simplify(maxError=tolerance_m)
-        if buffer_m != 0:
-            geom = geom.buffer(buffer_m)
-        zone_value = ee.Number(feature.get("zone")).toInt()
-        area_m2 = geom.area(maxError=1)
-        area_ha_val = area_m2.divide(10_000)
-        return feature.setGeometry(geom).set(
-            {
-                "zone": zone_value,
-                "zone_id": zone_value,
-                "area_m2": area_m2,
-                "area_ha": area_ha_val,
-            }
-        )
-
-    return ee.FeatureCollection(vectors.map(_simplify))
-
-
-def _dissolve_vectors(
-    vectors: ee.FeatureCollection, *, min_hole_area_ha: float
-) -> ee.FeatureCollection:
-    histogram = ee.Dictionary(vectors.aggregate_histogram("zone"))
-    zone_ids = histogram.keys()
-    hole_area_m2 = ee.Number(min_hole_area_ha).multiply(10_000)
-
-    def _dissolve(zone_value: ee.ComputedObject) -> ee.Feature:
-        zone_num = ee.Number(zone_value)
-        zone_vectors = vectors.filter(ee.Filter.eq("zone", zone_num))
-        base_feature = ee.Feature(zone_vectors.first())
-        dissolved_geom = zone_vectors.geometry(maxError=1).dissolve()
-        cleaned_geom = ee.Geometry(
-            ee.Algorithms.If(
-                hole_area_m2.gt(0),
-                ee.Geometry(dissolved_geom).removeInteriorHoles(hole_area_m2),
-                ee.Geometry(dissolved_geom),
-            )
-        )
-        return base_feature.setGeometry(cleaned_geom).set(
-            {"zone": zone_num, "zone_id": zone_num}
-        )
-
-    return ee.FeatureCollection(zone_ids.map(_dissolve))
-
-
-def _prepare_vectors(
-    zone_image: ee.Image,
-    geometry: ee.Geometry,
-    *,
-    tolerance_m: float,
-    buffer_m: float,
-) -> ee.FeatureCollection:
-    vectors = zone_image.reduceToVectors(
-        geometry=geometry,
-        scale=20,
-        maxPixels=gee.MAX_PIXELS,
-        geometryType="polygon",
-        eightConnected=True,
-        labelProperty="zone",
-        reducer=ee.Reducer.first(),
-    )
-
-    def _set_zone(feature: ee.Feature) -> ee.Feature:
-        zone_value = ee.Number(feature.get("zone")).toInt()
-        return feature.set({"zone": zone_value, "zone_id": zone_value})
-
-    vectors = vectors.map(_set_zone)
-    vectors = _dissolve_vectors(vectors, min_hole_area_ha=MIN_HOLE_AREA_HA)
-
-    return _simplify_vectors(vectors, tolerance_m, buffer_m)
+# TODO removed legacy: GEE vectorization helpers (_simplify_vectors, _dissolve_vectors, _prepare_vectors)
+# These used ee.FeatureCollection operations which are replaced by PyQGIS GDAL polygonize + QGIS simplify.
 
 
 def _collect_stats_images(
@@ -2345,45 +2181,8 @@ def _add_zonal_stats(
     )
 
 
-def _build_percentile_zones(
-    *,
-    ndvi_stats: Mapping[str, ee.Image],
-    geometry: ee.Geometry,
-    n_classes: int,
-    smooth_radius_m: float,
-    open_radius_m: float,
-    close_radius_m: float,
-    min_mapping_unit_ha: float,
-) -> tuple[ee.Image, list[float]]:
-    # Cap NDVI for percentile breaks only (0..0.6)
-    pct_source = ndvi_stats["mean"].clamp(NDVI_PERCENTILE_MIN, NDVI_PERCENTILE_MAX)
-
-    # Robust thresholds: compute on mean mask (not stability) to avoid empty stats
-    thresholds_image = pct_source.updateMask(ndvi_stats["mean"].mask())
-    ranked_for_thresh, thresholds = _classify_by_percentiles(
-        thresholds_image, geometry, n_classes
-    )
-    # Now classify the full pct_source, then apply stability mask afterwards
-    ranked_full, _ = _classify_by_percentiles(pct_source, geometry, n_classes)
-    ranked = ranked_full.updateMask(ndvi_stats["stability"])
-
-    try:
-        percentile_thresholds = [float(value) for value in thresholds]
-    except (TypeError, ValueError) as exc:  # pragma: no cover
-        raise RuntimeError(
-            f"Failed to evaluate NDVI percentile thresholds: {exc}"
-        ) from exc
-
-    cleaned = _apply_cleanup(
-        ranked,
-        geometry,
-        n_classes=n_classes,
-        smooth_radius_m=smooth_radius_m,
-        open_radius_m=open_radius_m,
-        close_radius_m=close_radius_m,
-        min_mapping_unit_ha=min_mapping_unit_ha,
-    )
-    return cleaned.rename("zone"), percentile_thresholds
+# TODO removed legacy: _build_percentile_zones used GEE percentile-based zone classification
+# PyQGIS now handles percentile/quantile classification locally.
 
 
 # --- Robust quantile breaks with self-healing --------------------------------
@@ -3835,9 +3634,10 @@ def _prepare_selected_period_artifacts(
         elif not cond:
             raise PipelineError(code=code, msg=f"{code}: {msg}", hints=hints, ctx=ctx)
 
-    valid_methods = {"ndvi_kmeans", "ndvi_percentiles", "multiindex_kmeans"}
+    valid_methods = {"ndvi_kmeans"}  # PyQGIS-only: kmeans for NDVI generation
     if method not in valid_methods:
-        raise PipelineError("E_METHOD_UNKNOWN", f"Unknown method: {method}")
+        # Auto-correct to kmeans for PyQGIS flow
+        method = "ndvi_kmeans"
 
     if method == "ndvi_kmeans":
         masked_mean = _ndvi_1band(ee.Image(masked_mean))
@@ -4624,8 +4424,9 @@ def export_selected_period_zones(
     geometry = geometry or _resolve_geometry(aoi_geojson)
 
     method_selection = _normalize_zone_method(method)
-    if method_selection not in {"ndvi_percentiles", "multiindex_kmeans", "ndvi_kmeans"}:
-        raise ValueError("Unsupported method for production zones")
+    # PyQGIS-only: always use kmeans for NDVI raster generation
+    if method_selection != "ndvi_kmeans":
+        method_selection = "ndvi_kmeans"
 
     try:
         artifacts, metadata = _prepare_selected_period_artifacts(
