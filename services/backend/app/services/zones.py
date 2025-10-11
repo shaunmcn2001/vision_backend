@@ -2285,7 +2285,7 @@ def robust_quantile_breaks(
     # Guard: Early return for invalid n_classes
     if n_classes <= 1:
         logger.debug("robust_quantile_breaks: n_classes <=1, returning empty list")
-        return ee.List([])
+        return ensure_list([])
 
     region = ee.FeatureCollection(aoi).geometry().buffer(5).bounds(1)
     # ensure a stable band name for reducer outputs
@@ -2344,7 +2344,7 @@ def robust_quantile_breaks(
                 idx = ensure_number(idx)
                 prev_type = ee.String(ee.Algorithms.ObjectType(prev))
                 prev_is_list = prev_type.compareTo("List").eq(0)
-                acc = safe_ee_list(ee.Algorithms.If(prev_is_list, prev, ee.List([])))
+                acc = safe_ee_list(ee.Algorithms.If(prev_is_list, prev, ensure_list([])))
                 v = ensure_number(l2.get(idx))
                 return ee.Algorithms.If(
                     acc.size().eq(0),
@@ -2373,9 +2373,9 @@ def robust_quantile_breaks(
         try:
             deduped = ee.Algorithms.If(
                 ee.Number(size).eq(0),
-                ee.List([]),
+                ensure_list([]),
                 ee.List.sequence(0, ee.Number(size).subtract(1)).iterate(
-                    _dedup, ee.List([])
+                    _dedup, ensure_list([])
                 ),
             )
             result = safe_ee_list(deduped)
@@ -2422,14 +2422,14 @@ def robust_quantile_breaks(
         return ee.Algorithms.If(
             ok_rng,
             _hist_quantiles(base, region, vmin, vmax, n_classes, scale, tile_scale),
-            ee.List([]),
+            ensure_list([]),
         )
 
     def _hist_quantiles(img, region, vmin, vmax, n_classes, scale, tile_scale):
         # Guard: Early return for small n_classes
         if n_classes < 2:
             logger.debug("_hist_quantiles: n_classes <2, returning empty list")
-            return ee.List([])
+            return ensure_list([])
 
         # 512 bins across observed range
         hist = img.reduceRegion(
@@ -2464,7 +2464,7 @@ def robust_quantile_breaks(
     uniq2 = safe_ee_list(ee.Algorithms.If(ok1, uniq1, _hist_breaks()))
 
     return safe_ee_list(
-        ee.Algorithms.If(uniq2.size().gte(n_classes - 1), uniq2, ee.List([]))
+        ee.Algorithms.If(uniq2.size().gte(n_classes - 1), uniq2, ensure_list([]))
     )
 
 
@@ -2538,7 +2538,7 @@ def kmeans_classify(
             tileScale=tile_scale,
         )
         groups = safe_ee_list(
-            ee.Dictionary(means.get("groups")).get("groups", ee.List([]))
+            ee.Dictionary(means.get("groups")).get("groups", ensure_list([]))
         )
         logger.debug("kmeans_classify: computed group means")
     except Exception as e:
@@ -2650,7 +2650,7 @@ def _rank_zones(
         tileScale=4,
         maxPixels=gee.MAX_PIXELS,
     )
-    groups = safe_ee_list(grouped.get("groups", ee.List([])))
+    groups = safe_ee_list(grouped.get("groups", ensure_list([])))
 
     def _cluster_value(item):
         info = ee.Dictionary(item)
