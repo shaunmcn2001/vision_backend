@@ -85,7 +85,56 @@ def ensure_list(value):
 
 def safe_ee_list(value):
     ee_utils.ee = ee
-    return _ensure_list(value)
+    try:
+        return _ensure_list(value)
+    except AttributeError:
+        if hasattr(value, "iterate"):
+            return value
+
+        class _FallbackList(list):
+            def iterate(self, func, first):
+                result = first
+                for item in self:
+                    result = func(result, item)
+                return result
+
+            def map(self, func):
+                return _FallbackList(func(item) for item in self)
+
+            def sort(self, key=None):
+                if key is None:
+                    return _FallbackList(sorted(self))
+                if callable(key):
+                    return _FallbackList(sorted(self, key=key))
+                if isinstance(key, int):
+                    return _FallbackList(
+                        sorted(
+                            self,
+                            key=lambda item: item[key]
+                            if isinstance(item, (list, tuple))
+                            else item,
+                        )
+                    )
+                return _FallbackList(sorted(self))
+
+            def get(self, index):
+                return self[index]
+
+            def size(self):
+                return len(self)
+
+            def getInfo(self):
+                return list(self)
+
+            def contains(self, value):
+                return value in self
+
+            def cat(self, items):
+                return _FallbackList(self + list(items))
+
+        if isinstance(value, (list, tuple)):
+            return _FallbackList(value)
+        return _FallbackList([value])
 
 
 def remove_nulls(lst):
@@ -138,6 +187,57 @@ def _parse_bool_env(value: str | None, default: bool) -> bool:
 APPLY_STABILITY = _parse_bool_env(os.getenv("APPLY_STABILITY"), True)
 
 
+def _normalize_choice(
+    value: str | None, *, default: str, allowed: set[str]
+) -> str:
+    """Return a normalised lower-case string drawn from *allowed* choices."""
+
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    return normalized if normalized in allowed else default
+
+
+def _normalize_mask_mode(mask_mode: str | None) -> str:
+    return _normalize_choice(
+        mask_mode,
+        default="adaptive",
+        allowed={"adaptive", "relaxed", "strict"},
+    )
+
+
+def _normalize_zone_method(method: str | None) -> str:
+    return _normalize_choice(
+        method,
+        default=DEFAULT_METHOD,
+        allowed={"ndvi_kmeans", "ndvi_percentiles", "multiindex_kmeans"},
+    )
+
+
+def _normalize_export_target(target: str | None) -> str:
+    return _normalize_choice(
+        target,
+        default="zip",
+        allowed={"zip", "local"},
+    )
+
+
+def _should_apply_stability(flag: bool | str | None) -> bool:
+    """Resolve stability flag allowing "on"/"off" string toggles."""
+
+    if isinstance(flag, str):
+        trimmed = flag.strip().lower()
+        if trimmed == "on":
+            return True
+        if trimmed == "off":
+            return False
+    if flag is None:
+        return APPLY_STABILITY
+    return bool(flag)
+
+
 def set_apply_stability(enabled: bool | None) -> None:
     """Temporarily override the APPLY_STABILITY flag.
 
@@ -147,7 +247,7 @@ def set_apply_stability(enabled: bool | None) -> None:
     if enabled is None:
         APPLY_STABILITY = _parse_bool_env(os.getenv("APPLY_STABILITY"), True)
     else:
-        APPLY_STABILITY = bool(enabled)
+        APPLY_STABILITY = _should_apply_stability(enabled)
 
 
 ZONE_PALETTE: tuple[str, ...] = (
@@ -1367,6 +1467,7 @@ def monthly_ndvi_adaptive(
     min_valid_ratio: float,
     cloud_prob_max: int,
 ) -> ee.Image:
+    mode = _normalize_mask_mode(mask_mode)
     geometry = aoi
     if not isinstance(geometry, ee.Geometry):
         try:
@@ -1409,8 +1510,8 @@ def monthly_ndvi_adaptive(
     tiers_by_name = {tier["name"]: tier for tier in tiers}
     tier_order = (
         ["strict"]
-        if mask_mode == "strict"
-        else ["relaxed"] if mask_mode == "relaxed" else ["strict", "relaxed", "minimal"]
+        if mode == "strict"
+        else ["relaxed"] if mode == "relaxed" else ["strict", "relaxed", "minimal"]
     )
 
     candidates: list[ee.Image] = []
@@ -2946,6 +3047,8 @@ def _prepare_selected_period_artifacts(
     debug_dump: bool = False,
     guard: Guard | None = None,
 ) -> tuple[ZoneArtifacts, dict[str, object]]:
+    mask_mode = _normalize_mask_mode(mask_mode)
+    method = _normalize_zone_method(method)
     _ = (
         cv_mask_threshold,
         apply_stability_mask,
@@ -3437,9 +3540,7 @@ def _prepare_selected_period_artifacts(
             ctx=coverage_ctx,
         )
 
-    stability_flag = (
-        APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
-    )
+    stability_flag = _should_apply_stability(apply_stability_mask)
     mean_before_stability = ndvi_mean
     stability_image = ee.Image(1)
     masked_mean = ndvi_mean
@@ -4454,6 +4555,8 @@ def export_selected_period_zones(
     )
     working_dir = _ensure_working_directory(None)
 
+    mask_mode_value = _normalize_mask_mode(mask_mode)
+
     aoi = _to_ee_geometry(aoi_geojson)
     geometry = geometry or aoi
     area_m2: float | None = None
@@ -4500,6 +4603,8 @@ def export_selected_period_zones(
     if destination is not None:
         export_target = destination
 
+    export_target_value = _normalize_export_target(export_target)
+
     if not months:
         if start_date is None or end_date is None:
             raise ValueError("Either months or start/end dates must be supplied")
@@ -4520,9 +4625,7 @@ def export_selected_period_zones(
             raise
     geometry = geometry or _resolve_geometry(aoi_geojson)
 
-    method_selection = (method or "").strip().lower()
-    if not method_selection:
-        method_selection = DEFAULT_METHOD
+    method_selection = _normalize_zone_method(method)
     if method_selection not in {"ndvi_percentiles", "multiindex_kmeans", "ndvi_kmeans"}:
         raise ValueError("Unsupported method for production zones")
 
@@ -4535,7 +4638,7 @@ def export_selected_period_zones(
             start_date=start_date,
             end_date=end_date,
             cloud_prob_max=cloud_prob_max,
-            mask_mode=mask_mode,
+            mask_mode=mask_mode_value,
             n_classes=n_classes,
             cv_mask_threshold=cv_mask_threshold,
             min_obs_for_cv=min_obs_for_cv,
@@ -4599,7 +4702,7 @@ def export_selected_period_zones(
     if thresholds is not None:
         result["thresholds"] = thresholds
 
-    export_target = (export_target or "zip").strip().lower()
+    export_target = export_target_value
     if export_target not in {"zip", "local"}:
         raise ValueError("Only local zone exports are supported in this workflow")
 
