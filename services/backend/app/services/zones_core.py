@@ -52,6 +52,16 @@ def ensure_list(x):
 
 def remove_nulls(lst):
     """Remove nulls from an ee.List (Filter.notNull is for Collections, not ee.List)."""
+    # Ensure lst is list-like before passing to ee.List
+    # Handle both ee objects and plain Python lists
+    try:
+        if isinstance(ee.List, type) and isinstance(lst, ee.List):
+            # Already an ee.List, use directly
+            return lst.removeAll([None])
+    except (AttributeError, TypeError):
+        pass
+    
+    # Try to wrap in ee.List - this handles ComputedObjects, plain lists, etc.
     return ee.List(lst).removeAll([None])
 
 
