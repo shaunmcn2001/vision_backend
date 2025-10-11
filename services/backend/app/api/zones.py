@@ -59,9 +59,10 @@ class _BaseAOIRequest(BaseModel):
 
 
 class ProductionZonesRequest(_BaseAOIRequest):
-    method: Literal["ndvi_percentiles", "ndvi_kmeans"] = Field(
-        "ndvi_kmeans",
-        description="Classification method for production zones",
+    # PyQGIS zones configuration
+    classifier: Literal["kmeans", "quantiles"] = Field(
+        "kmeans",
+        description="PyQGIS classification method: k-means or quantiles",
     )
     months: Optional[List[str]] = Field(None, description="Months in YYYY-MM format")
     start_month: Optional[str] = Field(
@@ -109,12 +110,34 @@ class ProductionZonesRequest(_BaseAOIRequest):
         False,
         description="If true, fail with E_STABILITY_EMPTY when stability removes too many pixels; otherwise bypass stability.",
     )
-    mmu_ha: float = Field(zone_service.DEFAULT_MIN_MAPPING_UNIT_HA, gt=0)
-    smooth_radius_m: float = Field(zone_service.DEFAULT_SMOOTH_RADIUS_M, ge=0)
-    open_radius_m: float = Field(zone_service.DEFAULT_OPEN_RADIUS_M, ge=0)
-    close_radius_m: float = Field(zone_service.DEFAULT_CLOSE_RADIUS_M, ge=0)
-    simplify_tol_m: float = Field(zone_service.DEFAULT_SIMPLIFY_TOL_M, ge=0)
-    simplify_buffer_m: float = Field(zone_service.DEFAULT_SIMPLIFY_BUFFER_M)
+    mmu_ha: float = Field(
+        zone_service.DEFAULT_MIN_MAPPING_UNIT_HA,
+        gt=0,
+        description="Minimum Mapping Unit in hectares (PyQGIS MMU filter)",
+    )
+    smooth_radius_m: float = Field(
+        zone_service.DEFAULT_SMOOTH_RADIUS_M,
+        ge=0,
+        description="Smoothing radius in meters (PyQGIS smoothing, 0 to disable)",
+    )
+    simplify_tol_m: float = Field(
+        zone_service.DEFAULT_SIMPLIFY_TOL_M,
+        ge=0,
+        description="Simplification tolerance in meters (PyQGIS simplify, 0 to disable)",
+    )
+    export_vector_format: Literal["gpkg", "geojson", "shp"] = Field(
+        "gpkg", description="Output vector format for zones (PyQGIS export)"
+    )
+    # Legacy fields kept for NDVI raster production (not used for vectorization)
+    open_radius_m: float = Field(
+        zone_service.DEFAULT_OPEN_RADIUS_M, ge=0, description="[DEPRECATED] Not used in PyQGIS flow"
+    )
+    close_radius_m: float = Field(
+        zone_service.DEFAULT_CLOSE_RADIUS_M, ge=0, description="[DEPRECATED] Not used in PyQGIS flow"
+    )
+    simplify_buffer_m: float = Field(
+        zone_service.DEFAULT_SIMPLIFY_BUFFER_M, description="[DEPRECATED] Not used in PyQGIS flow"
+    )
     export_target: Literal["zip", "gcs", "drive"] = Field(
         "zip", description="Destination for exports"
     )
@@ -294,12 +317,14 @@ def create_production_zones(
     destination = request.export_target
 
     try:
+        # Call legacy zones service to generate NDVI rasters
+        # (PyQGIS will use the NDVI GeoTIFF for classification)
         result = zone_service.export_selected_period_zones(
             request.aoi_geojson,
             months=request.months,
             aoi_name=request.aoi_name,
             destination=destination,
-            method=request.method,
+            method="ndvi_kmeans",  # Use kmeans method for NDVI raster generation
             start_date=request.start_date,
             end_date=request.end_date,
             cloud_prob_max=request.cloud_prob_max,
@@ -323,6 +348,55 @@ def create_production_zones(
             diagnostics=diagnostics,
             debug_dump=request.debug_dump,
         )
+
+        # Now call PyQGIS to create zones from NDVI GeoTIFF
+        from app.services.zones_pyqgis import build_zones_with_pyqgis
+
+        paths = result.get("paths", {})
+        ndvi_tif_path = paths.get("mean_ndvi")
+        if not ndvi_tif_path:
+            raise RuntimeError("NDVI GeoTIFF not generated; cannot create PyQGIS zones")
+
+        work_dir = result.get("working_dir", "/tmp/zones_work")
+        zones_dir = os.path.join(work_dir, "zones_pyqgis")
+        os.makedirs(zones_dir, exist_ok=True)
+
+        logger.info(
+            "Calling PyQGIS zones: ndvi=%s classifier=%s n_classes=%d",
+            ndvi_tif_path,
+            request.classifier,
+            request.n_classes,
+        )
+
+        zres = build_zones_with_pyqgis(
+            ndvi_tif_path=ndvi_tif_path,
+            aoi_geojson=request.aoi_geojson,
+            out_dir=zones_dir,
+            n_classes=request.n_classes,
+            classifier=request.classifier,
+            mmu_ha=request.mmu_ha,
+            smooth_radius_m=request.smooth_radius_m,
+            simplify_tolerance_m=request.simplify_tol_m,
+            export_format=request.export_vector_format,
+            seed=42,
+        )
+
+        # Update response with PyQGIS outputs
+        if "paths" not in result:
+            result["paths"] = {}
+        result["paths"]["zones_vector"] = zres["vector"]
+        result["paths"]["zones_dir"] = zones_dir
+
+        if "metadata" not in result:
+            result["metadata"] = {}
+        result["metadata"]["zones_pyqgis"] = zres["metadata"]
+
+        # Remove legacy GEE-specific fields from response
+        result.get("metadata", {}).pop("percentile_thresholds", None)
+        result.get("metadata", {}).pop("palette", None)
+        result.pop("palette", None)
+        result.pop("thresholds", None)
+
     except PipelineError as exc:
         logger.warning(
             "Pipeline error: %s (aoi=%s target=%s)",
@@ -367,14 +441,13 @@ def create_production_zones(
     ym_start = used_months[0]
     ym_end = used_months[-1]
 
-    palette = (
-        result.get("palette") or metadata.get("palette")
-        if isinstance(metadata, dict)
-        else None
-    )
-    thresholds = result.get("thresholds") or (
-        metadata.get("percentile_thresholds") if isinstance(metadata, dict) else None
-    )
+    # PyQGIS zones do not use palette/thresholds (legacy GEE percentile bins)
+    # Remove them from response entirely
+    result.pop("palette", None)
+    result.pop("thresholds", None)
+    if isinstance(metadata, dict):
+        metadata.pop("palette", None)
+        metadata.pop("percentile_thresholds", None)
 
     response = {
         "ok": True,
@@ -388,10 +461,7 @@ def create_production_zones(
     if diagnostics and diagnostics_payload is not None:
         response["diagnostics"] = diagnostics_payload
 
-    if palette is not None:
-        response["palette"] = palette
-    if thresholds is not None:
-        response["thresholds"] = thresholds
+    # No palette/thresholds in PyQGIS zones response
 
     debug_info = result.get("debug") or metadata.get("debug")
     stability_meta = {}
