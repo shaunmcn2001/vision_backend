@@ -1,16 +1,9 @@
 # services/backend/app/services/ee_patches.py
 from __future__ import annotations
 import logging
-import ee
 import sys
+import ee
 from app.services.ee_debug import debug_trace
-
-def _hook(type_, value, tb):
-    if "ee" in str(type_) or "ee." in str(value):
-        debug_trace(value)
-    sys.__excepthook__(type_, value, tb)
-
-sys.excepthook = _hook
 
 logger = logging.getLogger(__name__)
 
@@ -59,3 +52,12 @@ def apply_ee_runtime_patches():
         ee.ImageCollection.fromImages = _safe_from_images  # type: ignore[attr-defined]
     _PATCHED = True
     logger.info("Applied EE patches: safe ee.List + safe ImageCollection.fromImages")
+# --- EE global debug hook ---------------------------------------------------
+
+def _ee_global_hook(type_, value, tb):
+    # automatically print where EE errors happen
+    if "ee" in str(type_) or "ee." in str(value):
+        debug_trace(value)
+    sys.__excepthook__(type_, value, tb)
+
+sys.excepthook = _ee_global_hook
