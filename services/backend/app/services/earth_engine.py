@@ -1,5 +1,7 @@
 # app/services/earth_engine.py
-import ee, os
+import os
+
+import ee
 from functools import lru_cache
 
 
