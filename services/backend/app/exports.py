@@ -82,6 +82,11 @@ class ExportItem:
 
 @dataclass
 class ZoneExportConfig:
+    """Legacy zone export configuration for job-based export system.
+    
+    Note: The /zones/production endpoint now uses PyQGIS directly.
+    This config is for the older job-based export workflow.
+    """
     n_classes: int
     cv_mask_threshold: float
     min_mapping_unit_ha: float
@@ -90,7 +95,7 @@ class ZoneExportConfig:
     close_radius_m: float
     simplify_tolerance_m: float
     simplify_buffer_m: float
-    method: str = "ndvi_kmeans"
+    method: str = "ndvi_kmeans"  # Always kmeans for PyQGIS flow
     include_stats: bool = True
     apply_stability_mask: Optional[bool] = None
 
