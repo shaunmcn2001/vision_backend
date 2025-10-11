@@ -25,6 +25,10 @@ except Exception:  # defensive shim; do not break if helper not present
 
 
 from app.services import zones as zone_service
+from app.services.zones_simple import (
+    SimpleZonesParams,
+    build_zones_simple_from_ndvi_tif,
+)
 from app.utils.sanitization import sanitize_for_json
 
 
@@ -56,6 +60,25 @@ class _BaseAOIRequest(BaseModel):
         if not trimmed:
             raise ValueError("aoi_name cannot be blank")
         return trimmed
+
+
+class ZonesSimpleRequest(BaseModel):
+    aoi_geojson: dict = Field(..., description="AOI Polygon/MultiPolygon")
+    aoi_name: str = Field(..., description="Name for outputs")
+    # Either pass a ready NDVI GeoTIFF path:
+    ndvi_tif_path: Optional[str] = Field(
+        None, description="Use existing NDVI GeoTIFF (single band)"
+    )
+    # Or pass dates to (later) wire an EE mean NDVI export:
+    start_date: Optional[str] = Field(None, description="YYYY-MM-DD")
+    end_date: Optional[str] = Field(None, description="YYYY-MM-DD")
+
+    # Simple cartography knobs:
+    n_classes: int = Field(5, ge=3, le=7)
+    classifier: Literal["quantiles", "kmeans"] = "quantiles"
+    mmu_ha: float = Field(2.0, gt=0)
+    simplify_tol_m: float = Field(5.0, ge=0)
+    output_format: Literal["gpkg", "geojson", "shp"] = "gpkg"
 
 
 class ProductionZonesRequest(_BaseAOIRequest):
@@ -271,6 +294,44 @@ class ProductionZonesRequest(_BaseAOIRequest):
                 raise ValueError(f"Invalid month format: {month}") from exc
         ordered = sorted(parsed.items(), key=lambda item: item[1])
         return [month for month, _ in ordered]
+
+
+@router.post("/simple")
+def create_simple_zones(request: ZonesSimpleRequest):
+    try:
+        params = SimpleZonesParams(
+            n_classes=request.n_classes,
+            classifier=request.classifier,
+            mmu_ha=request.mmu_ha,
+            simplify_tol_m=request.simplify_tol_m,
+            output_format=request.output_format,
+        )
+        work_dir = os.path.join("/tmp", f"zones_simple_{request.aoi_name}")
+        os.makedirs(work_dir, exist_ok=True)
+
+        if request.ndvi_tif_path:
+            res = build_zones_simple_from_ndvi_tif(
+                ndvi_tif=request.ndvi_tif_path,
+                params=params,
+                out_dir=work_dir,
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide ndvi_tif_path for the simple flow (EE wiring optional).",
+            )
+
+        return {
+            "ok": True,
+            "paths": {"zones_vector": res["vector"], "work_dir": work_dir},
+            "metadata": res["metadata"],
+        }
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(
+            status_code=500, detail=f"Zones simple failed: {exc}"
+        ) from exc
 
 
 @router.post("/production")
