@@ -22,6 +22,8 @@ from app.services.gcs import (
 )
 from app.services.image_stats import temporal_stats
 from app.services.indices import normalize_index_code, resolve_index
+from app.services.ee_patches import apply_ee_runtime_patches  # noqa: F401
+apply_ee_runtime_patches()
 
 
 DEFAULT_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
