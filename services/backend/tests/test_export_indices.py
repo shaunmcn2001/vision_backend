@@ -86,10 +86,7 @@ async def test_export_geotiffs_supports_gndvi(monkeypatch):
         assert archive.read("gndvi_2024_01.tif") == b"II*\x00FAKE"
 
     assert captured_download["url"] == "https://example.com/download"
-    assert captured_vis["args"] == (
-        "GNDVI",
-        export.resolve_index("gndvi")[0].default_scale,
-    )
+    assert captured_vis["args"] == ("GNDVI", export.resolve_index("gndvi")[0].default_scale)
 
     clamp_calls = context["log"].get("clamp_calls", [])
     assert clamp_calls == [(-1.0, 1.0)]
@@ -338,11 +335,7 @@ def test_start_export_includes_zone_config(monkeypatch):
     assert isinstance(zone_config, s2_indices.exports.ZoneExportConfig)
     assert zone_config.n_classes == 4
     assert zone_config.cv_mask_threshold == 0.3
-    assert (
-        zone_config.min_mapping_unit_ha
-        == s2_indices.zone_service.DEFAULT_MIN_MAPPING_UNIT_HA
-    )
-    assert zone_config.method == "ndvi_kmeans"
+    assert zone_config.min_mapping_unit_ha == s2_indices.zone_service.DEFAULT_MIN_MAPPING_UNIT_HA
     assert result == {"job_id": "job-zone", "state": "pending"}
 
 
@@ -375,7 +368,6 @@ def test_start_export_enables_zone_config_when_options_provided(monkeypatch):
     assert isinstance(zone_config, s2_indices.exports.ZoneExportConfig)
     assert zone_config.n_classes == 5
     assert zone_config.min_mapping_unit_ha == 3.5
-    assert zone_config.method == "ndvi_kmeans"
     assert result == {"job_id": "job-zone-options", "state": "pending"}
 
 
@@ -383,9 +375,7 @@ def test_production_zone_boolean_enables_defaults():
     request = _build_export_request(["NDVI"], production_zones=True)
     assert request.production_zones is not None
     assert request.production_zones.enabled is True
-    assert (
-        request.production_zones.n_classes == s2_indices.zone_service.DEFAULT_N_CLASSES
-    )
+    assert request.production_zones.n_classes == s2_indices.zone_service.DEFAULT_N_CLASSES
 
 
 def test_start_export_returns_server_error_when_gee_initialisation_fails(monkeypatch):
@@ -407,9 +397,7 @@ def test_start_export_returns_server_error_when_gee_initialisation_fails(monkeyp
         "cloud_prob_max": 40,
     }
 
-    async def _post_json(
-        path: str, body: dict[str, object]
-    ) -> tuple[int, dict[str, str], bytes]:
+    async def _post_json(path: str, body: dict[str, object]) -> tuple[int, dict[str, str], bytes]:
         await app.router.startup()
         try:
             raw_body = json.dumps(body).encode("utf-8")
@@ -420,11 +408,7 @@ def test_start_export_returns_server_error_when_gee_initialisation_fails(monkeyp
                 nonlocal body_sent
                 if not body_sent:
                     body_sent = True
-                    return {
-                        "type": "http.request",
-                        "body": raw_body,
-                        "more_body": False,
-                    }
+                    return {"type": "http.request", "body": raw_body, "more_body": False}
                 await asyncio.sleep(0)
                 return {"type": "http.disconnect"}
 

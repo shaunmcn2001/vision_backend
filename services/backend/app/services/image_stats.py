@@ -52,10 +52,8 @@ def temporal_stats(
     mean_abs = mean_unmasked.abs()
     safe_denominator = mean_abs.where(mean_abs.lt(epsilon), epsilon)
     cv_raw = raw_std.divide(safe_denominator)
-    cv = (
-        cv_raw.where(mean_unmasked.lte(0), 0)
-        .updateMask(valid_mask)
-        .rename(f"{rename_base}_cv")
+    cv = cv_raw.where(mean_unmasked.lte(0), 0).updateMask(valid_mask).rename(
+        f"{rename_base}_cv"
     )
 
     return {

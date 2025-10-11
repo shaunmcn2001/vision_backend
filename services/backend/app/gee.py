@@ -1,5 +1,4 @@
 """Shared Google Earth Engine helpers for Sentinel-2 processing."""
-
 from __future__ import annotations
 
 import base64
@@ -46,9 +45,7 @@ def _load_service_account_info(raw_credentials: str) -> Dict:
         try:
             info = json.loads(trimmed)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "Service account credential JSON string is invalid"
-            ) from exc
+            raise RuntimeError("Service account credential JSON string is invalid") from exc
         if not isinstance(info, dict):
             raise RuntimeError("Service account credential JSON must be an object")
         return info
@@ -59,13 +56,9 @@ def _load_service_account_info(raw_credentials: str) -> Dict:
             with cred_path.open("r", encoding="utf-8") as fh:
                 info = json.load(fh)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"Credential path {cred_path} did not contain valid JSON"
-            ) from exc
+            raise RuntimeError(f"Credential path {cred_path} did not contain valid JSON") from exc
         if not isinstance(info, dict):
-            raise RuntimeError(
-                f"Credential path {cred_path} must contain a JSON object"
-            )
+            raise RuntimeError(f"Credential path {cred_path} must contain a JSON object")
         return info
 
     try:
@@ -77,25 +70,17 @@ def _load_service_account_info(raw_credentials: str) -> Dict:
         try:
             decoded = decoded_bytes.decode("utf-8").strip()
         except UnicodeDecodeError as exc:
-            raise RuntimeError(
-                "Decoded service account credentials were not valid UTF-8"
-            ) from exc
+            raise RuntimeError("Decoded service account credentials were not valid UTF-8") from exc
         if not decoded:
             raise RuntimeError("Decoded service account credential JSON is empty")
         if not decoded.startswith("{"):
-            raise RuntimeError(
-                "Decoded service account credentials must be a JSON object"
-            )
+            raise RuntimeError("Decoded service account credentials must be a JSON object")
         try:
             info = json.loads(decoded)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "Decoded service account credential JSON is invalid"
-            ) from exc
+            raise RuntimeError("Decoded service account credential JSON is invalid") from exc
         if not isinstance(info, dict):
-            raise RuntimeError(
-                "Decoded service account credential JSON must describe an object"
-            )
+            raise RuntimeError("Decoded service account credential JSON must describe an object")
         return info
 
     if _looks_like_path(trimmed):
@@ -149,9 +134,7 @@ def month_date_range(month: str) -> Tuple[str, str]:
     return start_iso, end_iso
 
 
-def _attach_cloud_probability(
-    collection: ee.ImageCollection, probability: ee.ImageCollection
-) -> ee.ImageCollection:
+def _attach_cloud_probability(collection: ee.ImageCollection, probability: ee.ImageCollection) -> ee.ImageCollection:
     join = ee.Join.saveFirst("cloud_prob")
     matches = join.apply(
         primary=collection,
@@ -212,9 +195,7 @@ def monthly_sentinel2_collection(
     masked = with_clouds.map(lambda img: _mask_sentinel2(img, cloud_prob_max))
 
     composite = masked.median().select(S2_BANDS)
-    composite = composite.set(
-        {"system:time_start": ee.Date(start_iso).millis(), "month": month}
-    )
+    composite = composite.set({"system:time_start": ee.Date(start_iso).millis(), "month": month})
     return masked, composite
 
 
@@ -240,3 +221,4 @@ def list_collection_images(collection: ee.ImageCollection) -> List[ee.Image]:
         except Exception:
             continue
     return images
+

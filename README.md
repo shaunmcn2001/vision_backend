@@ -55,7 +55,6 @@ minimum mapping unit:
 ```json
 {
   "production_zones": {
-    "method": "ndvi_kmeans",
     "n_classes": 5,
     "mmu_ha": 3
   }
@@ -201,32 +200,6 @@ system has to relax the stability threshold to satisfy the minimum survival
 ratio (`target_ratio`) the `low_confidence` flag is set; operators should treat
 those exports as less reliable and consider collecting additional observations
 for the period.
-
-#### Masking controls
-
-- `mask_mode`: `"strict" | "relaxed" | "adaptive"` (default adaptive). Adaptive tries stricter SCL
-  filters first, then relaxes only when needed to reach `min_valid_ratio`.
-- `min_valid_ratio`: coverage target (default `0.25`) used for per-month tier selection
-  and for the pre-stability coverage guard.
-- `stability_adaptive`: when true, the CV mask is only applied if coverage after
-  stability remains ≥ `min_valid_ratio`.
-- `cv_mask_threshold`: coefficient of variation threshold (`std/mean`); values in the
-  `0.30–0.40` range retain more pixels.
-
-### Zones Troubleshooting
-- **E_NDVI_BAND**: Expected a single band named `NDVI`. Ensure the NDVI helper renames to `NDVI` and monthly composites select it.
-- **E_MASK_SHAPE**: NDVI mask must be single-band. Use the intersection of `B8` and `B4` masks.
-- **E_COVERAGE_LOW**: Too few valid pixels before stability masking. Inspect diagnostics for `per_month_preview`/`mask_tiers` and widen the month window if needed.
-- **E_STABILITY_EMPTY**: CV mask removed too many pixels.
-  - We now compute CV only where at least `min_obs_for_cv` months exist and clamp by tiny mean.
-  - With `"stability_adaptive": true` (default), the pipeline bypasses stability if post-coverage < `min_valid_ratio`.
-  - To force failure instead, set `"stability_enforce": true`.
-- **Coverage**: To improve coverage, expand the month range, relax SCL filters to include classes 3/7, raise `cloud_prob_max` into the 60–70 range, or temporarily disable the stability mask to gauge impact.
-- **E_RANGE_EMPTY**: NDVI_min == NDVI_max before classification. Fix by:
-  - Ensuring NDVI uses B8/B4 float math (no visualize, no integer rounding).
-  - Relaxing SCL/cloud masks (e.g., include classes 3/7) and/or widening months to include a greener + drier period.
-  - Verifying AOI intersects Sentinel-2 coverage and reduction region uses `buffer(5).bounds(1)` with `scale=10, bestEffort, tileScale=4`.
-- **E_BREAKS_COLLAPSED** (percentiles only): NDVI spread too small for distinct thresholds. Use `method=ndvi_kmeans` or widen the date range.
 
 ### Export package layout
 

@@ -31,7 +31,8 @@ def _parse_iso_date(label: str, value: str) -> date:
         return datetime.fromisoformat(value).date()
     except ValueError as exc:
         raise HTTPException(
-            status_code=400, detail=f"{label} must be an ISO 8601 date (YYYY-MM-DD)."
+            status_code=400,
+            detail=f"{label} must be an ISO 8601 date (YYYY-MM-DD)."
         ) from exc
 
 
@@ -65,15 +66,10 @@ def _download_bytes(url: str) -> Tuple[bytes, Optional[str]]:
     try:
         with urllib.request.urlopen(url) as resp:
             if resp.status != 200:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Earth Engine download failed with status {resp.status}.",
-                )
+                raise HTTPException(status_code=502, detail=f"Earth Engine download failed with status {resp.status}.")
             return resp.read(), resp.headers.get("Content-Type")
     except urllib.error.URLError as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Failed to download GeoTIFF: {exc.reason}"
-        ) from exc
+        raise HTTPException(status_code=502, detail=f"Failed to download GeoTIFF: {exc.reason}") from exc
 
 
 def _has_tiff_magic(payload: bytes) -> bool:
@@ -95,19 +91,12 @@ def _extract_tif(payload: bytes, content_type: Optional[str]) -> bytes:
 
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            tif_names = [
-                name for name in archive.namelist() if name.lower().endswith(".tif")
-            ]
+            tif_names = [name for name in archive.namelist() if name.lower().endswith(".tif")]
             if not tif_names:
-                raise HTTPException(
-                    status_code=502,
-                    detail="Earth Engine download did not contain a GeoTIFF.",
-                )
+                raise HTTPException(status_code=502, detail="Earth Engine download did not contain a GeoTIFF.")
             return archive.read(tif_names[0])
     except zipfile.BadZipFile as exc:
-        raise HTTPException(
-            status_code=502, detail="Earth Engine response was not a valid ZIP archive."
-        ) from exc
+        raise HTTPException(status_code=502, detail="Earth Engine response was not a valid ZIP archive.") from exc
 
 
 def _index_collection_for_range(
@@ -177,16 +166,12 @@ async def export_geotiffs(
 ):
     filename = (file.filename or "").lower()
     if not filename.endswith(".zip"):
-        raise HTTPException(
-            status_code=415, detail="Upload must be a shapefile ZIP archive (.zip)."
-        )
+        raise HTTPException(status_code=415, detail="Upload must be a shapefile ZIP archive (.zip).")
 
     start = _parse_iso_date("start_date", start_date)
     end = _parse_iso_date("end_date", end_date)
     if start > end:
-        raise HTTPException(
-            status_code=400, detail="start_date must be on or before end_date."
-        )
+        raise HTTPException(status_code=400, detail="start_date must be on or before end_date.")
 
     content = await file.read()
     if not content:
@@ -197,9 +182,7 @@ async def export_geotiffs(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(
-            status_code=400, detail=f"Failed to parse shapefile ZIP: {exc}"
-        ) from exc
+        raise HTTPException(status_code=400, detail=f"Failed to parse shapefile ZIP: {exc}") from exc
 
     geometry_ee = ee.Geometry(geometry)
 
@@ -211,16 +194,12 @@ async def export_geotiffs(
     try:
         init_ee()
     except Exception as exc:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to initialize Earth Engine: {exc}"
-        ) from exc
+        raise HTTPException(status_code=500, detail=f"Failed to initialize Earth Engine: {exc}") from exc
 
     output_buffer = io.BytesIO()
     months_written = 0
 
-    with zipfile.ZipFile(
-        output_buffer, mode="w", compression=zipfile.ZIP_DEFLATED
-    ) as combined_zip:
+    with zipfile.ZipFile(output_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as combined_zip:
         for year, month, period_start, period_end in _iter_month_ranges(start, end):
             start_iso = period_start.isoformat()
             end_iso = period_end.isoformat()
@@ -246,13 +225,11 @@ async def export_geotiffs(
                     detail=f"No {definition.code.upper()} imagery available for {year}-{month:02d}.",
                 )
 
-            prepared_image, is_visualized = (
-                index_visualization.prepare_image_for_export(
-                    image,
-                    definition.band_name,
-                    geometry_ee,
-                    definition.default_scale,
-                )
+            prepared_image, is_visualized = index_visualization.prepare_image_for_export(
+                image,
+                definition.band_name,
+                geometry_ee,
+                definition.default_scale,
             )
 
             params: Dict[str, object] = {
@@ -283,19 +260,17 @@ async def export_geotiffs(
             months_written += 1
 
     if months_written == 0:
-        raise HTTPException(
-            status_code=404, detail="No months found within the requested date range."
-        )
+        raise HTTPException(status_code=404, detail="No months found within the requested date range.")
 
     output_buffer.seek(0)
-    disposition = f'attachment; filename="{definition.code}_{start.isoformat()}_{end.isoformat()}.zip"'
+    disposition = (
+        f'attachment; filename="{definition.code}_{start.isoformat()}_{end.isoformat()}.zip"'
+    )
     headers: Dict[str, str] = {
         "Content-Disposition": disposition,
         "X-Vegetation-Index": definition.code,
     }
-    return StreamingResponse(
-        output_buffer, media_type="application/zip", headers=headers
-    )
+    return StreamingResponse(output_buffer, media_type="application/zip", headers=headers)
 
 
 def _derive_month_list(start: date, end: date) -> List[str]:
@@ -309,9 +284,7 @@ def _derive_month_list(start: date, end: date) -> List[str]:
 
 def _normalise_indices(values: List[str]) -> List[str]:
     if not values:
-        raise HTTPException(
-            status_code=400, detail="At least one index must be specified."
-        )
+        raise HTTPException(status_code=400, detail="At least one index must be specified.")
 
     canonical_lookup = {
         name.lower(): name for name in sentinel_indices.SUPPORTED_INDICES
@@ -341,16 +314,12 @@ async def queue_sentinel2_exports(
 ):
     filename = (file.filename or "").lower()
     if not filename.endswith(".zip"):
-        raise HTTPException(
-            status_code=415, detail="Upload must be a shapefile ZIP archive (.zip)."
-        )
+        raise HTTPException(status_code=415, detail="Upload must be a shapefile ZIP archive (.zip).")
 
     start = _parse_iso_date("start_date", start_date)
     end = _parse_iso_date("end_date", end_date)
     if start > end:
-        raise HTTPException(
-            status_code=400, detail="start_date must be on or before end_date."
-        )
+        raise HTTPException(status_code=400, detail="start_date must be on or before end_date.")
 
     content = await file.read()
     if not content:
@@ -361,30 +330,22 @@ async def queue_sentinel2_exports(
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - defensive
-        raise HTTPException(
-            status_code=400, detail=f"Failed to parse shapefile ZIP: {exc}"
-        ) from exc
+        raise HTTPException(status_code=400, detail=f"Failed to parse shapefile ZIP: {exc}") from exc
 
     months = _derive_month_list(start, end)
     if not months:
-        raise HTTPException(
-            status_code=400, detail="No months found within the requested date range."
-        )
+        raise HTTPException(status_code=400, detail="No months found within the requested date range.")
 
     index_list = _normalise_indices(indices)
 
     target = export_target.strip().lower() if isinstance(export_target, str) else "zip"
     if target not in {"zip", "gcs", "drive"}:
-        raise HTTPException(
-            status_code=400, detail="export_target must be one of: zip, gcs, drive."
-        )
+        raise HTTPException(status_code=400, detail="export_target must be one of: zip, gcs, drive.")
 
     if scale_m <= 0:
         raise HTTPException(status_code=400, detail="scale_m must be positive.")
     if cloud_prob_max < 0 or cloud_prob_max > 100:
-        raise HTTPException(
-            status_code=400, detail="cloud_prob_max must be between 0 and 100."
-        )
+        raise HTTPException(status_code=400, detail="cloud_prob_max must be between 0 and 100.")
 
     try:
         job = exports.create_job(
@@ -399,8 +360,6 @@ async def queue_sentinel2_exports(
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - defensive
-        raise HTTPException(
-            status_code=400, detail=f"Failed to queue export: {exc}"
-        ) from exc
+        raise HTTPException(status_code=400, detail=f"Failed to queue export: {exc}") from exc
 
     return {"job_id": job.job_id, "state": job.state}

@@ -20,9 +20,8 @@ def anyio_backend():
     return "asyncio"
 
 
-KML_POLYGON = (
-    textwrap.dedent(
-        """\
+KML_POLYGON = textwrap.dedent(
+    """\
     <?xml version="1.0" encoding="UTF-8"?>
     <kml xmlns="http://www.opengis.net/kml/2.2">
       <Document>
@@ -41,10 +40,7 @@ KML_POLYGON = (
       </Document>
     </kml>
     """
-    )
-    .strip()
-    .encode("utf-8")
-)
+).strip().encode("utf-8")
 
 
 def _payload(is_kmz: bool) -> bytes:
@@ -106,3 +102,4 @@ async def test_upload_field_accepts_polygon(monkeypatch, suffix, is_kmz):
     assert saved_shape.is_valid
     assert not saved_shape.is_empty
     assert saved_shape.area > 0
+
