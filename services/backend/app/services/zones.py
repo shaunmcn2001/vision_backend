@@ -368,13 +368,20 @@ def _build_mean_ndvi_for_zones(
         bnames = img.bandNames()
         has_b4 = bnames.contains("B4")
         has_b8 = bnames.contains("B8")
-        return ee.Image(
+    
+        # ✅ Earth Engine Python uses '&' instead of '.And()'
+        both_bands = has_b4.And(has_b8) if hasattr(has_b4, "And") else has_b4 & has_b8
+    
+        ndvi_img = ee.Image(
             ee.Algorithms.If(
-                has_b4.And(has_b8),
+                both_bands,
                 img.normalizedDifference(["B8", "B4"]).rename("NDVI"),
-                ee.Image.constant(float("nan")).rename("NDVI")  # remain masked
+                ee.Image.constant(float("nan")).rename("NDVI")
             )
-        ).updateMask(img.mask())
+        )
+    
+        return ndvi_img.updateMask(img.mask())
+
 
     monthly_ndvi = monthly.map(_ndvi)
 
