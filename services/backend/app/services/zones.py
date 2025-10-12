@@ -601,14 +601,22 @@ def _prepare_selected_period_artifacts(
     ndvi_stats = dict(_ndvi_temporal_stats(stats_source))
 
     # ---- FIX: mean NDVI as sum/count (no reproject), keep float32 ----
+    # Compute mean NDVI with a proper valid-data mask; avoid divide-by-count trick that yields zeros.
     if ndvi_collection is not None:
         try:
-            count_img = ndvi_collection.count()
-            sum_img = ndvi_collection.sum()
-            mean_image = sum_img.divide(count_img.max(1)).rename('NDVI_mean').toFloat().clip(geometry)
-            ndvi_stats['mean'] = mean_image
+            valid_mask = ndvi_collection.count().gt(0)  # pixels with at least 1 valid NDVI
+            mean_image = (
+                ndvi_collection.mean()
+                .toFloat()
+                .updateMask(valid_mask)  # mask out pixels with no observations
+                .clip(geometry)
+                .rename("NDVI_mean")
+            )
+            ndvi_stats["mean"] = mean_image
+            # Optional debug (uncomment to log):
+            # logger.info("NDVI mean projection: %s", mean_image.projection().getInfo())
         except Exception:
-            logger.exception('Failed to compute NDVI mean via sum/count')
+            logger.exception("Failed to compute NDVI mean from collection")
 
     stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
     if stability_flag:
