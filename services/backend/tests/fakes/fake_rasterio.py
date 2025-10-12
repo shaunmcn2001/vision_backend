@@ -168,6 +168,26 @@ def from_origin(west: float, north: float, xsize: float, ysize: float) -> Affine
     return Affine(xsize, 0.0, west, 0.0, -ysize, north)
 
 
+class Window:
+    def __init__(self, col_off: int, row_off: int, width: int, height: int) -> None:
+        self.col_off = col_off
+        self.row_off = row_off
+        self.width = width
+        self.height = height
+
+    def flatten(self) -> tuple[int, int, int, int]:
+        return (
+            self.row_off,
+            self.row_off + self.height,
+            self.col_off,
+            self.col_off + self.width,
+        )
+
+
+windows = ModuleType("rasterio.windows")
+windows.Window = Window
+
+
 def shapes(
     array: np.ndarray,
     mask: np.ndarray | None = None,
