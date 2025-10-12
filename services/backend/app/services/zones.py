@@ -373,7 +373,7 @@ def _classify_smooth_and_polygonize(
     p98 = ee.Number(q.get("NDVI_mean_p98"))
     ndvi_w = ndvi_mean_native.max(p2).min(p98)
 
-    # 2. Percentile thresholds
+    # 2. Quantile thresholds
     cuts = ee.List.sequence(100.0 / n_zones, 100.0 - 100.0 / n_zones, 100.0 / n_zones)
     quants = ndvi_w.reduceRegion(
         reducer=ee.Reducer.percentile(cuts),
@@ -383,20 +383,22 @@ def _classify_smooth_and_polygonize(
         maxPixels=1e9,
     )
 
-    # --- safe getter: handles null, non-finite, missing values ---
+    # --- safest getter possible ---
     def safe_quantile(p):
         key = ee.String("NDVI_mean_p").cat(ee.Number(p).toInt().format())
         val = quants.get(key)
-        # val may be None; guard that
-        return ee.Algorithms.If(
-            ee.Algorithms.IsEqual(val, None),
-            ee.Number(0.0),
-            ee.Number(val)
+        # Wrap in ee.Algorithms.If and always return ee.Number
+        return ee.Number(
+            ee.Algorithms.If(
+                ee.Algorithms.IsEqual(val, None),
+                0.0,
+                ee.Algorithms.If(val, val, 0.0)
+            )
         )
 
     thresholds = cuts.map(safe_quantile)
 
-    # Fallback if all thresholds sum to zero
+    # Fallback if all thresholds sum to zero (still EE objects)
     thresholds_sum = ee.Number(ee.List(thresholds).reduce(ee.Reducer.sum()))
     thresholds = ee.Algorithms.If(
         thresholds_sum.eq(0),
@@ -404,17 +406,20 @@ def _classify_smooth_and_polygonize(
         thresholds
     )
 
-    # 3. Classify image by thresholds
+    thresholds = ee.List(thresholds)
+
+    # 3. Classification
     def classify_by_thresholds(img, thr_list):
         def _step(acc, t):
-            return ee.Image(acc).add(img.gte(ee.Number(t)))
+            val = ee.Number(t)
+            return ee.Image(acc).add(img.gte(val))
         init = ee.Image.constant(1)
         out = ee.Image(ee.List(thr_list).iterate(_step, init))
         return out.rename("zone").toInt8().updateMask(img.mask())
 
     cls_raw = classify_by_thresholds(ndvi_w, thresholds)
 
-    # 4. Smoothing (optional)
+    # 4. Optional smoothing
     cls_smooth = ee.Image(
         ee.Algorithms.If(
             ee.Number(smooth_radius_px).gt(0),
@@ -423,7 +428,7 @@ def _classify_smooth_and_polygonize(
         )
     ).toInt8()
 
-    # 5. MMU (minimum mapping unit)
+    # 5. MMU (~1 ha ≈ 100 px)
     min_px = ee.Number(mmu_ha).multiply(100).round().max(1)
 
     def keep_big(c):
