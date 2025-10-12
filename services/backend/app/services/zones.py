@@ -385,17 +385,17 @@ def _classify_smooth_and_polygonize(
 
     # ---- safest possible quantile getter ----
     def safe_quantile(p):
-    key = ee.String("NDVI_mean_p").cat(ee.Number(p).toInt().format())
-    val = quants.get(key)
-    # treat None or NaN as 0.0
-    cond = ee.Algorithms.IsEqual(val, None)
-    return ee.Number(
-        ee.Algorithms.If(
-            cond,
-            0.0,
-            ee.Number(ee.Algorithms.If(val, val, 0.0))
+        key = ee.String("NDVI_mean_p").cat(ee.Number(p).toInt().format())
+        val = quants.get(key)
+        # treat None or NaN as 0.0
+        cond = ee.Algorithms.IsEqual(val, None)
+        return ee.Number(
+            ee.Algorithms.If(
+                cond,
+                0.0,
+                ee.Number(ee.Algorithms.If(val, val, 0.0))
+            )
         )
-    )
 
 
     thresholds = ee.List(cuts.map(safe_quantile))
