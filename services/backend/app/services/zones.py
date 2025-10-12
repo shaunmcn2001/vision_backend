@@ -56,8 +56,6 @@ DEFAULT_SAMPLE_SIZE = 4000
 DEFAULT_SCALE = int(os.getenv("ZONES_SCALE_M", "10"))
 DEFAULT_EXPORT_CRS = "EPSG:3857"  # GeoTIFF CRS
 DEFAULT_CRS = DEFAULT_EXPORT_CRS
-DISABLE_STABILITY = os.getenv("ZONES_DISABLE_STABILITY", "").lower() in {"1","true","yes"}
-DISABLE_CLOUDMASK = os.getenv("ZONES_DISABLE_CLOUDMASK", "").lower() in {"1","true","yes"}
 
 ZONES_STREAM_TRIGGER_PX = int(os.getenv("ZONES_STREAM_TRIGGER_PX", "40000000"))  # ~40M px
 
@@ -171,99 +169,18 @@ def _attach_cloud_probability(collection: ee.ImageCollection, probability: ee.Im
         return image.addBands(probability_band)
     return ee.ImageCollection(matches).map(_add_probability)
 
-def _mask_s2(image: ee.Image, cloud_prob_max: int, geometry: ee.Geometry) -> ee.Image:
-    """
-    Robust S2 mask:
-      1) QA (no clouds/cirrus) & cloud_probability<=X & no shadow
-      2) QA & no shadow
-      3) cloud_probability<=X
-      4) QA only
-      5) No mask (last resort)
-    Why: avoid exporting a constant raster when strict masks remove all pixels.
-    """
-
-    # Allow disabling whole cloud mask for debugging (keeps values; just scales)
-    if DISABLE_CLOUDMASK:
-        return (
-            image.divide(10_000)
-            .select(list(gee.S2_BANDS))
-            .copyProperties(image, ["system:time_start"])
-        )
-
-    qa = image.select("QA60")
+def _mask_s2(image: ee.Image, cloud_prob_max: int) -> ee.Image:
+    qa = image.select('QA60')
     cloud_bit_mask = 1 << 10
     cirrus_bit_mask = 1 << 11
-    qa_mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(
-        qa.bitwiseAnd(cirrus_bit_mask).eq(0)
-    )
-
-    prob_mask = image.select("cloud_probability").lte(cloud_prob_max)
-
-    scl = image.select("SCL")
-    shadow_mask = scl.neq(3).And(scl.neq(11))  # 3=Cloud shadow, 11=Snow/Ice
-
-    m_combined = qa_mask.And(prob_mask).And(shadow_mask)
-    m_qa_shadow = qa_mask.And(shadow_mask)
-    m_prob_only = prob_mask
-    m_qa_only = qa_mask
-    m_none = ee.Image(1)
-
-    def _count(mask_img: ee.Image) -> ee.Number:
-        # Count valid pixels inside AOI to decide fallback path (server-side, no getInfo() here)
-        return ee.Number(
-            mask_img.selfMask()
-            .reduceRegion(
-                reducer=ee.Reducer.count(),
-                geometry=geometry,
-                scale=DEFAULT_SCALE,
-                bestEffort=True,
-                tileScale=4,
-                maxPixels=gee.MAX_PIXELS,
-            )
-            .values()
-            .get(0)
-        )
-
-    # Server-side conditional selection of first mask that leaves any pixels
-    selected_mask = ee.Image(
-        ee.Algorithms.If(
-            _count(m_combined).gt(0),
-            m_combined,
-            ee.Algorithms.If(
-                _count(m_qa_shadow).gt(0),
-                m_qa_shadow,
-                ee.Algorithms.If(
-                    _count(m_prob_only).gt(0),
-                    m_prob_only,
-                    ee.Algorithms.If(_count(m_qa_only).gt(0), m_qa_only, m_none),
-                ),
-            ),
-        )
-    )
-
-    # Helpful log (will show which mask survived)
-    try:
-        # This logs only a tiny dictionary; safe to do occasionally.
-        stats = (
-            selected_mask.selfMask()
-            .reduceRegion(
-                reducer=ee.Reducer.count(),
-                geometry=geometry,
-                scale=DEFAULT_SCALE,
-                bestEffort=True,
-                tileScale=4,
-                maxPixels=gee.MAX_PIXELS,
-            )
-            .getInfo()
-            or {}
-        )
-        logger.info("S2 mask pixel count (fallback-aware): %s", stats)
-    except Exception:
-        logger.exception("S2 mask stats failed")
-
-    scaled = image.updateMask(selected_mask).divide(10_000)
+    qa_mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
+    prob_mask = image.select('cloud_probability').lte(cloud_prob_max)
+    scl = image.select('SCL')
+    shadow_mask = scl.neq(3).And(scl.neq(11))
+    combined_mask = qa_mask.And(prob_mask).And(shadow_mask)
+    scaled = image.updateMask(combined_mask).divide(10_000)
     selected = scaled.select(list(gee.S2_BANDS))
-    return selected.copyProperties(image, ["system:time_start"])
+    return selected.copyProperties(image, ['system:time_start'])
 
 def _compute_ndvi(image: ee.Image) -> ee.Image:
     bands = image.select(['B8', 'B4']).toFloat()
@@ -307,7 +224,7 @@ def _build_composite_series(geometry: ee.Geometry, months: Sequence[str], start_
         base = (ee.ImageCollection(gee.S2_SR_COLLECTION).filterBounds(geometry).filterDate(start_iso, end_exclusive_iso))
         prob = (ee.ImageCollection(gee.S2_CLOUD_PROB_COLLECTION).filterBounds(geometry).filterDate(start_iso, end_exclusive_iso))
         with_prob = _attach_cloud_probability(base, prob)
-        masked = with_prob.map(lambda img: _mask_s2(ee.Image(img), cloud_prob_max, geometry))
+        masked = with_prob.map(lambda img: _mask_s2(img, cloud_prob_max))
         scene_count = int(ee.Number(masked.size()).getInfo() or 0)
         meta['scene_count'] = scene_count
         if scene_count == 0: return [], ordered, meta
@@ -323,44 +240,16 @@ def _build_composite_series(geometry: ee.Geometry, months: Sequence[str], start_
 class _DownloadParams:
     crs: str = DEFAULT_EXPORT_CRS
     scale: int = DEFAULT_SCALE
-def _proj_from_image(image: ee.Image) -> tuple[str, int]:
-    """
-    Return (crs, nominalScale) from image.projection(); fall back to defaults.
-    """
-    crs, scale = DEFAULT_EXPORT_CRS, DEFAULT_SCALE
-    try:
-        info = image.projection().getInfo()  # {'crs': 'EPSG:326xx', 'nominalScale': 10, ...}
-        if isinstance(info, dict):
-            if info.get("crs"):
-                crs = str(info["crs"])
-            ns = info.get("nominalScale")
-            if isinstance(ns, (int, float)) and ns > 0:
-                scale = int(round(float(ns)))
-    except Exception:
-        logger.exception("Could not read image projection; using defaults")
-    return crs, scale
-    
-def _download_image_to_path(
-    image: ee.Image,
-    geometry: ee.Geometry,
-    target: Path,
-    params: _DownloadParams | None = None,
-) -> ImageExportResult:
-    """
-    Export using the image's native CRS/scale by default (prevents constant rasters).
-    """
-    image = image.toFloat()  # ensure float32
 
-    if params is None:
-        crs, scale = _proj_from_image(image)
-    else:
-        crs, scale = params.crs, params.scale
+def _download_image_to_path(image: ee.Image, geometry: ee.Geometry, target: Path, params: _DownloadParams | None = None) -> ImageExportResult:
+    params = params or _DownloadParams()
+    image = image.toFloat()  # ensure float32
 
     region_coords = _geometry_region(geometry)
     ee_region = ee.Geometry.Polygon(region_coords)
-    sanitized_name = sanitize_name(target.stem or "export")
-    description = f"zones_{sanitized_name}"[:100]
-    folder = os.getenv("GEE_DRIVE_FOLDER", "Sentinel2_Zones")
+    sanitized_name = sanitize_name(target.stem or 'export')
+    description = f'zones_{sanitized_name}'[:100]
+    folder = os.getenv('GEE_DRIVE_FOLDER', 'Sentinel2_Zones')
 
     task: ee.batch.Task | None = None
     try:
@@ -370,45 +259,38 @@ def _download_image_to_path(
             folder=folder,
             fileNamePrefix=sanitized_name,
             region=ee_region,
-            scale=scale,
-            crs=crs,
-            fileFormat="GeoTIFF",
+            scale=params.scale,
+            crs=params.crs,
+            fileFormat='GeoTIFF',
             maxPixels=gee.MAX_PIXELS,
         )
         task.start()
     except Exception:
-        logger.exception("Failed to start Drive export for %s", sanitized_name)
+        logger.exception('Failed to start Drive export for %s', sanitized_name)
         task = None
 
-    logger.info("EE export grid — crs=%s scale=%sm name=%s", crs, scale, sanitized_name)
-
-    # direct download (streams to disk)
     dl_params = {
-        "scale": scale,
-        "crs": crs,
-        "region": region_coords,
-        "filePerBand": False,
-        "format": "GeoTIFF",
+        'scale': params.scale,
+        'crs': params.crs,
+        'region': region_coords,
+        'filePerBand': False,   # only for getDownloadURL
+        'format': 'GeoTIFF',
     }
     url = image.getDownloadURL(dl_params)
     with urlopen(url) as response:
-        headers = getattr(response, "headers", None)
-        content_type = headers.get("Content-Type", "") if headers and hasattr(headers, "get") else ""
-        if "zip" in content_type.lower():
-            with NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
+        headers = getattr(response, 'headers', None)
+        content_type = headers.get('Content-Type', '') if headers and hasattr(headers, 'get') else ''
+        if 'zip' in content_type.lower():
+            with NamedTemporaryFile(delete=False, suffix='.zip') as tmp_zip:
                 shutil.copyfileobj(response, tmp_zip)
                 tmp_zip_path = Path(tmp_zip.name)
             _write_zip_geotiff_from_file(tmp_zip_path, target)
-            try:
-                tmp_zip_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            try: tmp_zip_path.unlink(missing_ok=True)
+            except Exception: pass
         else:
-            with target.open("wb") as out_f:
+            with target.open('wb') as out_f:
                 shutil.copyfileobj(response, out_f)
-
     return ImageExportResult(path=target, task=task)
-
 
 # -------- Streaming NDVI thresholds & classification (OOM-safe) --------
 
@@ -721,59 +603,41 @@ def _prepare_selected_period_artifacts(
     # ---- FIX: mean NDVI as sum/count (no reproject), keep float32 ----
     # Compute mean NDVI with a proper valid-data mask; avoid divide-by-count trick that yields zeros.
     # Build mean NDVI and keep pixels with >=1 valid obs. Do NOT apply stability mask here.
-    # --- DEBUG-friendly mean NDVI (paste this block) ---
     if ndvi_collection is not None:
         try:
-            valid_mask = ndvi_collection.count().gt(0)  # ≥1 valid scene
+            valid_mask = ndvi_collection.count().gt(0)
             mean_image = (
                 ndvi_collection.mean()
                 .toFloat()
-                .updateMask(valid_mask)      # keep nodata masked
+                .updateMask(valid_mask)   # masked pixels remain masked
                 .clip(geometry)
                 .rename("NDVI_mean")
             )
             ndvi_stats["mean"] = mean_image
-    
-            # DEBUG: log min, max, std to prove variation BEFORE export
-            dbg_reduce_kwargs = dict(
-                reducer=ee.Reducer.minMax().combine(**{"reducer2": ee.Reducer.stdDev(), "sharedInputs": True}),
-                geometry=geometry,
-                scale=DEFAULT_SCALE,
-                bestEffort=True,
-                tileScale=4,
-                maxPixels=gee.MAX_PIXELS,
-            )
-            try:
-                dbg = mean_image.reduceRegion(**dbg_reduce_kwargs).getInfo() or {}
-                logger.info("NDVI DEBUG — min/max/std: %s", dbg)
-            except Exception:
-                logger.exception("NDVI DEBUG — reduceRegion failed")
+            # Optional debug:
+            # logger.info("Mean NDVI min/max: %s", mean_image.reduceRegion(
+            #     reducer=ee.Reducer.minMax(),
+            #     geometry=geometry, scale=DEFAULT_SCALE, bestEffort=True, tileScale=4, maxPixels=gee.MAX_PIXELS
+            # ).getInfo())
         except Exception:
             logger.exception("Failed to compute NDVI mean from collection")
-# --- END DEBUG block ---
 
 
-    stability_flag = (
-        (APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask))
-        and not DISABLE_STABILITY
-    )
+    stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
     if stability_flag:
         stability_image = _stability_mask(
-            ndvi_stats["cv"], geometry, [0.5, 1.0, 1.5, 2.0], 0.0, DEFAULT_SCALE
+            ndvi_stats['cv'], geometry, [0.5, 1.0, 1.5, 2.0], 0.0, DEFAULT_SCALE
         )
     else:
         stability_image = ee.Image(1)
-    ndvi_stats["stability"] = stability_image
-
+    ndvi_stats['stability'] = stability_image
 
     workdir = _ensure_working_directory(working_dir)
     ndvi_path = workdir / 'mean_ndvi.tif'
     mean_export = _download_image_to_path(
-        ndvi_stats["mean"].updateMask(stability_image),
-        geometry,
-        ndvi_path,
+        ndvi_stats['mean'].updateMask(stability_image), geometry, ndvi_path,
+        params=_DownloadParams(crs=DEFAULT_EXPORT_CRS, scale=DEFAULT_SCALE),
     )
-
     ndvi_path = mean_export.path
 
     artifacts, local_metadata = _classify_local_zones(
