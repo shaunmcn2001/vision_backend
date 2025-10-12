@@ -235,7 +235,6 @@ def _extract_geotiff_from_zip(payload: bytes, target: Path) -> None:
         with archive.open(member) as source, target.open("wb") as output:
             shutil.copyfileobj(source, output)
 
-
 def _download_image_to_path(
     image: ee.Image, geometry: ee.Geometry, target: Path
 ) -> ImageExportResult:
@@ -247,6 +246,7 @@ def _download_image_to_path(
 
     task: ee.batch.Task | None = None
     try:
+        # IMPORTANT: do NOT pass filePerBand to Drive export
         task = ee.batch.Export.image.toDrive(
             image=image,
             description=description,
@@ -256,13 +256,13 @@ def _download_image_to_path(
             scale=DEFAULT_SCALE,
             fileFormat="GeoTIFF",
             maxPixels=gee.MAX_PIXELS,
-            filePerBand=False,
         )
         task.start()
-    except Exception:  # pragma: no cover - diagnostic logging
+    except Exception:
         logger.exception("Failed to start Drive export for %s", sanitized_name)
         task = None
 
+    # Small direct download (ok to use filePerBand here)
     params = {
         "scale": DEFAULT_SCALE,
         "region": region_coords,
@@ -273,21 +273,16 @@ def _download_image_to_path(
     with urlopen(url) as response:
         payload = response.read()
         headers = getattr(response, "headers", None)
-        content_type = ""
-        if headers is not None and hasattr(headers, "get"):
-            content_type = headers.get("Content-Type", "")
-        else:  # pragma: no cover - fallback for alternative urllib implementations
-            getheader = getattr(response, "getheader", None)
-            if callable(getheader):
-                content_type = getheader("Content-Type", "")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if _is_zip_payload(content_type, payload):
-        _extract_geotiff_from_zip(payload, target)
+        content_type = headers.get("Content-Type", "") if headers and hasattr(headers, "get") else ""
+    if "zip" in content_type.lower():
+        _write_zip_geotiff(BytesIO(payload), target)
+        path = target
     else:
-        with target.open("wb") as output:
-            output.write(payload)
-    return ImageExportResult(path=target, task=task)
+        with target.open("wb") as f:
+            f.write(payload)
+        path = target
+
+    return ImageExportResult(path=path, task=task, description=description, folder=folder, prefix=sanitized_name)
 
 
 def _majority_filter(data: np.ndarray, radius: int) -> np.ndarray:
