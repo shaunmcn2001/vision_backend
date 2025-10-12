@@ -17,6 +17,12 @@ class FakeIndexBand:
         log.setdefault("renamed_bands", []).append(name)
         return self
 
+    def toFloat(self):
+        log = self._context.setdefault("log", {})
+        log.setdefault("band_to_float_calls", 0)
+        log["band_to_float_calls"] += 1
+        return self
+        
 
 class FakeImage:
     def __init__(self, raw_value: float, context: dict[str, Any]):
