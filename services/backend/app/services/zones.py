@@ -432,6 +432,11 @@ def _classify_smooth_and_polygonize(
     mmu_ha=1.0,
     smooth_radius_px=1,
 ):
+    """
+    Classifies NDVI into production zones, ensuring at least two valid classes.
+    Handles flat NDVI distributions and avoids Image.constant(None) crashes.
+    """
+
     # --- 1. Guard NDVI ---
     ndvi_safe = ee.Image(
         ee.Algorithms.If(
@@ -441,7 +446,7 @@ def _classify_smooth_and_polygonize(
         )
     ).select([0]).rename("NDVI_mean")
 
-    # --- 2. Winsorize NDVI (clip extreme values) ---
+    # --- 2. Winsorize NDVI (clip extremes) ---
     q = ndvi_safe.reduceRegion(
         ee.Reducer.percentile([2, 98]),
         geometry=geom,
@@ -485,6 +490,22 @@ def _classify_smooth_and_polygonize(
     )
     thresholds = ee.List(thresholds)
 
+    # --- 4b. Enforce at least two distinct thresholds ---
+    def _ensure_two(thr_list):
+        thr_list = ee.List(thr_list)
+        min_thr = ee.Number(thr_list.reduce(ee.Reducer.min()))
+        max_thr = ee.Number(thr_list.reduce(ee.Reducer.max()))
+        range_ok = max_thr.subtract(min_thr).gt(0.001)
+        return ee.List(
+            ee.Algorithms.If(
+                range_ok,
+                thr_list,
+                ee.List.sequence(0.3, 0.7, 0.4)  # fallback 2-zone spread
+            )
+        )
+
+    thresholds = _ensure_two(thresholds)
+
     # --- 5. Classification ---
     def classify_by_thresholds(img, thr_list):
         def _step(acc, t):
@@ -496,12 +517,27 @@ def _classify_smooth_and_polygonize(
 
     cls_raw = classify_by_thresholds(ndvi_w, thresholds)
 
-    # --- 6. Safety fallback: if classification invalid, use AOI mask as one zone ---
+    # --- 6. Safety fallback: ensure at least 2 unique zone values ---
+    hist = cls_raw.reduceRegion(
+        reducer=ee.Reducer.frequencyHistogram(),
+        geometry=geom,
+        scale=40,
+        bestEffort=True,
+        maxPixels=1e9,
+    )
+    zone_count = ee.Number(ee.Dictionary(hist.get("zone")).size())
+
     cls_raw = ee.Image(
         ee.Algorithms.If(
-            cls_raw,
-            cls_raw,
-            ee.Image.constant(1).clip(geom)
+            zone_count.lte(1),
+            ndvi_w.gt(ndvi_w.reduceRegion(
+                ee.Reducer.percentile([50]),
+                geometry=geom,
+                scale=40,
+                bestEffort=True,
+                maxPixels=1e9,
+            ).get("NDVI_mean_p50")).add(1).toInt8(),
+            cls_raw
         )
     ).rename("zone").toInt8()
 
@@ -537,8 +573,12 @@ def _classify_smooth_and_polygonize(
         maxPixels=1e9,
     )
 
-    return cls_mmu, vectors
+    # --- 10. Debug logging (optional but useful) ---
+    print("NDVI Zone Classification Debug →",
+          "thresholds:", thresholds.getInfo(),
+          "zone_count:", zone_count.getInfo())
 
+    return cls_mmu, vectors
 
 def _stream_zonal_stats(classified_path: Path, ndvi_path: Path) -> List[Dict[str, Any]]:
     stats: Dict[int, Dict[str, Any]] = {}
