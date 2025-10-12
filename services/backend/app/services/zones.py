@@ -859,6 +859,7 @@ def _prepare_selected_period_artifacts(
     method: str,
     sample_size: int,
     include_stats: bool,
+    mode: str = "auto",
 ) -> tuple[ZoneArtifacts, Dict[str, object]]:
     """Prepares classified NDVI production zones, raster + vector exports, and metadata."""
     try:
@@ -922,6 +923,7 @@ def _prepare_selected_period_artifacts(
             n_zones=n_classes,
             mmu_ha=min_mapping_unit_ha,
             smooth_radius_px=DEFAULT_SMOOTH_RADIUS_PX,
+            mode=mode,
         )
 
         if classified_image is None or vectors is None:
@@ -1152,6 +1154,7 @@ def export_selected_period_zones(
     include_stats: bool | None = None,
     apply_stability_mask: bool = True,
     method: str | None = None,
+    mode: str = "auto",
 ) -> Dict[str, Any]:
     working_dir = _ensure_working_directory(None)
     aoi = _to_ee_geometry(aoi_geojson)
@@ -1231,6 +1234,7 @@ def export_selected_period_zones(
         method=method_key,
         sample_size=DEFAULT_SAMPLE_SIZE,
         include_stats=include_stats_flag,
+        mode=mode,
     )
 
     metadata = dict(metadata)
