@@ -328,60 +328,61 @@ def _resolve_geometry(aoi: Union[dict, ee.Geometry]) -> ee.Geometry:
     
 def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
     """
-    Builds a mean NDVI image for the selected period that is guaranteed
-    to be valid (never None or all masked). Falls back to a zero-valued
-    constant image if no valid NDVI pixels exist.
+    Builds a mean NDVI image for the selected period.
+    Raises a clear ValueError if no valid NDVI pixels are found,
+    instead of returning dummy data.
     """
-    # --- 1. Load monthly Sentinel-2 collection (loose mask) ---
     monthly = gee.monthly_sentinel2_collection(
         aoi=geom, start=start_date, end=end_date, **monthly_kwargs
     )
 
-    # --- 2. Compute NDVI for each image ---
+    # --- handle empty collection early ---
+    count = ee.Number(monthly.size())
+    if count.getInfo() == 0:
+        raise ValueError("No Sentinel-2 images found for selected months / AOI.")
+
     def compute_ndvi(img):
-        # guard: ensure both bands exist and valid
-        has_b4 = img.bandNames().contains("B4")
-        has_b8 = img.bandNames().contains("B8")
-        ndvi = ee.Image(
-            ee.Algorithms.If(
-                has_b4.And(has_b8),
-                img.normalizedDifference(["B8", "B4"]).rename("NDVI"),
-                ee.Image.constant(0).rename("NDVI")
-            )
-        )
-        return ndvi.updateMask(ndvi.neq(0))
+        return img.normalizedDifference(["B8", "B4"]).rename("NDVI")
 
     monthly_ndvi = monthly.map(compute_ndvi)
 
-    # --- 3. If collection is empty, return constant image ---
-    count = ee.Number(monthly_ndvi.size())
-    empty_cond = count.lte(0)
-    default_img = ee.Image.constant(0).rename("NDVI_mean").toFloat().clip(geom)
+    ndvi_mean = monthly_ndvi.mean().rename("NDVI_mean").toFloat().clip(geom)
 
-    # --- 4. Compute mean NDVI if valid ---
-    ndvi_mean = ee.Image(
-        ee.Algorithms.If(
-            empty_cond,
-            default_img,
-            monthly_ndvi.mean().rename("NDVI_mean").toFloat()
+    # --- check for empty NDVI mask (no valid pixels) ---
+    valid = ndvi_mean.mask().reduceRegion(
+        ee.Reducer.sum(),
+        geometry=geom,
+        scale=40,
+        bestEffort=True,
+        maxPixels=1e9,
+    ).getInfo()
+
+    if not valid or list(valid.values())[0] == 0:
+        raise ValueError(
+            "No valid NDVI pixels across the selected months. "
+            "Try a wider date range or relax cloud masking."
         )
-    ).clip(geom)
 
-    # --- 5. Ensure no null pixels ---
-    ndvi_mean = ee.Image(
-        ee.Algorithms.If(
-            ndvi_mean,
-            ndvi_mean.unmask(0),
-            default_img
+    # --- check for zero variance (flat NDVI) ---
+    stats = ndvi_mean.reduceRegion(
+        reducer=ee.Reducer.stdDev(),
+        geometry=geom,
+        scale=40,
+        bestEffort=True,
+        maxPixels=1e9,
+    ).getInfo()
+
+    if not stats or list(stats.values())[0] < 0.01:
+        raise ValueError(
+            "NDVI variation too low to produce meaningful production zones."
         )
-    ).rename("NDVI_mean").toFloat().clip(geom)
 
-    # --- 6. Reproject to 10 m native scale if possible ---
+    # --- reproject to 10 m native scale ---
     first_img = ee.Image(monthly.first())
     ndvi_mean_native = ee.Algorithms.If(
         first_img,
         reproject_native_10m(ndvi_mean, first_img, ref_band="B8", scale=10),
-        ndvi_mean
+        ndvi_mean,
     )
 
     return ee.Image(ndvi_mean_native).rename("NDVI_mean").toFloat().clip(geom)
