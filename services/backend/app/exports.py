@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import io
-import json
 import logging
 import os
 import re
@@ -666,11 +665,19 @@ def _download_zone_artifacts(
     shutil.copy(raster_src, raster_path)
 
     vector_components: Dict[str, str] = {}
-    shapefile_members: Dict[str, Path] = {}
     vector_files: List[tuple[Path, str]] = []
     base_name = prefix
-    for ext, src in artifacts.vector_components.items():
-        dest_name = f"{base_name}.{ext}"
+
+    components = dict(artifacts.vector_components or {})
+    if components and "geojson" not in components and artifacts.vector_path:
+        components.setdefault("geojson", artifacts.vector_path)
+    elif not components and artifacts.vector_path:
+        components = {"geojson": artifacts.vector_path}
+
+    for ext, src in components.items():
+        ext_lower = ext.lower()
+        dest_ext = ext_lower
+        dest_name = f"{base_name}.{dest_ext}"
         dest_path = temp_dir / dest_name
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(src, (bytes, bytearray)):
@@ -678,50 +685,11 @@ def _download_zone_artifacts(
         else:
             src_path = Path(str(src))
             if not src_path.exists():
-                continue
-            shutil.copy(src_path, dest_path)
-        vector_components[ext] = dest_name
+                dest_path.write_bytes(b"")
+            else:
+                shutil.copy(src_path, dest_path)
+        vector_components[ext_lower] = dest_name
         vector_files.append((dest_path, dest_name))
-        if ext.lower() in {"shp", "dbf", "shx", "prj"}:
-            shapefile_members[ext.lower()] = dest_path
-
-    geojson_name = f"{prefix}.geojson"
-    geojson_path = temp_dir / geojson_name
-    geojson_path.parent.mkdir(parents=True, exist_ok=True)
-    if shapefile_members.get("shp"):
-        try:
-            reader = shapefile.Reader(str(shapefile_members["shp"]))
-            field_names = [field[0] for field in reader.fields[1:]]
-            features = []
-            for shape_record in reader.iterShapeRecords():
-                properties = {
-                    field_names[idx]: shape_record.record[idx]
-                    for idx in range(len(field_names))
-                }
-                geometry = shape_record.shape.__geo_interface__
-                features.append(
-                    {"type": "Feature", "geometry": geometry, "properties": properties}
-                )
-            geojson_path.write_text(
-                json.dumps({"type": "FeatureCollection", "features": features})
-            )
-        except Exception as exc:  # pragma: no cover - shapefile failure
-            logger.warning("Failed to generate GeoJSON from shapefile: %s", exc)
-            geojson_path.write_text(json.dumps({"type": "FeatureCollection", "features": []}))
-    else:
-        geojson_path.write_text(json.dumps({"type": "FeatureCollection", "features": []}))
-
-    shapefile_zip_name = f"{prefix}_shp.zip"
-    shapefile_zip_path = temp_dir / shapefile_zip_name
-    shapefile_zip_created = False
-    if {"shp", "dbf", "shx", "prj"}.issubset(shapefile_members):
-        with zipfile.ZipFile(
-            shapefile_zip_path, "w", compression=zipfile.ZIP_DEFLATED
-        ) as shp_archive:
-            for suffix in ("shp", "dbf", "shx", "prj"):
-                member_path = shapefile_members[suffix]
-                shp_archive.write(member_path, arcname=member_path.name)
-        shapefile_zip_created = True
 
     stats_name: Optional[str] = None
     stats_path: Optional[Path] = None
@@ -745,20 +713,18 @@ def _download_zone_artifacts(
         (raster_path, raster_name),
     ]
     files.extend(vector_files)
-    files.append((geojson_path, geojson_name))
-    if shapefile_zip_created:
-        files.append((shapefile_zip_path, shapefile_zip_name))
     if stats_name and stats_path:
         files.append((stats_path, stats_name))
 
     paths = {
         "raster": raster_name,
         "mean_ndvi": mean_ndvi_name,
-        "vectors": vector_components.get("shp"),
+        "vectors": vector_components.get("geojson") or vector_components.get("kml"),
         "vector_components": vector_components,
         "zonal_stats": stats_name,
-        "geojson": geojson_name,
-        "vectors_zip": shapefile_zip_name if shapefile_zip_created else None,
+        "geojson": vector_components.get("geojson"),
+        "kml": vector_components.get("kml"),
+        "vectors_zip": None,
     }
     return files, paths
 
@@ -876,7 +842,15 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
 
             job.zone_state.paths = mapped_paths
             job.zone_state.tasks = {}
-            for key in ("raster", "mean_ndvi", "vectors", "geojson", "zonal_stats", "vectors_zip"):
+            for key in (
+                "raster",
+                "mean_ndvi",
+                "vectors",
+                "geojson",
+                "kml",
+                "zonal_stats",
+                "vectors_zip",
+            ):
                 destination = mapped_paths.get(key)
                 if not isinstance(destination, str):
                     continue
@@ -939,7 +913,15 @@ def _start_zone_cloud_exports(job: ExportJob) -> None:
 
             job.zone_state.paths = mapped_paths
             job.zone_state.tasks = {}
-            for key in ("raster", "mean_ndvi", "vectors", "geojson", "zonal_stats", "vectors_zip"):
+            for key in (
+                "raster",
+                "mean_ndvi",
+                "vectors",
+                "geojson",
+                "kml",
+                "zonal_stats",
+                "vectors_zip",
+            ):
                 destination = mapped_paths.get(key)
                 if not isinstance(destination, str):
                     continue
@@ -1075,6 +1057,7 @@ def _process_zip_exports(job: ExportJob) -> None:
             "zonal_stats",
             "vector_components",
             "geojson",
+            "kml",
             "vectors_zip",
         )
         job.zone_state.paths = {
