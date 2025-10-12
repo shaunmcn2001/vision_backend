@@ -381,6 +381,8 @@ def _download_image_to_path(
 def _stream_histogram(ndvi_path: Path, bins: int = 2048, value_min: float = NDVI_PERCENTILE_MIN, value_max: float = NDVI_PERCENTILE_MAX) -> tuple[np.ndarray, np.ndarray, int]:
     hist = np.zeros(bins, dtype=np.int64)
     total = 0
+    # Guarantee ``edges`` is defined even if no valid NDVI pixels are encountered.
+    edges = np.linspace(value_min, value_max, bins + 1, dtype=float)
     with rasterio.open(ndvi_path) as src:
         band = 1
         try:
