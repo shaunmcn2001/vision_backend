@@ -21,7 +21,6 @@ from rasterio.windows import Window
 
 from app import gee
 from app.exports import sanitize_name
-from app.services.image_stats import temporal_stats
 from app.services.ndvi_shared import (
     compute_ndvi_loose,
     mean_from_collection_sum_count,
@@ -58,24 +57,8 @@ ZONE_PALETTE: Tuple[str, ...] = (
 )
 
 NDVI_MASK_EMPTY_ERROR = (
-    "No valid NDVI pixels across the selected months. Try a different date range or AOI."
+    "No valid NDVI pixels across the selected months. Try a wider date range or relax cloud masking."
 )
-
-
-def _parse_bool_env(value: str | None, default: bool) -> bool:
-    if value is None:
-        return default
-    trimmed = value.strip().lower()
-    if trimmed in {"", "none"}:
-        return default
-    if trimmed in {"0", "false", "no", "off"}:
-        return False
-    if trimmed in {"1", "true", "yes", "on"}:
-        return True
-    return default
-
-
-APPLY_STABILITY = _parse_bool_env(os.getenv("APPLY_STABILITY"), True)
 
 
 @dataclass(frozen=True)
@@ -344,225 +327,87 @@ def _resolve_geometry(aoi: Union[dict, ee.Geometry]) -> ee.Geometry:
     return gee.geometry_from_geojson(aoi)
 
 
-def _stability_mask(
-    cv_image: ee.Image,
-    geometry: ee.Geometry,
-    thresholds: Sequence[float],
-    min_survival_ratio: float,
-    scale: int,
-) -> ee.Image:
-    total = ee.Number(
-        cv_image
-        .reduceRegion(
-            reducer=ee.Reducer.count(),
-            geometry=geometry,
-            scale=scale,
-            bestEffort=True,
-            tileScale=4,
-            maxPixels=gee.MAX_PIXELS,
-        )
-        .values()
-        .get(0)
+def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
+    monthly = gee.monthly_sentinel2_collection(
+        aoi=geom, start=start_date, end=end_date, **monthly_kwargs
     )
-    threshold_list = ee.List([float(t) for t in thresholds])
-    min_ratio = ee.Number(min_survival_ratio)
-
-    def _mask_for_threshold(value: Any) -> ee.Image:
-        threshold = ee.Number(value)
-        raw_mask = cv_image.lte(threshold)
-        masked = ee.Image(raw_mask).selfMask()
-        surviving = ee.Number(
-            masked
-            .reduceRegion(
-                reducer=ee.Reducer.count(),
-                geometry=geometry,
-                scale=scale,
-                bestEffort=True,
-                tileScale=4,
-                maxPixels=gee.MAX_PIXELS,
-            )
-            .values()
-            .get(0)
-        )
-        ratio = surviving.divide(total.max(1))
-        return ee.Image(ee.Algorithms.If(ratio.gte(min_ratio), masked, ee.Image(0).selfMask()))
-
-    masks = threshold_list.map(_mask_for_threshold)
-    combined = ee.ImageCollection.fromImages(masks).max()
-    combined_masked = ee.Image(combined).selfMask()
-    combined_count = ee.Number(
-        combined_masked
-        .reduceRegion(
-            reducer=ee.Reducer.count(),
-            geometry=geometry,
-            scale=scale,
-            bestEffort=True,
-            tileScale=4,
-            maxPixels=gee.MAX_PIXELS,
-        )
-        .values()
-        .get(0)
-    )
-    pass_through = ee.Image(1)
-    return ee.Image(ee.Algorithms.If(combined_count.lte(0), pass_through, combined_masked)).selfMask()
-
-
-def _ndvi_temporal_stats(images: Sequence[ee.Image]) -> Mapping[str, ee.Image]:
-    stats = temporal_stats(images, band_name="NDVI", rename_prefix="NDVI")
-    return {
-        "mean": stats["mean"],
-        "median": stats["median"],
-        "std": stats["std"],
-        "cv": stats["cv"],
-    }
-
-
-def _build_mean_ndvi_for_zones(
-    geom: ee.Geometry,
-    start_date: date | datetime | str,
-    end_date: date | datetime | str,
-    **monthly_kwargs: Any,
-) -> ee.Image:
-    months = list(monthly_kwargs.pop("months", []) or [])
-    cloud_prob_max = int(monthly_kwargs.pop("cloud_prob_max", DEFAULT_CLOUD_PROB_MAX))
-
-    def _coerce_date(value: date | datetime | str | None) -> date | None:
-        if isinstance(value, datetime):
-            return value.date()
-        if isinstance(value, date):
-            return value
-        if isinstance(value, str):
-            try:
-                return date.fromisoformat(value[:10])
-            except ValueError:
-                return None
-        return None
-
-    start_dt = _coerce_date(start_date)
-    end_dt = _coerce_date(end_date)
-
-    if not months and start_dt and end_dt:
-        cursor = date(start_dt.year, start_dt.month, 1)
-        end_month = date(end_dt.year, end_dt.month, 1)
-        while cursor <= end_month:
-            months.append(cursor.strftime("%Y-%m"))
-            if cursor.month == 12:
-                cursor = date(cursor.year + 1, 1, 1)
-            else:
-                cursor = date(cursor.year, cursor.month + 1, 1)
-
-    monthly_images: list[ee.Image] = []
-    for month in months:
-        _collection, composite = gee.monthly_sentinel2_collection(geom, month, cloud_prob_max)
-        monthly_images.append(ee.Image(composite).clip(geom))
-
-    if monthly_images:
-        monthly = ee.ImageCollection.fromImages(monthly_images)
-    else:
-        monthly = ee.ImageCollection([])
-
     first_img = ee.Image(monthly.first())
     monthly_ndvi = monthly.map(lambda img: compute_ndvi_loose(img).clip(geom))
     ndvi_mean = mean_from_collection_sum_count(monthly_ndvi)
-
+    # quick existence check
     _ = ndvi_mean.unmask(-9999).neq(-9999).reduceRegion(
-        reducer=ee.Reducer.sum(),
-        geometry=geom,
-        scale=40,
-        maxPixels=1e9,
-        bestEffort=True,
+        ee.Reducer.sum(), geom, 40, bestEffort=True, maxPixels=1e9
     ).get("NDVI_mean")
-
     ndvi_mean_native = ee.Algorithms.If(
         first_img,
         reproject_native_10m(ndvi_mean, first_img, ref_band="B8", scale=10),
-        ndvi_mean,
+        ndvi_mean
     )
-
-    return ee.Image(ndvi_mean_native).select(["NDVI_mean"]).toFloat().clip(geom)
+    return ee.Image(ndvi_mean_native).select("NDVI_mean").toFloat().clip(geom)
 
 
 def _classify_smooth_and_polygonize(
     ndvi_mean_native: ee.Image,
     geom: ee.Geometry,
     *,
-    n_zones: int = 5,
-    mmu_ha: float = 1.0,
-    smooth_radius_px: int = DEFAULT_SMOOTH_RADIUS_PX,
-) -> tuple[ee.Image, ee.FeatureCollection]:
-    percentiles = ndvi_mean_native.reduceRegion(
-        ee.Reducer.percentile([2, 98]),
-        geom,
-        10,
-        maxPixels=1e9,
-        bestEffort=True,
+    n_zones=5,
+    mmu_ha=1.0,
+    smooth_radius_px=1,
+):
+    # 1. winsorize tails
+    q = ndvi_mean_native.reduceRegion(
+        ee.Reducer.percentile([2, 98]), geom, 10, bestEffort=True, maxPixels=1e9
     )
-    p2 = ee.Number(percentiles.get("NDVI_mean_p2"))
-    p98 = ee.Number(percentiles.get("NDVI_mean_p98"))
-    ndvi_winsor = ndvi_mean_native.clip(geom).max(p2).min(p98)
+    p2, p98 = ee.Number(q.get("NDVI_mean_p2")), ee.Number(q.get("NDVI_mean_p98"))
+    ndvi_w = ndvi_mean_native.max(p2).min(p98)
 
-    cut_probs = ee.List.sequence(0, 100, 100.0 / n_zones)
-    quantiles = ndvi_winsor.reduceRegion(
-        reducer=ee.Reducer.percentile(cut_probs),
-        geometry=geom,
-        scale=10,
-        maxPixels=1e9,
-        bestEffort=True,
+    # 2. quantile thresholds
+    cuts = ee.List.sequence(0, 100, 100.0 / n_zones)
+    quants = ndvi_w.reduceRegion(
+        ee.Reducer.percentile(cuts), geom, 10, bestEffort=True, maxPixels=1e9
     )
     thresholds = ee.List([
-        quantiles.get(f"NDVI_mean_p{int(prob)}")
-        for prob in cut_probs.slice(1, -1)
+        quants.get(f"NDVI_mean_p{int(p)}") for p in cuts.slice(1, -1)
     ])
 
-    def classify_by_thresholds(image: ee.Image, thr_list: ee.List) -> ee.Image:
-        def _step(value: ee.Image, threshold: Any) -> ee.Image:
-            threshold_number = ee.Number(threshold)
-            return ee.Image(value).add(image.gte(threshold_number))
+    def classify(img, thr):
+        def _add(val, t): return ee.Image(val).add(img.gte(ee.Number(t)))
+        return ee.Image(thr.iterate(_add, ee.Image.constant(1))) \
+                 .rename("zone").toInt8().updateMask(img.mask())
 
-        initial = ee.Image.constant(1)
-        classified = ee.Image(thr_list.iterate(_step, initial)).rename("zone")
-        return classified.toInt8().updateMask(image.mask())
+    cls_raw = classify(ndvi_w, thresholds)
 
-    classified_raw = classify_by_thresholds(ndvi_winsor, thresholds)
-    classified_smooth = ee.Algorithms.If(
-        ee.Number(smooth_radius_px).gt(0),
-        ee.Image(classified_raw).focalMode(radius=smooth_radius_px, units="pixels"),
-        classified_raw,
-    )
-    classified_smooth = ee.Image(classified_smooth).toInt8().clip(geom)
+    # 3. smoothing
+    cls_smooth = ee.Image(
+        ee.Algorithms.If(
+            ee.Number(smooth_radius_px).gt(0),
+            cls_raw.focalMode(radius=smooth_radius_px, units="pixels"),
+            cls_raw
+        )
+    ).toInt8()
 
-    pixels_per_hectare = 100
-    min_pixels = ee.Number(mmu_ha).multiply(pixels_per_hectare).round().max(1)
+    # 4. MMU (~1 ha = 100 px)
+    min_px = ee.Number(mmu_ha).multiply(100).round().max(1)
+    def keep_big(c):
+        mask = cls_smooth.eq(c)
+        valid = mask.connectedPixelCount(maxSize=1e6, eightConnected=True) \
+                      .gte(min_px)
+        return cls_smooth.updateMask(mask.And(valid))
+    cls_mmu = ee.ImageCollection(
+        ee.List.sequence(1, n_zones).map(lambda c: keep_big(ee.Number(c)))
+    ).mosaic().rename("zone").toInt8().clip(geom)
 
-    def _remove_small(class_value: Any) -> ee.Image:
-        class_number = ee.Number(class_value)
-        mask = classified_smooth.eq(class_number)
-        cleaned = mask.connectedPixelCount(maxSize=1e6, eightConnected=True).gte(min_pixels)
-        return classified_smooth.updateMask(mask.And(cleaned))
-
-    classes = ee.List.sequence(1, n_zones)
-    classified_mmu = (
-        ee.ImageCollection(classes.map(_remove_small))
-        .mosaic()
-        .rename("zone")
-        .toInt8()
-        .updateMask(ndvi_mean_native.mask())
-    )
-
-    classified_mmu = classified_mmu.set("ndvi_thresholds", thresholds)
-
-    vectors = classified_mmu.reduceToVectors(
+    # 5. polygonize
+    vectors = cls_mmu.reduceToVectors(
         geometry=geom,
         scale=10,
         geometryType="polygon",
         labelProperty="zone",
         reducer=ee.Reducer.first(),
-        maxPixels=1e9,
         bestEffort=True,
+        maxPixels=1e9,
     )
-    vectors = ee.FeatureCollection(vectors).set("ndvi_thresholds", thresholds)
-
-    return classified_mmu, vectors
+    return cls_mmu, vectors
 
 
 def _stream_zonal_stats(classified_path: Path, ndvi_path: Path) -> List[Dict[str, Any]]:
@@ -637,23 +482,17 @@ def _prepare_selected_period_artifacts(
     include_stats: bool,
 ) -> tuple[ZoneArtifacts, Dict[str, object]]:
     ordered_months = _ordered_months(months)
-
-    composites: List[tuple[str, ee.Image]] = []
     skipped_months: List[str] = []
     for month in ordered_months:
-        collection, composite = gee.monthly_sentinel2_collection(geometry, month, cloud_prob_max)
-        scene_count = int(ee.Number(collection.size()).getInfo() or 0)
-        if scene_count == 0:
+        collection, _ = gee.monthly_sentinel2_collection(geometry, month, cloud_prob_max)
+        try:
+            count = int(ee.Number(collection.size()).getInfo() or 0)
+        except Exception:
+            count = 0
+        if count == 0:
             skipped_months.append(month)
-            continue
-        composites.append((month, ee.Image(composite).clip(geometry)))
 
-    if not composites:
-        raise ValueError(NDVI_MASK_EMPTY_ERROR)
-
-    ndvi_images = [compute_ndvi_loose(image) for _, image in composites]
-    ndvi_collection = ee.ImageCollection(ndvi_images)
-    ndvi_stats = dict(_ndvi_temporal_stats(ndvi_collection))
+    used_months = [month for month in ordered_months if month not in skipped_months]
 
     ndvi_mean_native = _build_mean_ndvi_for_zones(
         geometry,
@@ -663,57 +502,37 @@ def _prepare_selected_period_artifacts(
         cloud_prob_max=cloud_prob_max,
     )
 
-    exists = ndvi_mean_native.unmask(-9999).neq(-9999).reduceRegion(
-        ee.Reducer.sum(),
-        geometry,
-        40,
-        maxPixels=1e9,
-        bestEffort=True,
+    cnt = ndvi_mean_native.unmask(-9999).neq(-9999).reduceRegion(
+        ee.Reducer.sum(), geometry, 40, bestEffort=True, maxPixels=1e9
     ).get("NDVI_mean")
 
     try:
-        exists_value = float(ee.Number(exists).getInfo())
+        cnt_value = float(ee.Number(cnt).getInfo())
     except Exception:
-        exists_value = 0.0
+        cnt_value = None
 
-    if not exists_value:
+    if cnt_value is None or cnt_value <= 0:
         raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
-    ndvi_stats["mean"] = ndvi_mean_native
-
-    stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
-    if stability_flag:
-        stability_image = _stability_mask(
-            ndvi_stats["cv"],
-            geometry,
-            [0.5, 1.0, 1.5, 2.0],
-            0.0,
-            DEFAULT_SCALE,
-        )
-    else:
-        stability_image = ee.Image(1)
-    ndvi_stats["stability"] = stability_image
-
-    workdir = _ensure_working_directory(working_dir)
-    ndvi_path = workdir / "mean_ndvi.tif"
-    mean_export = _download_image_to_path(
-        ndvi_stats["mean"].updateMask(stability_image),
-        geometry,
-        ndvi_path,
-        params=_DownloadParams(crs=DEFAULT_EXPORT_CRS, scale=DEFAULT_SCALE),
-    )
-    ndvi_path = mean_export.path
-
-    classification_input = ndvi_stats["mean"].updateMask(stability_image)
     classified_image, vectors = _classify_smooth_and_polygonize(
-        classification_input,
+        ndvi_mean_native,
         geometry,
         n_zones=n_classes,
         mmu_ha=min_mapping_unit_ha,
         smooth_radius_px=DEFAULT_SMOOTH_RADIUS_PX,
     )
 
-    classified_path = workdir / "zones_classified.tif"
+    workdir = _ensure_working_directory(working_dir)
+    ndvi_path = workdir / "NDVI_mean.tif"
+    mean_export = _download_image_to_path(
+        ndvi_mean_native,
+        geometry,
+        ndvi_path,
+        params=_DownloadParams(crs=DEFAULT_EXPORT_CRS, scale=DEFAULT_SCALE),
+    )
+    ndvi_path = mean_export.path
+
+    classified_path = workdir / "zones.tif"
     classified_export = _download_image_to_path(
         classified_image,
         geometry,
@@ -721,11 +540,6 @@ def _prepare_selected_period_artifacts(
         params=_DownloadParams(crs=DEFAULT_EXPORT_CRS, scale=DEFAULT_SCALE),
     )
     classified_path = classified_export.path
-
-    try:
-        thresholds = ee.List(classified_image.get("ndvi_thresholds")).getInfo()
-    except Exception:
-        thresholds = []
 
     try:
         unique_classes = (
@@ -745,7 +559,11 @@ def _prepare_selected_period_artifacts(
         unique_classes = []
 
     vectors_reprojected = ee.FeatureCollection(
-        vectors.map(lambda feature: feature.setGeometry(feature.geometry().transform("EPSG:4326", 0.1)))
+        vectors.map(
+            lambda feature: feature.setGeometry(
+                feature.geometry().transform("EPSG:4326", 0.1)
+            )
+        )
     )
 
     geojson_path = workdir / "zones.geojson"
@@ -761,7 +579,14 @@ def _prepare_selected_period_artifacts(
         with stats_path.open("w", newline="") as csv_file:
             writer = csv.DictWriter(
                 csv_file,
-                fieldnames=["zone", "area_ha", "mean_ndvi", "min_ndvi", "max_ndvi", "pixel_count"],
+                fieldnames=[
+                    "zone",
+                    "area_ha",
+                    "mean_ndvi",
+                    "min_ndvi",
+                    "max_ndvi",
+                    "pixel_count",
+                ],
             )
             writer.writeheader()
             writer.writerows(zonal_stats)
@@ -769,11 +594,11 @@ def _prepare_selected_period_artifacts(
     palette = list(ZONE_PALETTE[: max(1, min(n_classes, len(ZONE_PALETTE)))])
 
     metadata: Dict[str, Any] = {
-        "used_months": ordered_months,
+        "used_months": used_months,
         "skipped_months": skipped_months,
         "zone_method": "ndvi_quantiles",
-        "stability_mask_applied": stability_flag,
-        "percentile_thresholds": thresholds,
+        "stability_mask_applied": False,
+        "percentile_thresholds": [],
         "palette": palette,
         "requested_zone_count": int(n_classes),
         "effective_zone_count": int(len(unique_classes) or n_classes),
