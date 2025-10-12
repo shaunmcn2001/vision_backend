@@ -49,6 +49,10 @@ class ProductionZonesRequest(_BaseAOIRequest):
         "ndvi_percentiles",
         description="Classification method for production zones",
     )
+    mode: Literal["auto", "quantile", "linear"] = Field(
+        "auto",
+        description="Binning strategy for NDVI zones: 'auto' (adaptive), 'quantile', or 'linear'",
+    )
     months: Optional[List[str]] = Field(
         None, description="Months in YYYY-MM format"
     )
@@ -258,6 +262,7 @@ def create_production_zones(request: ProductionZonesRequest):
             gcs_prefix=request.gcs_prefix,
             include_stats=request.include_zonal_stats,
             apply_stability_mask=request.apply_stability_mask,
+            mode=request.mode,
         )
     except ValueError as exc:
         logger.warning(
