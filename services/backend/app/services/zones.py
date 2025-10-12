@@ -507,62 +507,95 @@ def _classify_smooth_and_polygonize(
     thresholds = _ensure_two(thresholds)
 
     # --- 5. Classification ---
+    # --- 5. Classification ---
     def classify_by_thresholds(img, thr_list):
+        # Sanitize thresholds: replace nulls with +inf so img.gte(thr) -> False
+        def _sanit(t):
+            return ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(t, None), 1e9, t))
+        thr_list = ee.List(thr_list).map(_sanit)
+    
         def _step(acc, t):
-            tnum = ee.Number(ee.Algorithms.If(t, t, 0.0))
-            return ee.Image(acc).add(img.gte(tnum))
-        try_img = ee.Image(thr_list.iterate(_step, ee.Image.constant(1)))
-        return ee.Image(ee.Algorithms.If(try_img, try_img, ee.Image.constant(1))) \
-                 .rename("zone").toInt8().updateMask(img.mask())
-
+            tnum = ee.Number(t)
+            return ee.Image(acc).add(img.gte(tnum))  # zones start at 1
+    
+        # iterate always returns an Image (the accumulator), never None
+        zones_img = ee.Image(thr_list.iterate(_step, ee.Image.constant(1)))
+        return zones_img.rename("zone").toInt8().updateMask(img.mask())
+    
     cls_raw = classify_by_thresholds(ndvi_w, thresholds)
-
-    # --- 6. Safety fallback: ensure at least 2 unique zone values ---
-    hist = cls_raw.reduceRegion(
+    
+    # --- 6. Ensure at least 2 unique zone values (fallback: median split) ---
+    hist_dict = cls_raw.reduceRegion(
         reducer=ee.Reducer.frequencyHistogram(),
         geometry=geom,
         scale=40,
         bestEffort=True,
         maxPixels=1e9,
     )
-    zone_count = ee.Number(ee.Dictionary(hist.get("zone")).size())
-
-    cls_raw = ee.Image(
-        ee.Algorithms.If(
-            zone_count.lte(1),
-            ndvi_w.gt(ndvi_w.reduceRegion(
-                ee.Reducer.percentile([50]),
-                geometry=geom,
-                scale=40,
-                bestEffort=True,
-                maxPixels=1e9,
-            ).get("NDVI_mean_p50")).add(1).toInt8(),
-            cls_raw
-        )
-    ).rename("zone").toInt8()
-
+    
+    zone_hist = ee.Dictionary(ee.Algorithms.If(
+        ee.Algorithms.IsEqual(hist_dict, None),
+        ee.Dictionary({}),
+        ee.Dictionary(hist_dict).get("zone")
+    ))
+    zone_hist = ee.Dictionary(ee.Algorithms.If(
+        ee.Algorithms.IsEqual(zone_hist, None),
+        ee.Dictionary({}),
+        zone_hist
+    ))
+    zone_count = ee.Number(zone_hist.size())
+    
+    # Safe median (p50) with fallback to mean if needed
+    q50 = ndvi_w.reduceRegion(
+        ee.Reducer.percentile([50]),
+        geometry=geom,
+        scale=40,
+        bestEffort=True,
+        maxPixels=1e9,
+    ).get("NDVI_mean_p50")
+    
+    mean_fallback = ndvi_w.reduceRegion(
+        ee.Reducer.mean(),
+        geometry=geom,
+        scale=40,
+        bestEffort=True,
+        maxPixels=1e9,
+    ).get("NDVI_mean")
+    
+    median_val = ee.Number(ee.Algorithms.If(
+        ee.Algorithms.IsEqual(q50, None),
+        ee.Algorithms.If(ee.Algorithms.IsEqual(mean_fallback, None), 0.0, mean_fallback),
+        q50
+    ))
+    
+    # If only one class, do a median split into 2 classes (1,2)
+    cls_raw = ee.Image(ee.Algorithms.If(
+        zone_count.lte(1),
+        ndvi_w.gt(median_val).add(1).toInt8().updateMask(ndvi_w.mask()).rename("zone"),
+        cls_raw
+    )).toInt8().rename("zone")
+    
     # --- 7. Optional smoothing ---
-    cls_smooth = ee.Image(
-        ee.Algorithms.If(
-            ee.Number(smooth_radius_px).gt(0),
-            cls_raw.focalMode(radius=smooth_radius_px, units="pixels"),
-            cls_raw,
-        )
-    ).toInt8()
-
-    # --- 8. MMU filtering ---
+    cls_smooth = ee.Image(ee.Algorithms.If(
+        ee.Number(smooth_radius_px).gt(0),
+        cls_raw.focalMode(radius=smooth_radius_px, units="pixels"),
+        cls_raw
+    )).toInt8()
+    
+    # --- 8. MMU filtering (no .And on ComputedObject) ---
     min_px = ee.Number(mmu_ha).multiply(100).round().max(1)
-
-   def keep_big(c):
-        mask = cls_smooth.eq(c)
-        valid = mask.connectedPixelCount(maxSize=1e6, eightConnected=True).gte(min_px)
-        combined = mask.multiply(valid).gt(0)  # ✅ replaces mask.And(valid)
+    
+    def keep_big(c):
+        c = ee.Number(c)
+        mask = cls_smooth.eq(c)  # boolean image (0/1)
+        valid = mask.connectedPixelCount(maxSize=1e6, eightConnected=True).gte(min_px)  # boolean
+        combined = mask.multiply(valid).gt(0)  # boolean AND
         return cls_smooth.updateMask(combined)
-
+    
     cls_mmu = ee.ImageCollection(
         ee.List.sequence(1, n_zones).map(lambda c: keep_big(ee.Number(c)))
     ).mosaic().rename("zone").toInt8().clip(geom)
-
+    
     # --- 9. Polygonize ---
     vectors = cls_mmu.reduceToVectors(
         geometry=geom,
@@ -573,12 +606,10 @@ def _classify_smooth_and_polygonize(
         bestEffort=True,
         maxPixels=1e9,
     )
-
-    # --- 10. Debug logging (optional but useful) ---
-    print("NDVI Zone Classification Debug →",
-          "thresholds:", thresholds.getInfo(),
-          "zone_count:", zone_count.getInfo())
-
+    
+    # (Optional) light debug – avoid heavy getInfo in prod
+    # print("NDVI thresholds (server-side list):", thresholds)
+    
     return cls_mmu, vectors
 
 def _stream_zonal_stats(classified_path: Path, ndvi_path: Path) -> List[Dict[str, Any]]:
