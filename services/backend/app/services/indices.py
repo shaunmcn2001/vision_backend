@@ -7,6 +7,8 @@ from typing import Any, Callable, Dict, Mapping, Tuple
 
 import ee
 
+from app.services.ndvi_shared import compute_ndvi_loose
+
 
 class UnsupportedIndexError(ValueError):
     """Raised when an unknown vegetation index is requested."""
@@ -105,7 +107,7 @@ INDEX_DEFINITIONS: Dict[str, IndexDefinition] = {
         code="ndvi",
         band_name="NDVI",
         valid_range=(-1.0, 1.0),
-        compute=_normalized_difference(("B8", "B4"), "NDVI"),
+        compute=lambda image, params=None: compute_ndvi_loose(image),
         default_palette=DEFAULT_VEGETATION_PALETTE,
     ),
     "evi": IndexDefinition(
