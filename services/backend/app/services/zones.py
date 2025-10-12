@@ -370,15 +370,25 @@ def _build_mean_ndvi_for_zones(
 
     ndvi_mean = monthly.map(_ndvi).mean().rename('NDVI_mean').toFloat().clip(geom)
 
-    # variation check only
-    std_dict = ndvi_mean.reduceRegion(
-        reducer=ee.Reducer.stdDev(),
-        geometry=geom,
-        scale=40,
-        bestEffort=True,
-        maxPixels=1e9,
-    )
-    std_val = float(list(std_dict.values())[0]) if std_dict else 0.0
+    # variation check (server-side extract -> client number)
+    try:
+        std_dict = ndvi_mean.reduceRegion(
+            reducer=ee.Reducer.stdDev(),
+            geometry=geom,
+            scale=40,
+            bestEffort=True,
+            maxPixels=1e9,
+        )
+        # ndvi_mean has a single band: "NDVI_mean"
+        std_val = ee.Number(
+            ee.Dictionary(std_dict).get('NDVI_mean')
+        ).getInfo()
+    except Exception:
+        std_val = 0.0
+    
+    if std_val is None:
+        std_val = 0.0
+    
     if std_val < 0.01:
         raise ValueError(NDVI_VARIATION_TOO_LOW_ERROR)
 
