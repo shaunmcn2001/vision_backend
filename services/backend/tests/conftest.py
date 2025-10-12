@@ -22,3 +22,4 @@ else:
 sys.modules.setdefault("rasterio", fake_rasterio)
 sys.modules.setdefault("rasterio.transform", fake_rasterio.transform)
 sys.modules.setdefault("rasterio.features", fake_rasterio.features)
+sys.modules.setdefault("rasterio.windows", fake_rasterio.windows)

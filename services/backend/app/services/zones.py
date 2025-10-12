@@ -238,6 +238,72 @@ def _build_composite_series(geometry: ee.Geometry, months: Sequence[str], start_
             comps.append((label, image.clip(geometry)))
     return comps, skipped, meta
 
+
+def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
+    """
+    Build ONE mean NDVI image across all selected months using the same (loose) NDVI as general path.
+    Do not reproject until after sum/count. Return a float32 single-band 'NDVI_mean' image at ~10 m.
+    """
+    months = list(monthly_kwargs.pop("months", []) or [])
+    cloud_prob_max = int(monthly_kwargs.pop("cloud_prob_max", DEFAULT_CLOUD_PROB_MAX))
+
+    def _coerce_date(value):
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value[:10])
+            except ValueError:
+                return None
+        return None
+
+    start_dt = _coerce_date(start_date)
+    end_dt = _coerce_date(end_date)
+
+    if not months and start_dt and end_dt:
+        cursor = date(start_dt.year, start_dt.month, 1)
+        end_month = date(end_dt.year, end_dt.month, 1)
+        while cursor <= end_month:
+            months.append(cursor.strftime("%Y-%m"))
+            if cursor.month == 12:
+                cursor = date(cursor.year + 1, 1, 1)
+            else:
+                cursor = date(cursor.year, cursor.month + 1, 1)
+
+    monthly_images: list[ee.Image] = []
+    for month in months:
+        _collection, composite = gee.monthly_sentinel2_collection(geom, month, cloud_prob_max)
+        monthly_images.append(ee.Image(composite).clip(geom))
+
+    if monthly_images:
+        monthly = ee.ImageCollection.fromImages(monthly_images)
+    else:
+        monthly = ee.ImageCollection([])
+
+    first_img = ee.Image(monthly.first())
+
+    monthly_ndvi = monthly.map(lambda img: compute_ndvi_loose(img).clip(geom))
+
+    ndvi_mean = mean_from_collection_sum_count(monthly_ndvi)
+
+    _ = ndvi_mean.unmask(-9999).neq(-9999).reduceRegion(
+        reducer=ee.Reducer.sum(),
+        geometry=geom,
+        scale=40,
+        maxPixels=1e9,
+        bestEffort=True,
+    ).get('NDVI_mean')
+
+    ndvi_mean_native = ee.Algorithms.If(
+        first_img,
+        reproject_native_10m(ndvi_mean, first_img, ref_band="B8", scale=10),
+        ndvi_mean,
+    )
+
+    return ee.Image(ndvi_mean_native).select(['NDVI_mean']).toFloat().clip(geom)
+
 @dataclass
 class _DownloadParams:
     crs: str | None = DEFAULT_EXPORT_CRS
@@ -613,12 +679,12 @@ def _prepare_selected_period_artifacts(
     ndvi_collection = ee.ImageCollection(ndvi_images)
     ndvi_stats = dict(_ndvi_temporal_stats(ndvi_collection))
 
-    ndvi_mean = mean_from_collection_sum_count(ndvi_collection)
-    first_ref = ee.Image(composites[0][1])
-    ndvi_mean_native = (
-        reproject_native_10m(ndvi_mean, first_ref, ref_band="B8", scale=DEFAULT_SCALE)
-        .clip(geometry)
-        .rename("NDVI_mean")
+    ndvi_mean_native = _build_mean_ndvi_for_zones(
+        geometry,
+        start_date,
+        end_date,
+        months=ordered_months,
+        cloud_prob_max=cloud_prob_max,
     )
 
     valid_pixel_count = int(
