@@ -103,7 +103,7 @@ def _build_zip_job(tmp_path, job_id: str = "job-zip"):
 def _create_zone_artifacts(workdir: Path) -> zones.ZoneArtifacts:
     workdir.mkdir(parents=True, exist_ok=True)
 
-    mean_ndvi_path = workdir / "mean_ndvi.tif"
+    mean_ndvi_path = workdir / "NDVI_mean.tif"
     with rasterio.open(
         mean_ndvi_path,
         "w",
@@ -463,7 +463,7 @@ def test_process_zip_exports_includes_zone_vectors(tmp_path, monkeypatch):
 
     file_names = {name for _, name in files}
     assert f"{job.zone_state.prefix}.tif" in file_names
-    assert f"{job.zone_state.prefix}_mean_ndvi.tif" in file_names
+    assert f"{job.zone_state.prefix}_NDVI_mean.tif" in file_names
     assert paths["vectors"].endswith(".geojson")
     assert set(paths["vector_components"]) >= {"geojson", "kml"}
     if paths["zonal_stats"]:
@@ -471,7 +471,7 @@ def test_process_zip_exports_includes_zone_vectors(tmp_path, monkeypatch):
     assert paths["vectors_zip"] is None
     assert paths["geojson"].endswith(".geojson")
     assert paths["kml"].endswith(".kml")
-    assert paths["mean_ndvi"].endswith("_mean_ndvi.tif")
+    assert paths["mean_ndvi"].endswith("_NDVI_mean.tif")
 
 
 def test_start_zone_cloud_exports_uploads_zone_files(tmp_path, monkeypatch):
@@ -519,7 +519,7 @@ def test_start_zone_cloud_exports_uploads_zone_files(tmp_path, monkeypatch):
     prefix = job.zone_state.prefix
     expected_names = {
         f"{prefix}.tif",
-        f"{prefix}_mean_ndvi.tif",
+        f"{prefix}_NDVI_mean.tif",
         f"{prefix}.geojson",
         f"{prefix}.kml",
         f"{prefix}_zonal_stats.csv",
@@ -538,12 +538,12 @@ def test_start_zone_cloud_exports_uploads_zone_files(tmp_path, monkeypatch):
 
     paths = job.zone_state.paths
     assert paths["raster"] == f"gs://test-bucket/{prefix}.tif"
-    assert paths["mean_ndvi"] == f"gs://test-bucket/{prefix}_mean_ndvi.tif"
+    assert paths["mean_ndvi"] == f"gs://test-bucket/{prefix}_NDVI_mean.tif"
     assert paths["geojson"] == f"gs://test-bucket/{prefix}.geojson"
     assert paths["kml"] == f"gs://test-bucket/{prefix}.kml"
     assert paths["vectors_zip"] is None
     assert job.zone_state.tasks["raster"]["signed_url"] == f"https://signed/{prefix}.tif"
-    assert job.zone_state.tasks["mean_ndvi"]["signed_url"] == f"https://signed/{prefix}_mean_ndvi.tif"
+    assert job.zone_state.tasks["mean_ndvi"]["signed_url"] == f"https://signed/{prefix}_NDVI_mean.tif"
     assert job.zone_state.tasks["geojson"]["signed_url"] == f"https://signed/{prefix}.geojson"
     assert job.zone_state.tasks["kml"]["signed_url"] == f"https://signed/{prefix}.kml"
     assert job.zone_state.status == "completed"
@@ -559,7 +559,7 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
 
     def _write_artifacts(workdir: Path) -> zones.ZoneArtifacts:
         workdir.mkdir(parents=True, exist_ok=True)
-        mean_ndvi_path = workdir / "mean_ndvi.tif"
+        mean_ndvi_path = workdir / "NDVI_mean.tif"
         with rasterio.open(
             mean_ndvi_path,
             "w",

@@ -651,7 +651,7 @@ def _download_zone_artifacts(
     mean_ndvi_src = Path(artifacts.mean_ndvi_path)
     if not mean_ndvi_src.exists():
         raise FileNotFoundError(f"Missing mean NDVI raster at {mean_ndvi_src}")
-    mean_ndvi_name = f"{prefix}_mean_ndvi.tif"
+    mean_ndvi_name = f"{prefix}_NDVI_mean.tif"
     mean_ndvi_path = temp_dir / mean_ndvi_name
     mean_ndvi_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(mean_ndvi_src, mean_ndvi_path)

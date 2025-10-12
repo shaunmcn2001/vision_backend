@@ -2,22 +2,25 @@ from __future__ import annotations
 
 import ee
 
-DEFAULT_SCALE = 10  # meters
+
+DEFAULT_SCALE = 10  # metres
 
 
-def compute_ndvi_loose(image: ee.Image, *, band_nir: str = "B8", band_red: str = "B4") -> ee.Image:
-    """
-    NDVI matching the general path: normalizedDifference([B8, B4]), float, no extra masks/clamps.
-    Relies entirely on the upstream mask (cloud/shadow, etc.).
-    """
-    bands = image.select([band_nir, band_red]).toFloat()
-    return bands.normalizedDifference([band_nir, band_red]).rename("NDVI").toFloat()
+def compute_ndvi_loose(image: ee.Image, *, band_nir="B8", band_red="B4") -> ee.Image:
+    """NDVI using upstream masks only; no extra clamps or dual-band mask."""
+
+    return (
+        image.select([band_nir, band_red])
+        .toFloat()
+        .normalizedDifference([band_nir, band_red])
+        .rename("NDVI")
+        .toFloat()
+    )
 
 
 def mean_from_collection_sum_count(ndvi_collection: ee.ImageCollection) -> ee.Image:
-    """
-    Mean NDVI via sum/count using masked NDVI images. Outputs single band 'NDVI_mean' masked where count==0.
-    """
+    """Mean NDVI = sum/count, masked where count==0."""
+
     summed = ndvi_collection.sum().rename("NDVI_sum")
     count = ndvi_collection.count().rename("NDVI_count")
     mean = summed.divide(count.max(1)).rename("NDVI_mean")
@@ -25,10 +28,9 @@ def mean_from_collection_sum_count(ndvi_collection: ee.ImageCollection) -> ee.Im
 
 
 def reproject_native_10m(
-    img: ee.Image, ref_image: ee.Image, *, ref_band: str = "B8", scale: int = DEFAULT_SCALE
+    img: ee.Image, ref_image: ee.Image, *, ref_band="B8", scale=DEFAULT_SCALE
 ) -> ee.Image:
-    """
-    Reproject 'img' to the native projection of ref_image's ref_band at ~10 m for analysis steps.
-    """
+    """Reproject to the native projection of ref_image's ref_band (~10 m)."""
+
     proj = ref_image.select(ref_band).projection()
     return img.toFloat().resample("bilinear").reproject(proj, None, scale)
