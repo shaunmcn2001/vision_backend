@@ -361,7 +361,7 @@ def _classify_smooth_and_polygonize(
     mmu_ha=1.0,
     smooth_radius_px=1,
 ):
-    # 1. Winsorize NDVI
+    # 1. Winsorize NDVI to trim outliers
     q = ndvi_mean_native.reduceRegion(
         reducer=ee.Reducer.percentile([2, 98]),
         geometry=geom,
@@ -373,7 +373,7 @@ def _classify_smooth_and_polygonize(
     p98 = ee.Number(q.get("NDVI_mean_p98"))
     ndvi_w = ndvi_mean_native.max(p2).min(p98)
 
-    # 2. Quantile thresholds
+    # 2. Compute percentile thresholds
     cuts = ee.List.sequence(100.0 / n_zones, 100.0 - 100.0 / n_zones, 100.0 / n_zones)
     quants = ndvi_w.reduceRegion(
         reducer=ee.Reducer.percentile(cuts),
@@ -383,43 +383,50 @@ def _classify_smooth_and_polygonize(
         maxPixels=1e9,
     )
 
-    # --- safest getter possible ---
+    # ---- safest possible quantile getter ----
     def safe_quantile(p):
         key = ee.String("NDVI_mean_p").cat(ee.Number(p).toInt().format())
         val = quants.get(key)
-        # Wrap in ee.Algorithms.If and always return ee.Number
+        # replace any None, NaN, or invalid with 0.0
         return ee.Number(
             ee.Algorithms.If(
-                ee.Algorithms.IsEqual(val, None),
+                ee.Algorithms.Or(
+                    ee.Algorithms.IsEqual(val, None),
+                    ee.Algorithms.IsEqual(val, ee.Number(float('nan')))
+                ),
                 0.0,
-                ee.Algorithms.If(val, val, 0.0)
+                ee.Number(val)
             )
         )
 
-    thresholds = cuts.map(safe_quantile)
+    thresholds = ee.List(cuts.map(safe_quantile))
 
-    # Fallback if all thresholds sum to zero (still EE objects)
-    thresholds_sum = ee.Number(ee.List(thresholds).reduce(ee.Reducer.sum()))
+    # remove any null/undefined elements explicitly
+    thresholds = ee.List(
+        thresholds.map(lambda v: ee.Number(ee.Algorithms.If(v, v, 0.0)))
+    )
+
+    # Fallback if all thresholds are zero
+    thresholds_sum = ee.Number(thresholds.reduce(ee.Reducer.sum()))
     thresholds = ee.Algorithms.If(
         thresholds_sum.eq(0),
         ee.List.sequence(0.2, 0.8, 0.2),
         thresholds
     )
-
     thresholds = ee.List(thresholds)
 
-    # 3. Classification
+    # 3. Classify NDVI
     def classify_by_thresholds(img, thr_list):
         def _step(acc, t):
-            val = ee.Number(t)
-            return ee.Image(acc).add(img.gte(val))
+            tnum = ee.Number(ee.Algorithms.If(t, t, 0))
+            return ee.Image(acc).add(img.gte(tnum))
         init = ee.Image.constant(1)
-        out = ee.Image(ee.List(thr_list).iterate(_step, init))
+        out = ee.Image(thr_list.iterate(_step, init))
         return out.rename("zone").toInt8().updateMask(img.mask())
 
     cls_raw = classify_by_thresholds(ndvi_w, thresholds)
 
-    # 4. Optional smoothing
+    # 4. Smooth (optional)
     cls_smooth = ee.Image(
         ee.Algorithms.If(
             ee.Number(smooth_radius_px).gt(0),
@@ -428,7 +435,7 @@ def _classify_smooth_and_polygonize(
         )
     ).toInt8()
 
-    # 5. MMU (~1 ha ≈ 100 px)
+    # 5. Minimum mapping unit (~1 ha = 100 px)
     min_px = ee.Number(mmu_ha).multiply(100).round().max(1)
 
     def keep_big(c):
