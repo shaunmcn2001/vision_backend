@@ -993,15 +993,16 @@ def export_selected_period_zones(
         export_target = destination
 
     def _coerce_date_any(d):
-    """Accepts str, date, or datetime."""
-    if isinstance(d, datetime):
-        return d.date()
-    if isinstance(d, date):
-        return d
-    if isinstance(d, str):
-        # handle full ISO or YYYY-MM-DD
-        return datetime.fromisoformat(d[:10]).date()
-    raise TypeError(f"Invalid date type: {type(d)}")
+        """Accepts str, date, or datetime."""
+        if isinstance(d, datetime):
+            return d.date()
+        if isinstance(d, date):
+            return d
+        if isinstance(d, str):
+            # handle full ISO or YYYY-MM-DD
+            return datetime.fromisoformat(d[:10]).date()
+        raise TypeError(f"Invalid date type: {type(d)}")
+
 
     if not months:
         if start_date is None or end_date is None:
