@@ -326,24 +326,32 @@ def _resolve_geometry(aoi: Union[dict, ee.Geometry]) -> ee.Geometry:
         pass
     return gee.geometry_from_geojson(aoi)
 
-
 def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
     monthly = gee.monthly_sentinel2_collection(
         aoi=geom, start=start_date, end=end_date, **monthly_kwargs
     )
     first_img = ee.Image(monthly.first())
-    monthly_ndvi = monthly.map(lambda img: compute_ndvi_loose(img).clip(geom))
-    ndvi_mean = mean_from_collection_sum_count(monthly_ndvi)
 
-    # safer existence check – counts unmasked pixels directly
-    valid_px = ndvi_mean.reduceRegion(
-        ee.Reducer.count(), geom, 40, bestEffort=True, maxPixels=1e9
-    ).get("NDVI_mean")
+    monthly_ndvi = monthly.map(lambda img: compute_ndvi_loose(img).clip(geom))
+    ndvi_mean = mean_from_collection_sum_count(monthly_ndvi)  # band "NDVI_mean"
+
+    # --- existence check (corrected) ---
+    counts = ndvi_mean.reduceRegion(
+        reducer=ee.Reducer.count(),
+        geometry=geom,
+        scale=40,
+        bestEffort=True,
+        maxPixels=1e9,
+    )
+    band = ee.String(ndvi_mean.bandNames().get(0))  # "NDVI_mean"
+    count_key = band.cat("_count")
+    valid_px = counts.get(count_key)
 
     if valid_px is None or ee.Number(valid_px).lte(0):
         raise ValueError(
             "No valid NDVI pixels across the selected months. Try a wider date range or relax cloud masking."
         )
+    # --- end existence check ---
 
     ndvi_mean_native = ee.Algorithms.If(
         first_img,
@@ -352,7 +360,6 @@ def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
     )
 
     return ee.Image(ndvi_mean_native).select("NDVI_mean").toFloat().clip(geom)
-
 
 def _classify_smooth_and_polygonize(
     ndvi_mean_native: ee.Image,
