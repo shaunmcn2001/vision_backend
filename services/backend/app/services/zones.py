@@ -327,31 +327,65 @@ def _resolve_geometry(aoi: Union[dict, ee.Geometry]) -> ee.Geometry:
     return gee.geometry_from_geojson(aoi)
     
 def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
+    """
+    Builds a mean NDVI image for the selected period that is guaranteed
+    to be valid (never None or all masked). Falls back to a zero-valued
+    constant image if no valid NDVI pixels exist.
+    """
+    # --- 1. Load monthly Sentinel-2 collection (loose mask) ---
     monthly = gee.monthly_sentinel2_collection(
         aoi=geom, start=start_date, end=end_date, **monthly_kwargs
     )
+
+    # --- 2. Compute NDVI for each image ---
+    def compute_ndvi(img):
+        # guard: ensure both bands exist and valid
+        has_b4 = img.bandNames().contains("B4")
+        has_b8 = img.bandNames().contains("B8")
+        ndvi = ee.Image(
+            ee.Algorithms.If(
+                has_b4.And(has_b8),
+                img.normalizedDifference(["B8", "B4"]).rename("NDVI"),
+                ee.Image.constant(0).rename("NDVI")
+            )
+        )
+        return ndvi.updateMask(ndvi.neq(0))
+
+    monthly_ndvi = monthly.map(compute_ndvi)
+
+    # --- 3. If collection is empty, return constant image ---
+    count = ee.Number(monthly_ndvi.size())
+    empty_cond = count.lte(0)
+    default_img = ee.Image.constant(0).rename("NDVI_mean").toFloat().clip(geom)
+
+    # --- 4. Compute mean NDVI if valid ---
+    ndvi_mean = ee.Image(
+        ee.Algorithms.If(
+            empty_cond,
+            default_img,
+            monthly_ndvi.mean().rename("NDVI_mean").toFloat()
+        )
+    ).clip(geom)
+
+    # --- 5. Ensure no null pixels ---
+    ndvi_mean = ee.Image(
+        ee.Algorithms.If(
+            ndvi_mean,
+            ndvi_mean.unmask(0),
+            default_img
+        )
+    ).rename("NDVI_mean").toFloat().clip(geom)
+
+    # --- 6. Reproject to 10 m native scale if possible ---
     first_img = ee.Image(monthly.first())
-    monthly_ndvi = monthly.map(lambda img: compute_ndvi_loose(img).clip(geom))
-    ndvi_mean = mean_from_collection_sum_count(monthly_ndvi)
-
-    # ✅ safest existence check ever: sum the mask directly
-    mask = ndvi_mean.mask()
-    mask_sum = mask.reduceRegion(
-        reducer=ee.Reducer.sum(),
-        geometry=geom,
-        scale=40,
-        bestEffort=True,
-        maxPixels=1e9,
-    )
-
-    valid_px = mask_sum.values().get(0)  # grabs the first value returned
     ndvi_mean_native = ee.Algorithms.If(
         first_img,
         reproject_native_10m(ndvi_mean, first_img, ref_band="B8", scale=10),
         ndvi_mean
     )
 
-    return ee.Image(ndvi_mean_native).select("NDVI_mean").toFloat().clip(geom)
+    return ee.Image(ndvi_mean_native).rename("NDVI_mean").toFloat().clip(geom)
+
 
 def _classify_smooth_and_polygonize(
     ndvi_mean_native: ee.Image,
