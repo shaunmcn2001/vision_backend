@@ -1,4 +1,3 @@
-"""Production zone workflow built on Sentinel-2 monthly composites."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,7 +12,9 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+from tempfile import NamedTemporaryFile
 import zipfile
+from zipfile import ZipFile
 from typing import Any, Dict, List, Mapping, Sequence, Tuple, Union
 from urllib.request import urlopen
 
@@ -235,9 +236,20 @@ def _extract_geotiff_from_zip(payload: bytes, target: Path) -> None:
         with archive.open(member) as source, target.open("wb") as output:
             shutil.copyfileobj(source, output)
 
+def _write_zip_geotiff_from_file(zip_path: Path, target: Path) -> None:
+    """Extract the first GeoTIFF from a ZIP file on disk to target, without loading into RAM."""
+    with ZipFile(zip_path, "r") as archive:
+        members = [m for m in archive.namelist() if m.lower().endswith((".tif", ".tiff"))]
+        if not members:
+            raise ValueError("Zip archive did not contain a GeoTIFF file")
+        first = members[0]
+        with archive.open(first) as source, target.open("wb") as out_f:
+            shutil.copyfileobj(source, out_f)
+
 def _download_image_to_path(
     image: ee.Image, geometry: ee.Geometry, target: Path
 ) -> ImageExportResult:
+    """Export image and also fetch a small direct download. STREAM to disk to avoid OOM."""
     region_coords = _geometry_region(geometry)
     ee_region = ee.Geometry.Polygon(region_coords)
     sanitized_name = sanitize_name(target.stem or "export")
@@ -246,7 +258,7 @@ def _download_image_to_path(
 
     task: ee.batch.Task | None = None
     try:
-        # IMPORTANT: do NOT pass filePerBand to Drive export
+        # IMPORTANT: do NOT pass filePerBand to Drive export (EE rejects it for Drive)
         task = ee.batch.Export.image.toDrive(
             image=image,
             description=description,
@@ -262,28 +274,41 @@ def _download_image_to_path(
         logger.exception("Failed to start Drive export for %s", sanitized_name)
         task = None
 
-    # Small direct download (ok to use filePerBand here)
+    # Also fetch a direct download as a local artifact (STREAM, not .read())
     params = {
-        "scale": DEFAULT_SCALE,
+        "scale": DEFAULT_SCALE,       # keep image native projection; do NOT set 'crs'
         "region": region_coords,
-        "filePerBand": False,
+        "filePerBand": False,         # safe here (only for getDownloadURL)
         "format": "GeoTIFF",
     }
     url = image.getDownloadURL(params)
+
+    # Stream to disk to avoid holding the full file in memory
     with urlopen(url) as response:
-        payload = response.read()
         headers = getattr(response, "headers", None)
         content_type = headers.get("Content-Type", "") if headers and hasattr(headers, "get") else ""
-    if "zip" in content_type.lower():
-        _write_zip_geotiff(BytesIO(payload), target)
-        path = target
-    else:
-        with target.open("wb") as f:
-            f.write(payload)
-        path = target
 
-    return ImageExportResult(path=path, task=task, description=description, folder=folder, prefix=sanitized_name)
+        if "zip" in content_type.lower():
+            with NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
+                shutil.copyfileobj(response, tmp_zip)  # stream ZIP to temp file
+                tmp_zip_path = Path(tmp_zip.name)
+            _write_zip_geotiff_from_file(tmp_zip_path, target)
+            try:
+                tmp_zip_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            # Stream raw GeoTIFF to target
+            with target.open("wb") as out_f:
+                shutil.copyfileobj(response, out_f)
 
+    return ImageExportResult(
+        path=target,
+        task=task,
+        description=description,
+        folder=folder,
+        prefix=sanitized_name,
+    )
 
 def _majority_filter(data: np.ndarray, radius: int) -> np.ndarray:
     if radius <= 0:
