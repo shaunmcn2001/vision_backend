@@ -553,10 +553,11 @@ def _classify_smooth_and_polygonize(
     # --- 8. MMU filtering ---
     min_px = ee.Number(mmu_ha).multiply(100).round().max(1)
 
-    def keep_big(c):
+   def keep_big(c):
         mask = cls_smooth.eq(c)
         valid = mask.connectedPixelCount(maxSize=1e6, eightConnected=True).gte(min_px)
-        return cls_smooth.updateMask(mask.And(valid))
+        combined = mask.multiply(valid).gt(0)  # ✅ replaces mask.And(valid)
+        return cls_smooth.updateMask(combined)
 
     cls_mmu = ee.ImageCollection(
         ee.List.sequence(1, n_zones).map(lambda c: keep_big(ee.Number(c)))
@@ -960,19 +961,31 @@ def export_selected_period_zones(
     if destination is not None:
         export_target = destination
 
+    def _coerce_date_any(d):
+    """Accepts str, date, or datetime."""
+    if isinstance(d, datetime):
+        return d.date()
+    if isinstance(d, date):
+        return d
+    if isinstance(d, str):
+        # handle full ISO or YYYY-MM-DD
+        return datetime.fromisoformat(d[:10]).date()
+    raise TypeError(f"Invalid date type: {type(d)}")
+
     if not months:
         if start_date is None or end_date is None:
             raise ValueError("Either months or start/end dates must be supplied")
-        start_dt = datetime.fromisoformat(start_date).date()
-        end_dt = datetime.fromisoformat(end_date).date()
+        start_dt = _coerce_date_any(start_date)
+        end_dt = _coerce_date_any(end_date)
         months = _months_from_dates(start_dt, end_dt)
-
+    
     ordered_months = _ordered_months(months)
+    
     if start_date is None or end_date is None:
         start_dt, end_dt = _month_range_dates(ordered_months)
     else:
-        start_dt = datetime.fromisoformat(start_date).date()
-        end_dt = datetime.fromisoformat(end_date).date()
+        start_dt = _coerce_date_any(start_date)
+        end_dt = _coerce_date_any(end_date)
 
     include_stats_flag = bool(include_stats if include_stats is not None else include_zonal_stats)
 
