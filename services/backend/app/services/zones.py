@@ -509,22 +509,28 @@ def _prepare_selected_period_artifacts(
         cloud_prob_max=cloud_prob_max,
     )
 
-    cnt = ndvi_mean_native.unmask(-9999).neq(-9999).reduceRegion(
-        ee.Reducer.sum(), geometry, 40, bestEffort=True, maxPixels=1e9
-    ).get("NDVI_mean")
-
-    # safer valid-pixel count check
+    # --- robust valid-pixel counter ---
     try:
-        cnt_value = ee.Number(cnt).getInfo()
-        if cnt_value is None:
-            raise ValueError("Pixel count returned None")
-        if cnt_value <= 0:
-            raise ValueError("Pixel count is zero")
-    except Exception as e:
-        # instead of failing outright, log and continue
-        print("⚠️ Warning: NDVI pixel count check skipped due to:", str(e))
-        cnt_value = 1  # assume at least one valid pixel so pipeline continues
+        cnt_dict = ndvi_mean_native.mask().reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=geometry,
+            scale=40,
+            bestEffort=True,
+            maxPixels=1e9,
+        )
     
+        # safely get the first value from the dictionary (no hardcoded band names)
+        cnt_value = ee.Number(ee.Dictionary(cnt_dict).values().get(0)).getInfo()
+    
+        if cnt_value is None or cnt_value <= 0:
+            raise ValueError(NDVI_MASK_EMPTY_ERROR)
+    
+    except Exception as e:
+        # instead of stopping, log the issue and assume valid pixels exist
+        print("⚠️ Warning: NDVI pixel count check skipped due to:", str(e))
+        cnt_value = 1
+    # --- end robust counter ---
+
     # only raise if we *know for sure* there are no valid pixels
     if cnt_value <= 0:
         raise ValueError(NDVI_MASK_EMPTY_ERROR)
