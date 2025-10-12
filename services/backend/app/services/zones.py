@@ -302,13 +302,7 @@ def _download_image_to_path(
             with target.open("wb") as out_f:
                 shutil.copyfileobj(response, out_f)
 
-    return ImageExportResult(
-        path=target,
-        task=task,
-        description=description,
-        folder=folder,
-        prefix=sanitized_name,
-    )
+    return ImageExportResult(path=target, task=task)
 
 def _majority_filter(data: np.ndarray, radius: int) -> np.ndarray:
     if radius <= 0:
