@@ -59,6 +59,15 @@ ZONE_PALETTE: Tuple[str, ...] = (
 NDVI_MASK_EMPTY_ERROR = (
     "No valid NDVI pixels across the selected months. Try a wider date range or relax cloud masking."
 )
+NDVI_VARIATION_TOO_LOW_ERROR = (
+    "NDVI variation too low to produce meaningful production zones. "
+    "Try using a different time period or crop stage with greater contrast."
+)
+
+S2_COLLECTION_EMPTY_ERROR = (
+    "No Sentinel-2 imagery found for the selected area and dates. "
+    "Ensure your AOI and date range are within valid coverage."
+)
 
 
 @dataclass(frozen=True)
@@ -339,7 +348,7 @@ def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
     # --- handle empty collection early ---
     count = ee.Number(monthly.size())
     if count.getInfo() == 0:
-        raise ValueError("No Sentinel-2 images found for selected months / AOI.")
+        raise ValueError(S2_COLLECTION_EMPTY_ERROR)
 
     def compute_ndvi(img):
         return img.normalizedDifference(["B8", "B4"]).rename("NDVI")
@@ -358,10 +367,7 @@ def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
     ).getInfo()
 
     if not valid or list(valid.values())[0] == 0:
-        raise ValueError(
-            "No valid NDVI pixels across the selected months. "
-            "Try a wider date range or relax cloud masking."
-        )
+        raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
     # --- check for zero variance (flat NDVI) ---
     stats = ndvi_mean.reduceRegion(
@@ -373,9 +379,7 @@ def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
     ).getInfo()
 
     if not stats or list(stats.values())[0] < 0.01:
-        raise ValueError(
-            "NDVI variation too low to produce meaningful production zones."
-        )
+        raise ValueError(NDVI_VARIATION_TOO_LOW_ERROR)
 
     # --- reproject to 10 m native scale ---
     first_img = ee.Image(monthly.first())
