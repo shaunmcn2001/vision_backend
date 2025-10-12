@@ -334,15 +334,23 @@ def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
     first_img = ee.Image(monthly.first())
     monthly_ndvi = monthly.map(lambda img: compute_ndvi_loose(img).clip(geom))
     ndvi_mean = mean_from_collection_sum_count(monthly_ndvi)
-    # quick existence check
-    _ = ndvi_mean.unmask(-9999).neq(-9999).reduceRegion(
-        ee.Reducer.sum(), geom, 40, bestEffort=True, maxPixels=1e9
+
+    # safer existence check – counts unmasked pixels directly
+    valid_px = ndvi_mean.reduceRegion(
+        ee.Reducer.count(), geom, 40, bestEffort=True, maxPixels=1e9
     ).get("NDVI_mean")
+
+    if valid_px is None or ee.Number(valid_px).lte(0):
+        raise ValueError(
+            "No valid NDVI pixels across the selected months. Try a wider date range or relax cloud masking."
+        )
+
     ndvi_mean_native = ee.Algorithms.If(
         first_img,
         reproject_native_10m(ndvi_mean, first_img, ref_band="B8", scale=10),
         ndvi_mean
     )
+
     return ee.Image(ndvi_mean_native).select("NDVI_mean").toFloat().clip(geom)
 
 
