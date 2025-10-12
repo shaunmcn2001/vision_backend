@@ -602,21 +602,26 @@ def _prepare_selected_period_artifacts(
 
     # ---- FIX: mean NDVI as sum/count (no reproject), keep float32 ----
     # Compute mean NDVI with a proper valid-data mask; avoid divide-by-count trick that yields zeros.
+    # Build mean NDVI and keep pixels with >=1 valid obs. Do NOT apply stability mask here.
     if ndvi_collection is not None:
         try:
-            valid_mask = ndvi_collection.count().gt(0)  # pixels with at least 1 valid NDVI
+            valid_mask = ndvi_collection.count().gt(0)
             mean_image = (
                 ndvi_collection.mean()
                 .toFloat()
-                .updateMask(valid_mask)  # mask out pixels with no observations
+                .updateMask(valid_mask)   # masked pixels remain masked
                 .clip(geometry)
                 .rename("NDVI_mean")
             )
             ndvi_stats["mean"] = mean_image
-            # Optional debug (uncomment to log):
-            # logger.info("NDVI mean projection: %s", mean_image.projection().getInfo())
+            # Optional debug:
+            # logger.info("Mean NDVI min/max: %s", mean_image.reduceRegion(
+            #     reducer=ee.Reducer.minMax(),
+            #     geometry=geometry, scale=DEFAULT_SCALE, bestEffort=True, tileScale=4, maxPixels=gee.MAX_PIXELS
+            # ).getInfo())
         except Exception:
             logger.exception("Failed to compute NDVI mean from collection")
+
 
     stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
     if stability_flag:
@@ -719,7 +724,7 @@ def export_selected_period_zones(
     geometry: ee.Geometry | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
-    cloud_prob_max: int = 40,
+    cloud_prob_max: int = 80,
     n_classes: int = 5,
     cv_mask_threshold: float | None = None,
     mmu_ha: float = 2.0,
