@@ -56,6 +56,8 @@ DEFAULT_SAMPLE_SIZE = 4000
 DEFAULT_SCALE = int(os.getenv("ZONES_SCALE_M", "10"))
 DEFAULT_EXPORT_CRS = "EPSG:3857"  # GeoTIFF CRS
 DEFAULT_CRS = DEFAULT_EXPORT_CRS
+DISABLE_STABILITY = os.getenv("ZONES_DISABLE_STABILITY", "").lower() in {"1","true","yes"}
+DISABLE_CLOUDMASK = os.getenv("ZONES_DISABLE_CLOUDMASK", "").lower() in {"1","true","yes"}
 
 ZONES_STREAM_TRIGGER_PX = int(os.getenv("ZONES_STREAM_TRIGGER_PX", "40000000"))  # ~40M px
 
@@ -169,18 +171,99 @@ def _attach_cloud_probability(collection: ee.ImageCollection, probability: ee.Im
         return image.addBands(probability_band)
     return ee.ImageCollection(matches).map(_add_probability)
 
-def _mask_s2(image: ee.Image, cloud_prob_max: int) -> ee.Image:
-    qa = image.select('QA60')
+def _mask_s2(image: ee.Image, cloud_prob_max: int, geometry: ee.Geometry) -> ee.Image:
+    """
+    Robust S2 mask:
+      1) QA (no clouds/cirrus) & cloud_probability<=X & no shadow
+      2) QA & no shadow
+      3) cloud_probability<=X
+      4) QA only
+      5) No mask (last resort)
+    Why: avoid exporting a constant raster when strict masks remove all pixels.
+    """
+
+    # Allow disabling whole cloud mask for debugging (keeps values; just scales)
+    if DISABLE_CLOUDMASK:
+        return (
+            image.divide(10_000)
+            .select(list(gee.S2_BANDS))
+            .copyProperties(image, ["system:time_start"])
+        )
+
+    qa = image.select("QA60")
     cloud_bit_mask = 1 << 10
     cirrus_bit_mask = 1 << 11
-    qa_mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(qa.bitwiseAnd(cirrus_bit_mask).eq(0))
-    prob_mask = image.select('cloud_probability').lte(cloud_prob_max)
-    scl = image.select('SCL')
-    shadow_mask = scl.neq(3).And(scl.neq(11))
-    combined_mask = qa_mask.And(prob_mask).And(shadow_mask)
-    scaled = image.updateMask(combined_mask).divide(10_000)
+    qa_mask = qa.bitwiseAnd(cloud_bit_mask).eq(0).And(
+        qa.bitwiseAnd(cirrus_bit_mask).eq(0)
+    )
+
+    prob_mask = image.select("cloud_probability").lte(cloud_prob_max)
+
+    scl = image.select("SCL")
+    shadow_mask = scl.neq(3).And(scl.neq(11))  # 3=Cloud shadow, 11=Snow/Ice
+
+    m_combined = qa_mask.And(prob_mask).And(shadow_mask)
+    m_qa_shadow = qa_mask.And(shadow_mask)
+    m_prob_only = prob_mask
+    m_qa_only = qa_mask
+    m_none = ee.Image(1)
+
+    def _count(mask_img: ee.Image) -> ee.Number:
+        # Count valid pixels inside AOI to decide fallback path (server-side, no getInfo() here)
+        return ee.Number(
+            mask_img.selfMask()
+            .reduceRegion(
+                reducer=ee.Reducer.count(),
+                geometry=geometry,
+                scale=DEFAULT_SCALE,
+                bestEffort=True,
+                tileScale=4,
+                maxPixels=gee.MAX_PIXELS,
+            )
+            .values()
+            .get(0)
+        )
+
+    # Server-side conditional selection of first mask that leaves any pixels
+    selected_mask = ee.Image(
+        ee.Algorithms.If(
+            _count(m_combined).gt(0),
+            m_combined,
+            ee.Algorithms.If(
+                _count(m_qa_shadow).gt(0),
+                m_qa_shadow,
+                ee.Algorithms.If(
+                    _count(m_prob_only).gt(0),
+                    m_prob_only,
+                    ee.Algorithms.If(_count(m_qa_only).gt(0), m_qa_only, m_none),
+                ),
+            ),
+        )
+    )
+
+    # Helpful log (will show which mask survived)
+    try:
+        # This logs only a tiny dictionary; safe to do occasionally.
+        stats = (
+            selected_mask.selfMask()
+            .reduceRegion(
+                reducer=ee.Reducer.count(),
+                geometry=geometry,
+                scale=DEFAULT_SCALE,
+                bestEffort=True,
+                tileScale=4,
+                maxPixels=gee.MAX_PIXELS,
+            )
+            .getInfo()
+            or {}
+        )
+        logger.info("S2 mask pixel count (fallback-aware): %s", stats)
+    except Exception:
+        logger.exception("S2 mask stats failed")
+
+    scaled = image.updateMask(selected_mask).divide(10_000)
     selected = scaled.select(list(gee.S2_BANDS))
-    return selected.copyProperties(image, ['system:time_start'])
+    return selected.copyProperties(image, ["system:time_start"])
 
 def _compute_ndvi(image: ee.Image) -> ee.Image:
     bands = image.select(['B8', 'B4']).toFloat()
@@ -224,7 +307,7 @@ def _build_composite_series(geometry: ee.Geometry, months: Sequence[str], start_
         base = (ee.ImageCollection(gee.S2_SR_COLLECTION).filterBounds(geometry).filterDate(start_iso, end_exclusive_iso))
         prob = (ee.ImageCollection(gee.S2_CLOUD_PROB_COLLECTION).filterBounds(geometry).filterDate(start_iso, end_exclusive_iso))
         with_prob = _attach_cloud_probability(base, prob)
-        masked = with_prob.map(lambda img: _mask_s2(img, cloud_prob_max))
+        masked = with_prob.map(lambda img: _mask_s2(ee.Image(img), cloud_prob_max, geometry))
         scene_count = int(ee.Number(masked.size()).getInfo() or 0)
         meta['scene_count'] = scene_count
         if scene_count == 0: return [], ordered, meta
@@ -603,28 +686,43 @@ def _prepare_selected_period_artifacts(
     # ---- FIX: mean NDVI as sum/count (no reproject), keep float32 ----
     # Compute mean NDVI with a proper valid-data mask; avoid divide-by-count trick that yields zeros.
     # Build mean NDVI and keep pixels with >=1 valid obs. Do NOT apply stability mask here.
+    # --- DEBUG-friendly mean NDVI (paste this block) ---
     if ndvi_collection is not None:
         try:
-            valid_mask = ndvi_collection.count().gt(0)
+            valid_mask = ndvi_collection.count().gt(0)  # ≥1 valid scene
             mean_image = (
                 ndvi_collection.mean()
                 .toFloat()
-                .updateMask(valid_mask)   # masked pixels remain masked
+                .updateMask(valid_mask)      # keep nodata masked
                 .clip(geometry)
                 .rename("NDVI_mean")
             )
             ndvi_stats["mean"] = mean_image
-            # Optional debug:
-            # logger.info("Mean NDVI min/max: %s", mean_image.reduceRegion(
-            #     reducer=ee.Reducer.minMax(),
-            #     geometry=geometry, scale=DEFAULT_SCALE, bestEffort=True, tileScale=4, maxPixels=gee.MAX_PIXELS
-            # ).getInfo())
+    
+            # DEBUG: log min, max, std to prove variation BEFORE export
+            dbg_reduce_kwargs = dict(
+                reducer=ee.Reducer.minMax().combine(**{"reducer2": ee.Reducer.stdDev(), "sharedInputs": True}),
+                geometry=geometry,
+                scale=DEFAULT_SCALE,
+                bestEffort=True,
+                tileScale=4,
+                maxPixels=gee.MAX_PIXELS,
+            )
+            try:
+                dbg = mean_image.reduceRegion(**dbg_reduce_kwargs).getInfo() or {}
+                logger.info("NDVI DEBUG — min/max/std: %s", dbg)
+            except Exception:
+                logger.exception("NDVI DEBUG — reduceRegion failed")
         except Exception:
             logger.exception("Failed to compute NDVI mean from collection")
+# --- END DEBUG block ---
 
 
-    stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
-    if stability_flag:
+    stability_flag = (
+    (APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask))
+    and not DISABLE_STABILITY
+    )
+       if stability_flag:
         stability_image = _stability_mask(
             ndvi_stats['cv'], geometry, [0.5, 1.0, 1.5, 2.0], 0.0, DEFAULT_SCALE
         )
