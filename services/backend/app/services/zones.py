@@ -346,51 +346,126 @@ def _build_mean_ndvi_for_zones(
     """
     Build mean NDVI for the selected period.
     Raises friendly errors if no imagery, no valid pixels, or too little variation.
+    Never fabricates pixels; may relax cloud mask once if the strict pass is fully masked.
     """
 
-    # Normalize dates -> ISO strings
+    # -- helpers ---------------------------------------------------------------
+
     def _iso(d):
-        if isinstance(d, date):
-            return d.isoformat()
+        # Accepts str, date, or datetime → ISO string
+        if isinstance(d, (datetime, date)):
+            return d.date().isoformat() if isinstance(d, datetime) else d.isoformat()
         return str(d)
 
-    # 1) Monthly Sentinel-2 collection (your helper handles months/clouds)
-    monthly = gee.monthly_sentinel2_collection(
-        aoi=geom, start=_iso(start_date), end=_iso(end_date),
-        months=months, cloud_prob_max=cloud_prob_max
-    )
+    def _ndvi(img: ee.Image) -> ee.Image:
+        """NDVI with robust band presence checks; keeps upstream mask."""
+        bnames = ee.List(img.bandNames())
+        idx4 = ee.Number(bnames.indexOf('B4'))
+        idx8 = ee.Number(bnames.indexOf('B8'))
 
-    # Collection size (server → client)
+        # booleans-as-numbers (0/1) → combine → boolean
+        has_b4 = idx4.gte(0)                   # ee.Number(0/1)
+        has_b8 = idx8.gte(0)                   # ee.Number(0/1)
+        both   = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
+
+        ndvi_img = ee.Image(
+            ee.Algorithms.If(
+                both,
+                img.normalizedDifference(['B8', 'B4']).rename('NDVI'),
+                ee.Image.constant(float('nan')).rename('NDVI')  # remain masked if bands missing
+            )
+        )
+        return ee.Image(ndvi_img).updateMask(img.mask())
+
+    def _monthly(aoi, start, end, mths, cprob) -> ee.ImageCollection:
+        return gee.monthly_sentinel2_collection(
+            aoi=aoi, start=start, end=end, months=mths, cloud_prob_max=cprob
+        )
+
+    def _mean_ndvi(ic: ee.ImageCollection) -> ee.Image:
+        return ic.map(_ndvi).mean().rename('NDVI_mean').toFloat().clip(geom)
+
+    def _valid_pixel_count(img: ee.Image) -> int | None:
+        """Sum of mask (approx pixel count). Returns an int or None if it can’t be fetched."""
+        try:
+            d = img.mask().reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=geom,
+                scale=40,
+                bestEffort=True,
+                maxPixels=1e9,
+            )
+            # get the first (and only) value safely
+            val = ee.Number(ee.Dictionary(d).values().get(0)).getInfo()
+            return int(val) if val is not None else None
+        except Exception:
+            return None
+
+    def _std_val(img: ee.Image) -> float:
+        """StdDev for variation gate (server→client once)."""
+        try:
+            d = img.reduceRegion(
+                reducer=ee.Reducer.stdDev(),
+                geometry=geom,
+                scale=40,
+                bestEffort=True,
+                maxPixels=1e9,
+            )
+            val = ee.Dictionary(d).values().get(0)
+            return float(ee.Number(val).getInfo() if val is not None else 0.0)
+        except Exception:
+            return 0.0
+
+    # -- build (strict pass) ---------------------------------------------------
+
+    start_iso = _iso(start_date)
+    end_iso   = _iso(end_date)
+
+    monthly_strict = _monthly(geom, start_iso, end_iso, months, cloud_prob_max)
+
+    # collection exists?
     try:
-        ic_size = int(ee.Number(monthly.size()).getInfo() or 0)
+        ic_size = int(ee.Number(monthly_strict.size()).getInfo() or 0)
     except Exception:
         ic_size = 0
     if ic_size == 0:
         raise ValueError(S2_COLLECTION_EMPTY_ERROR)
 
-    def _ndvi(img: ee.Image) -> ee.Image:
-        bnames = ee.List(img.bandNames())
-    
-        # Indices as ee.Number
-        idx4 = ee.Number(bnames.indexOf('B4'))
-        idx8 = ee.Number(bnames.indexOf('B8'))
-    
-        # Presence flags as ee.Number(0/1)
-        has_b4 = idx4.gte(0)            # -> Computed Number (0/1)
-        has_b8 = idx8.gte(0)            # -> Computed Number (0/1)
-    
-        # "Both present" as a numeric boolean, then to a proper Boolean via .eq(1)
-        both = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
-    
-        ndvi_img = ee.Image(
-            ee.Algorithms.If(
-                both,
-                img.normalizedDifference(['B8', 'B4']).rename('NDVI'),
-                ee.Image.constant(float('nan')).rename('NDVI')  # keep masked if bands missing
-            )
+    ndvi_mean = _mean_ndvi(monthly_strict)
+    cnt = _valid_pixel_count(ndvi_mean)
+
+    # -- relax once if strict is fully masked ---------------------------------
+
+    if cnt is None or cnt <= 0:
+        monthly_relaxed = _monthly(geom, start_iso, end_iso, months, max(cloud_prob_max, 60) + 35)
+        # If helper respects cloud_prob_max, this pushes to ~95; clamp at 100 if needed.
+        ndvi_mean_relaxed = _mean_ndvi(monthly_relaxed)
+        cnt2 = _valid_pixel_count(ndvi_mean_relaxed)
+
+        if cnt2 is None or cnt2 <= 0:
+            # truly no valid pixels for the period
+            raise ValueError(NDVI_MASK_EMPTY_ERROR)
+
+        ndvi_mean = ndvi_mean_relaxed  # use the relaxed result
+
+    # -- variation gate (avoid “single-zone”) ---------------------------------
+
+    std_val = _std_val(ndvi_mean)
+    if std_val < 0.01:  # tweak threshold to suit agronomy
+        raise ValueError(NDVI_VARIATION_TOO_LOW_ERROR)
+
+    # -- optional native reprojection (if you have a real source reference) ----
+
+    first_img = ee.Image(ee.ImageCollection(monthly_strict).first())
+    ndvi_native = ee.Image(
+        ee.Algorithms.If(
+            first_img,
+            reproject_native_10m(ndvi_mean, first_img, ref_band='B8', scale=10),
+            ndvi_mean
         )
-    
-        return ee.Image(ndvi_img).updateMask(img.mask())
+    )
+
+    return ee.Image(ndvi_native).rename('NDVI_mean').toFloat().clip(geom)
 
     monthly_ndvi = monthly.map(_ndvi)
 
