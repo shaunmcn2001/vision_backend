@@ -389,7 +389,7 @@ def _build_mean_ndvi_for_zones(
     if std_val is None:
         std_val = 0.0
     
-    if std_val < 0.01:
+    if std_val < 0.0005:
         raise ValueError(NDVI_VARIATION_TOO_LOW_ERROR)
 
     first_img = ee.Image(monthly.first())
