@@ -5,9 +5,9 @@ import base64
 import binascii
 import json
 import os
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
 import ee
 
@@ -174,29 +174,101 @@ def _mask_sentinel2(image: ee.Image, cloud_prob_max: int) -> ee.Image:
 
 
 def monthly_sentinel2_collection(
-    geometry: ee.Geometry, month: str, cloud_prob_max: int = 40
-) -> Tuple[ee.ImageCollection, ee.Image]:
-    """Build a masked Sentinel-2 collection and monthly composite for a month string."""
-    start_iso, end_iso = month_date_range(month)
+    geometry: ee.Geometry | None = None,
+    month: str | None = None,
+    cloud_prob_max: int = 40,
+    *,
+    aoi: ee.Geometry | None = None,
+    start: date | datetime | str | None = None,
+    end: date | datetime | str | None = None,
+    months: Sequence[str] | None = None,
+) -> Tuple[ee.ImageCollection, ee.Image] | ee.ImageCollection:
+    """Build Sentinel-2 composites for a month or date range."""
 
-    base_collection = (
-        ee.ImageCollection(S2_SR_COLLECTION)
-        .filterBounds(geometry)
-        .filterDate(start_iso, end_iso)
-    )
+    if month is not None:
+        if geometry is None:
+            raise ValueError("geometry must be provided when month is specified")
+        start_iso, end_iso = month_date_range(month)
 
-    probability = (
-        ee.ImageCollection(S2_CLOUD_PROB_COLLECTION)
-        .filterBounds(geometry)
-        .filterDate(start_iso, end_iso)
-    )
+        base_collection = (
+            ee.ImageCollection(S2_SR_COLLECTION)
+            .filterBounds(geometry)
+            .filterDate(start_iso, end_iso)
+        )
 
-    with_clouds = _attach_cloud_probability(base_collection, probability)
-    masked = with_clouds.map(lambda img: _mask_sentinel2(img, cloud_prob_max))
+        probability = (
+            ee.ImageCollection(S2_CLOUD_PROB_COLLECTION)
+            .filterBounds(geometry)
+            .filterDate(start_iso, end_iso)
+        )
 
-    composite = masked.median().select(S2_BANDS)
-    composite = composite.set({"system:time_start": ee.Date(start_iso).millis(), "month": month})
-    return masked, composite
+        with_clouds = _attach_cloud_probability(base_collection, probability)
+        masked = with_clouds.map(lambda img: _mask_sentinel2(img, cloud_prob_max))
+
+        composite = masked.median().select(S2_BANDS)
+        composite = composite.set(
+            {"system:time_start": ee.Date(start_iso).millis(), "month": month}
+        )
+        return masked, composite
+
+    target_geometry = aoi or geometry
+    if target_geometry is None:
+        raise ValueError("geometry or aoi must be provided")
+
+    def _coerce_months(seq: Sequence[str] | None) -> List[str]:
+        ordered: List[str] = []
+        seen: Set[str] = set()
+        if not seq:
+            return ordered
+        for raw in seq:
+            month_str = str(raw).strip()
+            if not month_str or month_str in seen:
+                continue
+            seen.add(month_str)
+            ordered.append(month_str)
+        return ordered
+
+    def _coerce_date(value: date | datetime | str | None) -> date | None:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value[:10]).date()
+            except ValueError:
+                return None
+        return None
+
+    month_list = _coerce_months(months)
+    if not month_list:
+        start_date = _coerce_date(start)
+        end_date = _coerce_date(end)
+        if not start_date or not end_date:
+            raise ValueError("start and end dates are required when months are not provided")
+        cursor = date(start_date.year, start_date.month, 1)
+        end_cursor = date(end_date.year, end_date.month, 1)
+        while cursor <= end_cursor:
+            month_list.append(cursor.strftime("%Y-%m"))
+            if cursor.month == 12:
+                cursor = date(cursor.year + 1, 1, 1)
+            else:
+                cursor = date(cursor.year, cursor.month + 1, 1)
+
+    images: List[ee.Image] = []
+    for month_str in month_list:
+        collection, composite = monthly_sentinel2_collection(
+            target_geometry, month_str, cloud_prob_max=cloud_prob_max
+        )
+        try:
+            count = int(ee.Number(collection.size()).getInfo() or 0)
+        except Exception:
+            count = 0
+        if count == 0:
+            continue
+        images.append(ee.Image(composite).clip(target_geometry).set("month", month_str))
+
+    return ee.ImageCollection(images)
 
 
 def list_collection_images(collection: ee.ImageCollection) -> List[ee.Image]:
