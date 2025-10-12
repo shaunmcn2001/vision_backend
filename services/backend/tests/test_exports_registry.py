@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import shutil
 import sys
 import zipfile
@@ -18,7 +19,6 @@ import pytest
 import rasterio
 from fastapi import HTTPException
 from rasterio.transform import from_origin
-import shapefile
 
 from app import exports
 from app.api import s2_indices
@@ -133,28 +133,33 @@ def _create_zone_artifacts(workdir: Path) -> zones.ZoneArtifacts:
     ) as dst:
         dst.write(np.array([[1]], dtype="uint8"), 1)
 
-    vector_dir = workdir / "vectors"
-    vector_dir.mkdir(exist_ok=True)
-    shp_base = vector_dir / "zones"
-    with shapefile.Writer(str(shp_base), shapeType=shapefile.POLYGON) as writer:
-        writer.autoBalance = 1
-        writer.field("zone", "N", decimal=0)
-        writer.field("area_ha", "F", decimal=4)
-        writer.record(1, 0.1)
-        writer.shape(
+    geojson_path = workdir / "zones.geojson"
+    geojson_path.write_text(
+        json.dumps(
             {
-                "type": "Polygon",
-                "coordinates": [[[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]]],
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [[[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]]],
+                        },
+                        "properties": {"zone": 1},
+                    }
+                ],
             }
         )
-    shp_base.with_suffix(".cpg").write_text("UTF-8")
-    shp_base.with_suffix(".prj").write_text("")
-    shp_path = shp_base.with_suffix(".shp")
-    vector_components = {}
-    for ext in ["shp", "dbf", "shx", "prj", "cpg"]:
-        member = shp_base.with_suffix(f".{ext}")
-        if member.exists():
-            vector_components[ext] = str(member)
+    )
+
+    kml_path = workdir / "zones.kml"
+    kml_path.write_text(
+        "<?xml version='1.0' encoding='UTF-8'?><kml><Document><Placemark><name>Zone 1</name>"
+        "<Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 0,10 10,10 10,0 0,0</coordinates>"
+        "</LinearRing></outerBoundaryIs></Polygon></Placemark></Document></kml>"
+    )
+
+    vector_components = {"geojson": str(geojson_path), "kml": str(kml_path)}
 
     stats_path = workdir / "zones_stats.csv"
     stats_path.write_text(
@@ -164,7 +169,7 @@ def _create_zone_artifacts(workdir: Path) -> zones.ZoneArtifacts:
     return zones.ZoneArtifacts(
         raster_path=str(raster_path),
         mean_ndvi_path=str(mean_ndvi_path),
-        vector_path=str(shp_path),
+        vector_path=str(geojson_path),
         vector_components=vector_components,
         zonal_stats_path=str(stats_path),
         working_dir=str(workdir),
@@ -447,7 +452,7 @@ def test_download_index_to_path_preserves_nodata_for_scalar(tmp_path, monkeypatc
     assert params["formatOptions"] == {"cloudOptimized": False, "noDataValue": -9999}
 
 
-def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
+def test_process_zip_exports_includes_zone_vectors(tmp_path, monkeypatch):
     job, *_ = _build_zip_job(tmp_path)
     job.zone_state.prefix = exports._zone_prefix(job)
 
@@ -459,13 +464,13 @@ def test_process_zip_exports_includes_zone_shapefile(tmp_path, monkeypatch):
     file_names = {name for _, name in files}
     assert f"{job.zone_state.prefix}.tif" in file_names
     assert f"{job.zone_state.prefix}_mean_ndvi.tif" in file_names
-    assert paths["vectors"].endswith(".shp")
-    assert set(paths["vector_components"]) >= {"shp", "dbf", "shx", "prj"}
+    assert paths["vectors"].endswith(".geojson")
+    assert set(paths["vector_components"]) >= {"geojson", "kml"}
     if paths["zonal_stats"]:
         assert paths["zonal_stats"].endswith("_zonal_stats.csv")
-    if paths["vectors_zip"]:
-        assert paths["vectors_zip"] in file_names
+    assert paths["vectors_zip"] is None
     assert paths["geojson"].endswith(".geojson")
+    assert paths["kml"].endswith(".kml")
     assert paths["mean_ndvi"].endswith("_mean_ndvi.tif")
 
 
@@ -515,14 +520,9 @@ def test_start_zone_cloud_exports_uploads_zone_files(tmp_path, monkeypatch):
     expected_names = {
         f"{prefix}.tif",
         f"{prefix}_mean_ndvi.tif",
-        f"{prefix}.shp",
-        f"{prefix}.dbf",
-        f"{prefix}.shx",
-        f"{prefix}.prj",
-        f"{prefix}.cpg",
         f"{prefix}.geojson",
+        f"{prefix}.kml",
         f"{prefix}_zonal_stats.csv",
-        f"{prefix}_shp.zip",
     }
 
     assert expected_names.issubset(set(uploaded))
@@ -536,17 +536,16 @@ def test_start_zone_cloud_exports_uploads_zone_files(tmp_path, monkeypatch):
     stats_data = uploaded[f"{prefix}_zonal_stats.csv"].decode()
     assert "zone,area_ha" in stats_data
 
-    with zipfile.ZipFile(io.BytesIO(uploaded[f"{prefix}_shp.zip"])) as shp_zip:
-        zip_members = set(shp_zip.namelist())
-        assert {f"{Path(prefix).name}.{ext}" for ext in ["shp", "dbf", "shx", "prj"]} <= zip_members
-
     paths = job.zone_state.paths
     assert paths["raster"] == f"gs://test-bucket/{prefix}.tif"
     assert paths["mean_ndvi"] == f"gs://test-bucket/{prefix}_mean_ndvi.tif"
     assert paths["geojson"] == f"gs://test-bucket/{prefix}.geojson"
-    assert paths["vectors_zip"] == f"gs://test-bucket/{prefix}_shp.zip"
+    assert paths["kml"] == f"gs://test-bucket/{prefix}.kml"
+    assert paths["vectors_zip"] is None
     assert job.zone_state.tasks["raster"]["signed_url"] == f"https://signed/{prefix}.tif"
     assert job.zone_state.tasks["mean_ndvi"]["signed_url"] == f"https://signed/{prefix}_mean_ndvi.tif"
+    assert job.zone_state.tasks["geojson"]["signed_url"] == f"https://signed/{prefix}.geojson"
+    assert job.zone_state.tasks["kml"]["signed_url"] == f"https://signed/{prefix}.kml"
     assert job.zone_state.status == "completed"
     assert job.zone_artifacts is None
     assert not Path(artifacts_dir).exists()
@@ -590,24 +589,32 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
         ) as dst:
             dst.write(np.array([[1]], dtype="uint8"), 1)
 
-        shp_base = workdir / "zones"
-        with shapefile.Writer(str(shp_base), shapeType=shapefile.POLYGON) as writer:
-            writer.autoBalance = 1
-            writer.field("zone", "N", decimal=0)
-            writer.field("area_ha", "F", decimal=4)
-            writer.record(1, 0.1)
-            writer.shape({
-                "type": "Polygon",
-                "coordinates": [[[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]]],
-            })
-        shp_base.with_suffix(".cpg").write_text("UTF-8")
-        shp_base.with_suffix(".prj").write_text("")
-        shp_path = shp_base.with_suffix(".shp")
-        vector_components = {}
-        for ext in ["shp", "dbf", "shx", "prj", "cpg"]:
-            member = shp_base.with_suffix(f".{ext}")
-            if member.exists():
-                vector_components[ext] = str(member)
+        geojson_path = workdir / "zones.geojson"
+        geojson_path.write_text(
+            json.dumps(
+                {
+                    "type": "FeatureCollection",
+                    "features": [
+                        {
+                            "type": "Feature",
+                            "geometry": {
+                                "type": "Polygon",
+                                "coordinates": [[[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]]],
+                            },
+                            "properties": {"zone": 1},
+                        }
+                    ],
+                }
+            )
+        )
+
+        kml_path = workdir / "zones.kml"
+        kml_path.write_text(
+            "<?xml version='1.0' encoding='UTF-8'?><kml><Document><Placemark><name>Zone 1</name>"
+            "<Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 0,10 10,10 10,0 0,0</coordinates>"
+            "</LinearRing></outerBoundaryIs></Polygon></Placemark></Document></kml>"
+        )
+        vector_components = {"geojson": str(geojson_path), "kml": str(kml_path)}
 
         stats_path = workdir / "zones_stats.csv"
         stats_path.write_text("zone,area_ha,mean_ndvi,min_ndvi,max_ndvi,pixel_count\n1,0.1,0.5,0.4,0.6,10\n")
@@ -615,7 +622,7 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
         return zones.ZoneArtifacts(
             raster_path=str(raster_path),
             mean_ndvi_path=str(mean_ndvi_path),
-            vector_path=str(shp_path),
+            vector_path=str(geojson_path),
             vector_components=vector_components,
             zonal_stats_path=str(stats_path),
             working_dir=str(workdir),
@@ -676,19 +683,20 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
     exports._process_zip_exports(job)
 
     assert job.zone_state.paths["raster"].endswith(".tif")
-    assert job.zone_state.paths["vectors"].endswith(".shp")
+    assert job.zone_state.paths["vectors"].endswith(".geojson")
     assert job.zone_state.paths["zonal_stats"].endswith("_zonal_stats.csv")
     assert job.zone_state.paths["geojson"].endswith(".geojson")
-    assert job.zone_state.paths["vectors_zip"].endswith("_shp.zip")
+    assert job.zone_state.paths["kml"].endswith(".kml")
+    assert job.zone_state.paths["vectors_zip"] is None
 
     assert job.zip_path is not None and job.zip_path.exists()
     with zipfile.ZipFile(job.zip_path) as archive:
         names = set(archive.namelist())
         assert "zones/PROD_202401_202401_tiny_field_zones.tif" in names
-        assert "zones/PROD_202401_202401_tiny_field_zones.shp" in names
+        assert "zones/PROD_202401_202401_tiny_field_zones.geojson" in names
+        assert "zones/PROD_202401_202401_tiny_field_zones.kml" in names
         assert "zones/PROD_202401_202401_tiny_field_zones_zonal_stats.csv" in names
         assert any(name.endswith(".geojson") for name in names)
-        assert any(name.endswith("_shp.zip") for name in names)
 
     archive_entries = job.zone_state.metadata.get(exports.ZONE_ARCHIVE_METADATA_KEY)
     assert archive_entries

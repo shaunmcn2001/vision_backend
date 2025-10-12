@@ -40,6 +40,10 @@ class FakeIndexBand:
         self._capture.setdefault("renamed_bands", []).append(name)
         return self
 
+    def toFloat(self):
+        self._capture.setdefault("band_to_float_calls", []).append(self._month)
+        return self
+
 
 class FakeImage:
     def __init__(self, month, capture):
@@ -55,7 +59,14 @@ class FakeImage:
         return self
 
     def select(self, band):
-        self._capture.setdefault("selected_bands", []).append(band)
+        if isinstance(band, (list, tuple)):
+            self._capture.setdefault("selected_band_lists", []).append(tuple(band))
+        else:
+            self._capture.setdefault("selected_bands", []).append(band)
+        return self
+
+    def toFloat(self):
+        self._capture.setdefault("to_float_calls", []).append(self._month)
         return self
 
     def reduceRegion(self, *args, **kwargs):
