@@ -361,50 +361,67 @@ def _classify_smooth_and_polygonize(
     mmu_ha=1.0,
     smooth_radius_px=1,
 ):
-    # 1. winsorize tails
+    # 1. winsorize NDVI to remove extreme tails
     q = ndvi_mean_native.reduceRegion(
-        ee.Reducer.percentile([2, 98]), geom, 10, bestEffort=True, maxPixels=1e9
+        reducer=ee.Reducer.percentile([2, 98]),
+        geometry=geom,
+        scale=10,
+        bestEffort=True,
+        maxPixels=1e9,
     )
-    p2, p98 = ee.Number(q.get("NDVI_mean_p2")), ee.Number(q.get("NDVI_mean_p98"))
+    p2 = ee.Number(q.get("NDVI_mean_p2"))
+    p98 = ee.Number(q.get("NDVI_mean_p98"))
     ndvi_w = ndvi_mean_native.max(p2).min(p98)
 
-    # 2. quantile thresholds
-    cuts = ee.List.sequence(0, 100, 100.0 / n_zones)
+    # 2. build quantile thresholds (server-side only)
+    cuts = ee.List.sequence(100.0 / n_zones, 100.0 - 100.0 / n_zones, 100.0 / n_zones)
     quants = ndvi_w.reduceRegion(
-        ee.Reducer.percentile(cuts), geom, 10, bestEffort=True, maxPixels=1e9
+        reducer=ee.Reducer.percentile(cuts),
+        geometry=geom,
+        scale=10,
+        bestEffort=True,
+        maxPixels=1e9,
     )
-    thresholds = ee.List([
-        quants.get(f"NDVI_mean_p{int(p)}") for p in cuts.slice(1, -1)
-    ])
 
-    def classify(img, thr):
-        def _add(val, t): return ee.Image(val).add(img.gte(ee.Number(t)))
-        return ee.Image(thr.iterate(_add, ee.Image.constant(1))) \
-                 .rename("zone").toInt8().updateMask(img.mask())
+    # build thresholds as ee.List, not Python list
+    thresholds = cuts.map(
+        lambda p: quants.get(
+            ee.String("NDVI_mean_p").cat(ee.Number(p).toInt().format())
+        )
+    )
 
-    cls_raw = classify(ndvi_w, thresholds)
+    # 3. classify image into zone classes
+    def classify_by_thresholds(img, thr_list):
+        def _step(acc, t):
+            return ee.Image(acc).add(img.gte(ee.Number(t)))
+        init = ee.Image.constant(1)
+        classes = ee.Image(ee.List(thr_list).iterate(_step, init))
+        return classes.rename("zone").toInt8().updateMask(img.mask())
 
-    # 3. smoothing
+    cls_raw = classify_by_thresholds(ndvi_w, thresholds)
+
+    # 4. optional smoothing
     cls_smooth = ee.Image(
         ee.Algorithms.If(
             ee.Number(smooth_radius_px).gt(0),
             cls_raw.focalMode(radius=smooth_radius_px, units="pixels"),
-            cls_raw
+            cls_raw,
         )
     ).toInt8()
 
-    # 4. MMU (~1 ha = 100 px)
+    # 5. minimum mapping unit (MMU, ~1 ha = 100 pixels)
     min_px = ee.Number(mmu_ha).multiply(100).round().max(1)
+
     def keep_big(c):
         mask = cls_smooth.eq(c)
-        valid = mask.connectedPixelCount(maxSize=1e6, eightConnected=True) \
-                      .gte(min_px)
+        valid = mask.connectedPixelCount(maxSize=1e6, eightConnected=True).gte(min_px)
         return cls_smooth.updateMask(mask.And(valid))
+
     cls_mmu = ee.ImageCollection(
         ee.List.sequence(1, n_zones).map(lambda c: keep_big(ee.Number(c)))
     ).mosaic().rename("zone").toInt8().clip(geom)
 
-    # 5. polygonize
+    # 6. polygonize to vector zones
     vectors = cls_mmu.reduceToVectors(
         geometry=geom,
         scale=10,
@@ -414,8 +431,8 @@ def _classify_smooth_and_polygonize(
         bestEffort=True,
         maxPixels=1e9,
     )
-    return cls_mmu, vectors
 
+    return cls_mmu, vectors
 
 def _stream_zonal_stats(classified_path: Path, ndvi_path: Path) -> List[Dict[str, Any]]:
     stats: Dict[int, Dict[str, Any]] = {}
