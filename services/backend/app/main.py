@@ -11,6 +11,7 @@ from app.api.tiles import router as tiles_router
 from app.api.s2_indices import router as s2_indices_router
 from app.api.zones import router as zones_router
 from app import gee
+import app.services.monkey_patches 
 import os
 
 app = FastAPI(
