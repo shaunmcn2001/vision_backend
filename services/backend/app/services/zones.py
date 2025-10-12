@@ -381,7 +381,7 @@ def _build_mean_ndvi_for_zones(
         std_dict = ndvi_mean.reduceRegion(
             reducer=ee.Reducer.stdDev(),
             geometry=geom,
-            scale=40,
+            scale=10,
             bestEffort=True,
             maxPixels=1e9,
         )
@@ -425,7 +425,7 @@ def _build_mean_ndvi_for_zones(
             d = img.mask().reduceRegion(
                 reducer=ee.Reducer.sum(),
                 geometry=geom,
-                scale=40,
+                scale=10,
                 bestEffort=True,
                 maxPixels=1e9,
             )
@@ -511,7 +511,7 @@ def _build_mean_ndvi_for_zones(
         mask_sum_dict = ndvi_mean.mask().reduceRegion(
             reducer=ee.Reducer.sum(),
             geometry=geom,
-            scale=40,
+            scale=10,
             bestEffort=True,
             maxPixels=1e9,
         )
@@ -527,7 +527,7 @@ def _build_mean_ndvi_for_zones(
         std_dict = ndvi_mean.reduceRegion(
             reducer=ee.Reducer.stdDev(),
             geometry=geom,
-            scale=40,
+            scale=10,
             bestEffort=True,
             maxPixels=1e9,
         )
@@ -655,7 +655,7 @@ def _classify_smooth_and_polygonize(
     hist_dict = cls_raw.reduceRegion(
         reducer=ee.Reducer.frequencyHistogram(),
         geometry=geom,
-        scale=40,
+        scale=10,
         bestEffort=True,
         maxPixels=1e9,
     )
@@ -676,7 +676,7 @@ def _classify_smooth_and_polygonize(
     q50 = ndvi_w.reduceRegion(
         ee.Reducer.percentile([50]),
         geometry=geom,
-        scale=40,
+        scale=10,
         bestEffort=True,
         maxPixels=1e9,
     ).get("NDVI_mean_p50")
@@ -684,7 +684,7 @@ def _classify_smooth_and_polygonize(
     mean_fallback = ndvi_w.reduceRegion(
         ee.Reducer.mean(),
         geometry=geom,
-        scale=40,
+        scale=10,
         bestEffort=True,
         maxPixels=1e9,
     ).get("NDVI_mean")
@@ -851,7 +851,7 @@ def _prepare_selected_period_artifacts(
             cnt_dict = ndvi_mean_native.mask().reduceRegion(
                 reducer=ee.Reducer.sum(),
                 geometry=geometry,
-                scale=40,
+                scale=10,
                 bestEffort=True,
                 maxPixels=1e9,
             )
