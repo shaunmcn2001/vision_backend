@@ -238,10 +238,21 @@ async def export_geotiffs(
                 "filePerBand": False,
                 "format": "GEO_TIFF",
             }
+            # Only set a nodata value for *visualized* or display exports.
+            # For analysis rasters (NDVI, zone ids, etc.) keep EE's native mask.
             format_options: Dict[str, object] = {"cloudOptimized": False}
-            if not is_visualized:
+            
+            IS_ANALYSIS = not is_visualized  # your current flag already tells us this
+            
+            if IS_ANALYSIS:
+                # Keep native mask; don't burn -9999 into the GeoTIFF
+                # (some readers may treat -9999 as data if metadata is dropped).
+                pass
+            else:
+                # Visualization exports can safely carry a nodata value.
                 params["noDataValue"] = -9999
                 format_options["noDataValue"] = -9999
+            
             params["formatOptions"] = format_options
 
             try:
