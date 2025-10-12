@@ -2191,7 +2191,7 @@ def _prepare_selected_period_artifacts(
     ndvi_stats = dict(_ndvi_temporal_stats(stats_source))
 
     if ndvi_collection is not None:
-        try:
+    try:
         # Keep native S2 projection so the raster isn't constant
         valid_mask = ndvi_collection.count().gt(0)
         first = ee.Image(ndvi_collection.first())
