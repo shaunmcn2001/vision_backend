@@ -580,12 +580,14 @@ def _start_gcs_task(item: ExportItem, job: ExportJob, bucket: str) -> ee.batch.T
 
 
 def _build_zone_artifacts_for_job(job: ExportJob) -> None:
+    """Builds zone artifacts for a given export job, with clear user-facing error messages."""
     if not job.zone_config or job.zone_state is None:
         return
 
     zone_service = _zone_service()
     prefix = _zone_prefix(job)
 
+    # --- mark as building ---
     with job.lock:
         job.zone_state.status = "building"
         job.zone_state.error = None
@@ -593,6 +595,7 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
         job.touch()
 
     try:
+        # --- perform zone export ---
         result = zone_service.export_selected_period_zones(
             job.aoi_geojson,
             months=job.months,
@@ -611,12 +614,33 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
             destination="zip",
             include_stats=job.zone_config.include_stats,
         )
+
         artifacts = result.get("artifacts")
         metadata = result.get("metadata", {}) or {}
         prefix = result.get("prefix") or prefix
+
+    except ValueError as exc:
+        # --- known user-facing errors (e.g., NDVI empty or too flat) ---
+        message = str(exc)
+        logger.warning(
+            "⚠️ Zone export aborted (user-facing): %s | Job %s (%s)",
+            message,
+            job.job_id,
+            job.aoi_name,
+        )
+        with job.lock:
+            job.zone_artifacts = None
+            job.zone_state.status = "failed"
+            job.zone_state.error = message
+            if not job.error:
+                job.error = message
+            job.touch()
+        return
+
     except Exception as exc:
+        # --- unexpected runtime failure ---
         logger.exception(
-            "Failed to build zone artifacts for job %s (AOI %s): %s",
+            "❌ Failed to build zone artifacts for job %s (AOI %s): %s",
             job.job_id,
             job.aoi_name,
             exc,
@@ -624,12 +648,15 @@ def _build_zone_artifacts_for_job(job: ExportJob) -> None:
         with job.lock:
             job.zone_artifacts = None
             job.zone_state.status = "failed"
-            job.zone_state.error = str(exc)
+            job.zone_state.error = (
+                "Unexpected processing error. Please try again or contact support."
+            )
             if not job.error:
                 job.error = str(exc)
             job.touch()
         return
 
+    # --- success ---
     with job.lock:
         job.zone_artifacts = artifacts
         job.zone_state.status = "ready"
