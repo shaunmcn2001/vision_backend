@@ -254,7 +254,6 @@ def _download_image_to_path(
             fileNamePrefix=sanitized_name,
             region=ee_region,
             scale=DEFAULT_SCALE,
-            crs=DEFAULT_EXPORT_CRS,
             fileFormat="GeoTIFF",
             maxPixels=gee.MAX_PIXELS,
         )
@@ -265,7 +264,6 @@ def _download_image_to_path(
 
     params = {
         "scale": DEFAULT_SCALE,
-        "crs": DEFAULT_EXPORT_CRS,
         "region": region_coords,
         "filePerBand": False,
         "format": "GeoTIFF",
@@ -2195,16 +2193,22 @@ def _prepare_selected_period_artifacts(
     ndvi_stats = dict(_ndvi_temporal_stats(stats_source))
 
     if ndvi_collection is not None:
-        try:
-            valid_mask = ndvi_collection.count().gt(0)
-            mean_image = (
-                ndvi_collection.mean()
-                .toFloat()
-                .updateMask(valid_mask)
-                .clip(geometry)
-                .rename("NDVI_mean")
-            )
-            ndvi_stats["mean"] = mean_image
+    try:
+        # Keep native Sentinel-2 (10 m) projection so the raster is not constant.
+        valid_mask = ndvi_collection.count().gt(0)
+        first = ee.Image(ndvi_collection.first())
+        proj = first.projection()
+        mean_image = (
+            ndvi_collection.mean()
+            .toFloat()
+            .setDefaultProjection(proj)            # lock default projection
+            .reproject(proj, None, DEFAULT_SCALE)  # 10 m pixels
+            .updateMask(valid_mask)
+            .clip(geometry)
+            .rename("NDVI_mean")
+        )
+        ndvi_stats["mean"] = mean_image
+
         except Exception:  # pragma: no cover - logging guard
             logger.exception("Failed to compute mean NDVI image from collection")
 
