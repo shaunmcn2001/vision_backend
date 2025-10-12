@@ -256,6 +256,7 @@ def _download_image_to_path(
             scale=DEFAULT_SCALE,
             fileFormat="GeoTIFF",
             maxPixels=gee.MAX_PIXELS,
+            filePerBand=False,
         )
         task.start()
     except Exception:  # pragma: no cover - diagnostic logging
@@ -555,9 +556,10 @@ def _classify_local_zones(
         raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
     unique_values = np.unique(valid_values)
-    # If all pixels are the same, just produce a single zone instead of erroring.
-    effective_n_classes = min(n_classes, max(1, unique_values.size))
-
+    if unique_values.size <= 1:
+        raise ValueError(
+            "Unable to derive distinct NDVI thresholds for zone classification; all pixels share the same value."
+        )
 
     effective_n_classes = n_classes
 
@@ -2193,22 +2195,21 @@ def _prepare_selected_period_artifacts(
     ndvi_stats = dict(_ndvi_temporal_stats(stats_source))
 
     if ndvi_collection is not None:
-    try:
-        # Keep native Sentinel-2 (10 m) projection so the raster is not constant.
-        valid_mask = ndvi_collection.count().gt(0)
-        first = ee.Image(ndvi_collection.first())
-        proj = first.projection()
-        mean_image = (
-            ndvi_collection.mean()
-            .toFloat()
-            .setDefaultProjection(proj)            # lock default projection
-            .reproject(proj, None, DEFAULT_SCALE)  # 10 m pixels
-            .updateMask(valid_mask)
-            .clip(geometry)
-            .rename("NDVI_mean")
-        )
-        ndvi_stats["mean"] = mean_image
-
+        try:
+            # Keep native Sentinel-2 (10 m) projection so the raster is not constant.
+            valid_mask = ndvi_collection.count().gt(0)
+            first = ee.Image(ndvi_collection.first())
+            proj = first.projection()
+            mean_image = (
+                ndvi_collection.mean()
+                .toFloat()
+                .setDefaultProjection(proj)
+                .reproject(proj, None, DEFAULT_SCALE)
+                .updateMask(valid_mask)
+                .clip(geometry)
+                .rename("NDVI_mean")
+            )
+            ndvi_stats["mean"] = mean_image
         except Exception:  # pragma: no cover - logging guard
             logger.exception("Failed to compute mean NDVI image from collection")
 
