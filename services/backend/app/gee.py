@@ -158,25 +158,15 @@ def _attach_cloud_probability(collection: ee.ImageCollection, probability: ee.Im
 
 def _mask_sentinel2(image: ee.Image, cloud_prob_max: int) -> ee.Image:
     cloud_probability = image.select("cloud_probability")
-    prob_mask = cloud_probability.lte(cloud_prob_max)
-
-    qa60 = image.select("QA60")
-    not_cloud = qa60.bitwiseAnd(1 << 10).eq(0)
-    not_cirrus = qa60.bitwiseAnd(1 << 11).eq(0)
-    qa_mask = not_cloud.And(not_cirrus)
-
-    scl = image.select("SCL")
-    shadow_mask = scl.neq(3).And(scl.neq(11))
-
-    combined_mask = prob_mask.And(qa_mask).And(shadow_mask)
-    scaled = image.updateMask(combined_mask).divide(10_000)
+    prob_mask = cloud_probability.lte(cloud_prob_max)  # keep pixels <= threshold
+    scaled = image.updateMask(prob_mask).divide(10_000)
     return scaled.select(list(S2_BANDS))
 
 
 def monthly_sentinel2_collection(
     geometry: ee.Geometry | None = None,
     month: str | None = None,
-    cloud_prob_max: int = 40,
+    cloud_prob_max: int = 80,
     *,
     aoi: ee.Geometry | None = None,
     start: date | datetime | str | None = None,
