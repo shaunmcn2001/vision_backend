@@ -323,16 +323,44 @@ def _build_composite_series(geometry: ee.Geometry, months: Sequence[str], start_
 class _DownloadParams:
     crs: str = DEFAULT_EXPORT_CRS
     scale: int = DEFAULT_SCALE
-
-def _download_image_to_path(image: ee.Image, geometry: ee.Geometry, target: Path, params: _DownloadParams | None = None) -> ImageExportResult:
-    params = params or _DownloadParams()
+def _proj_from_image(image: ee.Image) -> tuple[str, int]:
+    """
+    Return (crs, nominalScale) from image.projection(); fall back to defaults.
+    """
+    crs, scale = DEFAULT_EXPORT_CRS, DEFAULT_SCALE
+    try:
+        info = image.projection().getInfo()  # {'crs': 'EPSG:326xx', 'nominalScale': 10, ...}
+        if isinstance(info, dict):
+            if info.get("crs"):
+                crs = str(info["crs"])
+            ns = info.get("nominalScale")
+            if isinstance(ns, (int, float)) and ns > 0:
+                scale = int(round(float(ns)))
+    except Exception:
+        logger.exception("Could not read image projection; using defaults")
+    return crs, scale
+    
+def _download_image_to_path(
+    image: ee.Image,
+    geometry: ee.Geometry,
+    target: Path,
+    params: _DownloadParams | None = None,
+) -> ImageExportResult:
+    """
+    Export using the image's native CRS/scale by default (prevents constant rasters).
+    """
     image = image.toFloat()  # ensure float32
+
+    if params is None:
+        crs, scale = _proj_from_image(image)
+    else:
+        crs, scale = params.crs, params.scale
 
     region_coords = _geometry_region(geometry)
     ee_region = ee.Geometry.Polygon(region_coords)
-    sanitized_name = sanitize_name(target.stem or 'export')
-    description = f'zones_{sanitized_name}'[:100]
-    folder = os.getenv('GEE_DRIVE_FOLDER', 'Sentinel2_Zones')
+    sanitized_name = sanitize_name(target.stem or "export")
+    description = f"zones_{sanitized_name}"[:100]
+    folder = os.getenv("GEE_DRIVE_FOLDER", "Sentinel2_Zones")
 
     task: ee.batch.Task | None = None
     try:
@@ -342,38 +370,45 @@ def _download_image_to_path(image: ee.Image, geometry: ee.Geometry, target: Path
             folder=folder,
             fileNamePrefix=sanitized_name,
             region=ee_region,
-            scale=params.scale,
-            crs=params.crs,
-            fileFormat='GeoTIFF',
+            scale=scale,
+            crs=crs,
+            fileFormat="GeoTIFF",
             maxPixels=gee.MAX_PIXELS,
         )
         task.start()
     except Exception:
-        logger.exception('Failed to start Drive export for %s', sanitized_name)
+        logger.exception("Failed to start Drive export for %s", sanitized_name)
         task = None
 
+    logger.info("EE export grid — crs=%s scale=%sm name=%s", crs, scale, sanitized_name)
+
+    # direct download (streams to disk)
     dl_params = {
-        'scale': params.scale,
-        'crs': params.crs,
-        'region': region_coords,
-        'filePerBand': False,   # only for getDownloadURL
-        'format': 'GeoTIFF',
+        "scale": scale,
+        "crs": crs,
+        "region": region_coords,
+        "filePerBand": False,
+        "format": "GeoTIFF",
     }
     url = image.getDownloadURL(dl_params)
     with urlopen(url) as response:
-        headers = getattr(response, 'headers', None)
-        content_type = headers.get('Content-Type', '') if headers and hasattr(headers, 'get') else ''
-        if 'zip' in content_type.lower():
-            with NamedTemporaryFile(delete=False, suffix='.zip') as tmp_zip:
+        headers = getattr(response, "headers", None)
+        content_type = headers.get("Content-Type", "") if headers and hasattr(headers, "get") else ""
+        if "zip" in content_type.lower():
+            with NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
                 shutil.copyfileobj(response, tmp_zip)
                 tmp_zip_path = Path(tmp_zip.name)
             _write_zip_geotiff_from_file(tmp_zip_path, target)
-            try: tmp_zip_path.unlink(missing_ok=True)
-            except Exception: pass
+            try:
+                tmp_zip_path.unlink(missing_ok=True)
+            except Exception:
+                pass
         else:
-            with target.open('wb') as out_f:
+            with target.open("wb") as out_f:
                 shutil.copyfileobj(response, out_f)
+
     return ImageExportResult(path=target, task=task)
+
 
 # -------- Streaming NDVI thresholds & classification (OOM-safe) --------
 
@@ -719,23 +754,26 @@ def _prepare_selected_period_artifacts(
 
 
     stability_flag = (
-    (APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask))
-    and not DISABLE_STABILITY
+        (APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask))
+        and not DISABLE_STABILITY
     )
-       if stability_flag:
+    if stability_flag:
         stability_image = _stability_mask(
-            ndvi_stats['cv'], geometry, [0.5, 1.0, 1.5, 2.0], 0.0, DEFAULT_SCALE
+            ndvi_stats["cv"], geometry, [0.5, 1.0, 1.5, 2.0], 0.0, DEFAULT_SCALE
         )
     else:
         stability_image = ee.Image(1)
-    ndvi_stats['stability'] = stability_image
+    ndvi_stats["stability"] = stability_image
+
 
     workdir = _ensure_working_directory(working_dir)
     ndvi_path = workdir / 'mean_ndvi.tif'
     mean_export = _download_image_to_path(
-        ndvi_stats['mean'].updateMask(stability_image), geometry, ndvi_path,
-        params=_DownloadParams(crs=DEFAULT_EXPORT_CRS, scale=DEFAULT_SCALE),
+        ndvi_stats["mean"].updateMask(stability_image),
+        geometry,
+        ndvi_path,
     )
+
     ndvi_path = mean_export.path
 
     artifacts, local_metadata = _classify_local_zones(
