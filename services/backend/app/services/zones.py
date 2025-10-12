@@ -366,18 +366,22 @@ def _build_mean_ndvi_for_zones(
     # 2) NDVI per image (guard bands just in case)
     def _ndvi(img: ee.Image) -> ee.Image:
         bnames = img.bandNames()
-        has_b4 = bnames.contains("B4")
-        has_b8 = bnames.contains("B8")
-        both_bands = has_b4 & has_b8  # ✅ bitwise operator works in EE Python
+    
+        # Presence flags as Numbers (0/1), avoids & / .And() issues
+        has_b4 = ee.Number(bnames.indexOf("B4").gte(0))
+        has_b8 = ee.Number(bnames.indexOf("B8").gte(0))
+        both_bands = has_b4.multiply(has_b8).gte(1)  # boolean
     
         ndvi_img = ee.Image(
             ee.Algorithms.If(
                 both_bands,
                 img.normalizedDifference(["B8", "B4"]).rename("NDVI"),
-                ee.Image.constant(float("nan")).rename("NDVI")
+                ee.Image.constant(float("nan")).rename("NDVI")  # keep masked when bands missing
             )
         )
+    
         return ndvi_img.updateMask(img.mask())
+
 
     monthly_ndvi = monthly.map(_ndvi)
 
