@@ -335,53 +335,86 @@ def _resolve_geometry(aoi: Union[dict, ee.Geometry]) -> ee.Geometry:
         pass
     return gee.geometry_from_geojson(aoi)
     
-def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
+def _build_mean_ndvi_for_zones(
+    geom: ee.Geometry,
+    start_date: date | str,
+    end_date: date | str,
+    *,
+    months: Sequence[str] | None = None,
+    cloud_prob_max: int = 60,
+) -> ee.Image:
     """
-    Builds a mean NDVI image for the selected period.
-    Raises a clear ValueError if no valid NDVI pixels are found,
-    instead of returning dummy data.
+    Build a mean NDVI image for the selected period.
+    - Raises ValueError with friendly messages when imagery/pixels are unavailable
+      or NDVI variation is too low for zoning.
+    - Does NOT fabricate data (no constant-image fallbacks).
     """
+    # 1) Build monthly Sentinel-2 collection (loose/strict masking controlled upstream)
     monthly = gee.monthly_sentinel2_collection(
-        aoi=geom, start=start_date, end=end_date, **monthly_kwargs
+        aoi=geom, start=start_date, end=end_date, months=months, cloud_prob_max=cloud_prob_max
     )
 
-    # --- handle empty collection early ---
-    count = ee.Number(monthly.size())
-    if count.getInfo() == 0:
+    # Empty collection? (e.g., AOI outside coverage, too tight dates)
+    try:
+        ic_size = int(ee.Number(monthly.size()).getInfo() or 0)
+    except Exception:
+        ic_size = 0
+    if ic_size == 0:
+        # define alongside your other constants, or inline here
         raise ValueError(S2_COLLECTION_EMPTY_ERROR)
 
-    def compute_ndvi(img):
-        return img.normalizedDifference(["B8", "B4"]).rename("NDVI")
+    # 2) NDVI per image (guard bands just in case)
+    def _ndvi(img: ee.Image) -> ee.Image:
+        bnames = img.bandNames()
+        has_b4 = bnames.contains("B4")
+        has_b8 = bnames.contains("B8")
+        return ee.Image(
+            ee.Algorithms.If(
+                has_b4.And(has_b8),
+                img.normalizedDifference(["B8", "B4"]).rename("NDVI"),
+                ee.Image.constant(float("nan")).rename("NDVI")  # remain masked
+            )
+        ).updateMask(img.mask())
 
-    monthly_ndvi = monthly.map(compute_ndvi)
+    monthly_ndvi = monthly.map(_ndvi)
 
+    # 3) Mean NDVI (masked where no contributing pixels)
     ndvi_mean = monthly_ndvi.mean().rename("NDVI_mean").toFloat().clip(geom)
 
-    # --- check for empty NDVI mask (no valid pixels) ---
-    valid = ndvi_mean.mask().reduceRegion(
-        ee.Reducer.sum(),
-        geometry=geom,
-        scale=40,
-        bestEffort=True,
-        maxPixels=1e9,
-    ).getInfo()
+    # 4) Valid-pixel check (mask sum > 0)
+    try:
+        mask_sum_dict = ndvi_mean.mask().reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=geom,
+            scale=40,
+            bestEffort=True,
+            maxPixels=1e9,
+        )
+        mask_sum = ee.Number(ee.Dictionary(mask_sum_dict).values().get(0)).getInfo()
+    except Exception:
+        mask_sum = None
 
-    if not valid or list(valid.values())[0] == 0:
+    if mask_sum is None or mask_sum <= 0:
         raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
-    # --- check for zero variance (flat NDVI) ---
-    stats = ndvi_mean.reduceRegion(
-        reducer=ee.Reducer.stdDev(),
-        geometry=geom,
-        scale=40,
-        bestEffort=True,
-        maxPixels=1e9,
-    ).getInfo()
+    # 5) Variation check (avoid single-zone outcomes)
+    try:
+        std_dict = ndvi_mean.reduceRegion(
+            reducer=ee.Reducer.stdDev(),
+            geometry=geom,
+            scale=40,
+            bestEffort=True,
+            maxPixels=1e9,
+        )
+        std_val = float(list(std_dict.values())[0]) if std_dict else 0.0
+    except Exception:
+        std_val = 0.0
 
-    if not stats or list(stats.values())[0] < 0.01:
+    # tweak 0.01 (1 NDVI point) if needed for your agronomy
+    if std_val < 0.01:
         raise ValueError(NDVI_VARIATION_TOO_LOW_ERROR)
 
-    # --- reproject to 10 m native scale ---
+    # 6) Reproject to native 10 m (if we have a real source image)
     first_img = ee.Image(monthly.first())
     ndvi_mean_native = ee.Algorithms.If(
         first_img,
@@ -390,7 +423,6 @@ def _build_mean_ndvi_for_zones(geom, start_date, end_date, **monthly_kwargs):
     )
 
     return ee.Image(ndvi_mean_native).rename("NDVI_mean").toFloat().clip(geom)
-
 
 def _classify_smooth_and_polygonize(
     ndvi_mean_native: ee.Image,
