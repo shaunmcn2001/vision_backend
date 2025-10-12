@@ -34,6 +34,11 @@ from pyproj import CRS
 from app import gee
 from app.exports import sanitize_name
 from app.services.image_stats import temporal_stats
+from app.services.ndvi_shared import (
+    compute_ndvi_loose,
+    mean_from_collection_sum_count,
+    reproject_native_10m,
+)
 from app.utils.geometry import area_ha
 from app.utils.sanitization import sanitize_for_json
 
@@ -67,7 +72,7 @@ NDVI_PERCENTILE_MIN = 0.0
 NDVI_PERCENTILE_MAX = 0.6
 
 NDVI_MASK_EMPTY_ERROR = (
-    "No NDVI pixels were available for the selected period. Try expanding the date range or relaxing the cloud filtering threshold."
+    "No valid NDVI pixels across the selected months. Try a different date range or AOI."
 )
 
 def _parse_bool_env(value: str | None, default: bool) -> bool:
@@ -146,10 +151,6 @@ def _write_zip_geotiff_from_file(zip_path: Path, target: Path) -> None:
         with archive.open(first) as source, target.open('wb') as out_f:
             shutil.copyfileobj(source, out_f)
 
-def _native_reproject(img: ee.Image) -> ee.Image:
-    proj = img.select('B8').projection()
-    return img.resample('bilinear').reproject(proj, None, DEFAULT_SCALE)
-
 def _attach_cloud_probability(collection: ee.ImageCollection, probability: ee.ImageCollection) -> ee.ImageCollection:
     join = ee.Join.saveFirst('cloud_prob')
     matches = join.apply(
@@ -182,13 +183,6 @@ def _mask_s2(image: ee.Image, cloud_prob_max: int) -> ee.Image:
     selected = scaled.select(list(gee.S2_BANDS))
     return selected.copyProperties(image, ['system:time_start'])
 
-def _compute_ndvi(image: ee.Image) -> ee.Image:
-    bands = image.select(['B8', 'B4']).toFloat()
-    ndvi = bands.normalizedDifference(['B8', 'B4']).rename('NDVI').toFloat()
-    ndvi_range_mask = ndvi.lt(1)
-    src_mask = bands.mask().reduce(ee.Reducer.min()).gt(0)
-    return ndvi.updateMask(src_mask.And(ndvi_range_mask))
-
 def _build_composite_series(geometry: ee.Geometry, months: Sequence[str], start_date: date, end_date: date, cloud_prob_max: int) -> Tuple[List[tuple[str, ee.Image]], List[str], Dict[str, object]]:
     comps: List[tuple[str, ee.Image]] = []
     skipped: List[str] = []
@@ -205,20 +199,29 @@ def _build_composite_series(geometry: ee.Geometry, months: Sequence[str], start_
             collection, composite = gee.monthly_sentinel2_collection(geometry, month, cloud_prob_max)
             scene_count = int(ee.Number(collection.size()).getInfo() or 0)
             if scene_count == 0:
-                skipped.append(month); continue
-            reproj = _native_reproject(composite)
-            ndvi = _compute_ndvi(reproj)
-            valid_pixels = int(ee.Number(ndvi.mask().reduceRegion(
-                reducer=ee.Reducer.count(),
-                geometry=geometry,
-                scale=DEFAULT_SCALE,
-                bestEffort=True,
-                tileScale=4,
-                maxPixels=gee.MAX_PIXELS,
-            ).get('NDVI')).getInfo() or 0)
+                skipped.append(month)
+                continue
+            clipped = composite.clip(geometry)
+            ndvi = compute_ndvi_loose(clipped)
+            valid_pixels = int(
+                ee.Number(
+                    ndvi.mask()
+                    .reduceRegion(
+                        reducer=ee.Reducer.count(),
+                        geometry=geometry,
+                        scale=DEFAULT_SCALE,
+                        bestEffort=True,
+                        tileScale=4,
+                        maxPixels=gee.MAX_PIXELS,
+                    )
+                    .get("NDVI")
+                ).getInfo()
+                or 0
+            )
             if valid_pixels == 0:
-                skipped.append(month); continue
-            comps.append((month, reproj.clip(geometry)))
+                skipped.append(month)
+                continue
+            comps.append((month, clipped))
     else:
         meta['composite_mode'] = 'scene'
         base = (ee.ImageCollection(gee.S2_SR_COLLECTION).filterBounds(geometry).filterDate(start_iso, end_exclusive_iso))
@@ -231,9 +234,8 @@ def _build_composite_series(geometry: ee.Geometry, months: Sequence[str], start_
         image_list = masked.toList(scene_count)
         for idx in range(scene_count):
             image = ee.Image(image_list.get(idx))
-            reproj = _native_reproject(image)
             label = f'scene_{idx + 1:02d}'
-            comps.append((label, reproj.clip(geometry)))
+            comps.append((label, image.clip(geometry)))
     return comps, skipped, meta
 
 @dataclass
@@ -605,38 +607,39 @@ def _prepare_selected_period_artifacts(
         geometry, ordered_months, start_date, end_date, cloud_prob_max
     )
     if not composites:
-        raise ValueError('No valid Sentinel-2 scenes were found for the selected months')
+        raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
-    ndvi_images = [_compute_ndvi(img) for _, img in composites]
-    try:
-        ndvi_collection = ee.ImageCollection(ndvi_images)
-    except Exception:
-        ndvi_collection = None
+    ndvi_images = [compute_ndvi_loose(img) for _, img in composites]
+    ndvi_collection = ee.ImageCollection(ndvi_images)
+    ndvi_stats = dict(_ndvi_temporal_stats(ndvi_collection))
 
-    stats_source = ndvi_collection if ndvi_collection is not None else ndvi_images
-    ndvi_stats = dict(_ndvi_temporal_stats(stats_source))
+    ndvi_mean = mean_from_collection_sum_count(ndvi_collection)
+    first_ref = ee.Image(composites[0][1])
+    ndvi_mean_native = (
+        reproject_native_10m(ndvi_mean, first_ref, ref_band="B8", scale=DEFAULT_SCALE)
+        .clip(geometry)
+        .rename("NDVI_mean")
+    )
 
-    # ---- FIX: mean NDVI as sum/count (no reproject), keep float32 ----
-    # Compute mean NDVI with a proper valid-data mask; avoid divide-by-count trick that yields zeros.
-    # Build mean NDVI and keep pixels with >=1 valid obs. Do NOT apply stability mask here.
-    if ndvi_collection is not None:
-        try:
-            valid_mask = ndvi_collection.count().gt(0)
-            mean_image = (
-                ndvi_collection.mean()
-                .toFloat()
-                .updateMask(valid_mask)   # masked pixels remain masked
-                .clip(geometry)
-                .rename("NDVI_mean")
+    valid_pixel_count = int(
+        ee.Number(
+            ndvi_mean_native.mask()
+            .reduceRegion(
+                reducer=ee.Reducer.count(),
+                geometry=geometry,
+                scale=DEFAULT_SCALE,
+                bestEffort=True,
+                tileScale=4,
+                maxPixels=gee.MAX_PIXELS,
             )
-            ndvi_stats["mean"] = mean_image
-            # Optional debug:
-            # logger.info("Mean NDVI min/max: %s", mean_image.reduceRegion(
-            #     reducer=ee.Reducer.minMax(),
-            #     geometry=geometry, scale=DEFAULT_SCALE, bestEffort=True, tileScale=4, maxPixels=gee.MAX_PIXELS
-            # ).getInfo())
-        except Exception:
-            logger.exception("Failed to compute NDVI mean from collection")
+            .get("NDVI_mean")
+        ).getInfo()
+        or 0
+    )
+    if valid_pixel_count == 0:
+        raise ValueError(NDVI_MASK_EMPTY_ERROR)
+
+    ndvi_stats["mean"] = ndvi_mean_native
 
 
     stability_flag = APPLY_STABILITY if apply_stability_mask is None else bool(apply_stability_mask)
