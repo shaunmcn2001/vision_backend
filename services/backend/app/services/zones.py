@@ -343,39 +343,54 @@ def _build_mean_ndvi_for_zones(
     months: Sequence[str] | None = None,
     cloud_prob_max: int = 60,
 ) -> ee.Image:
-    """
-    Build mean NDVI for the selected period.
-    Raises friendly errors if no imagery, no valid pixels, or too little variation.
-    Never fabricates pixels; may relax cloud mask once if the strict pass is fully masked.
-    """
-
-    # -- helpers ---------------------------------------------------------------
+    """Build mean NDVI for the selected period."""
 
     def _iso(d):
-        # Accepts str, date, or datetime → ISO string
-        if isinstance(d, (datetime, date)):
-            return d.date().isoformat() if isinstance(d, datetime) else d.isoformat()
-        return str(d)
+        return d.isoformat() if isinstance(d, date) else str(d)
+
+    monthly = gee.monthly_sentinel2_collection(
+        aoi=geom, start=_iso(start_date), end=_iso(end_date),
+        months=months, cloud_prob_max=cloud_prob_max
+    )
+
+    ic_size = int(ee.Number(monthly.size()).getInfo() or 0)
+    if ic_size == 0:
+        raise ValueError(S2_COLLECTION_EMPTY_ERROR)
 
     def _ndvi(img: ee.Image) -> ee.Image:
-        """NDVI with robust band presence checks; keeps upstream mask."""
         bnames = ee.List(img.bandNames())
-        idx4 = ee.Number(bnames.indexOf('B4'))
-        idx8 = ee.Number(bnames.indexOf('B8'))
-
-        # booleans-as-numbers (0/1) → combine → boolean
-        has_b4 = idx4.gte(0)                   # ee.Number(0/1)
-        has_b8 = idx8.gte(0)                   # ee.Number(0/1)
+        has_b4 = ee.Number(bnames.indexOf('B4')).gte(0)
+        has_b8 = ee.Number(bnames.indexOf('B8')).gte(0)
         both   = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
+        ndvi   = ee.Image(ee.Algorithms.If(
+            both, img.normalizedDifference(['B8', 'B4']).rename('NDVI'),
+            ee.Image.constant(float('nan')).rename('NDVI')
+        ))
+        return ee.Image(ndvi).updateMask(img.mask())
 
-        ndvi_img = ee.Image(
-            ee.Algorithms.If(
-                both,
-                img.normalizedDifference(['B8', 'B4']).rename('NDVI'),
-                ee.Image.constant(float('nan')).rename('NDVI')  # remain masked if bands missing
-            )
-        )
-        return ee.Image(ndvi_img).updateMask(img.mask())
+    ndvi_mean = monthly.map(_ndvi).mean().rename('NDVI_mean').toFloat().clip(geom)
+
+    # variation check only
+    std_dict = ndvi_mean.reduceRegion(
+        reducer=ee.Reducer.stdDev(),
+        geometry=geom,
+        scale=40,
+        bestEffort=True,
+        maxPixels=1e9,
+    )
+    std_val = float(list(std_dict.values())[0]) if std_dict else 0.0
+    if std_val < 0.01:
+        raise ValueError(NDVI_VARIATION_TOO_LOW_ERROR)
+
+    first_img = ee.Image(monthly.first())
+    ndvi_native = ee.Algorithms.If(
+        first_img,
+        reproject_native_10m(ndvi_mean, first_img, ref_band='B8', scale=10),
+        ndvi_mean,
+    )
+
+    return ee.Image(ndvi_native).rename('NDVI_mean').toFloat().clip(geom)
+
 
     def _monthly(aoi, start, end, mths, cprob) -> ee.ImageCollection:
         return gee.monthly_sentinel2_collection(
