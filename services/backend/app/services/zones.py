@@ -579,162 +579,208 @@ def _prepare_selected_period_artifacts(
     sample_size: int,
     include_stats: bool,
 ) -> tuple[ZoneArtifacts, Dict[str, object]]:
-    ordered_months = _ordered_months(months)
-    skipped_months: List[str] = []
-    for month in ordered_months:
-        collection, _ = gee.monthly_sentinel2_collection(geometry, month, cloud_prob_max)
+    """Prepares classified NDVI production zones, raster + vector exports, and metadata."""
+    try:
+        ordered_months = _ordered_months(months)
+        skipped_months: List[str] = []
+
+        # --- 1. Validate imagery availability ---
+        for month in ordered_months:
+            try:
+                collection, _ = gee.monthly_sentinel2_collection(geometry, month, cloud_prob_max)
+                count = int(ee.Number(collection.size()).getInfo() or 0)
+            except Exception:
+                count = 0
+            if count == 0:
+                skipped_months.append(month)
+
+        used_months = [m for m in ordered_months if m not in skipped_months]
+        if not used_months:
+            raise ValueError(
+                "No Sentinel-2 imagery available for the selected period. "
+                "Try adjusting the date range or cloud probability threshold."
+            )
+
+        # --- 2. Build mean NDVI ---
+        ndvi_mean_native = _build_mean_ndvi_for_zones(
+            geometry,
+            start_date,
+            end_date,
+            months=ordered_months,
+            cloud_prob_max=cloud_prob_max,
+        )
+
+        if ndvi_mean_native is None:
+            raise ValueError(
+                "NDVI computation failed — Earth Engine returned an empty or invalid image."
+            )
+
+        # --- 3. Validate NDVI pixel mask ---
         try:
-            count = int(ee.Number(collection.size()).getInfo() or 0)
-        except Exception:
-            count = 0
-        if count == 0:
-            skipped_months.append(month)
-
-    used_months = [month for month in ordered_months if month not in skipped_months]
-
-    ndvi_mean_native = _build_mean_ndvi_for_zones(
-        geometry,
-        start_date,
-        end_date,
-        months=ordered_months,
-        cloud_prob_max=cloud_prob_max,
-    )
-
-    # --- robust valid-pixel counter ---
-    try:
-        cnt_dict = ndvi_mean_native.mask().reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=geometry,
-            scale=40,
-            bestEffort=True,
-            maxPixels=1e9,
-        )
-    
-        # safely get the first value from the dictionary (no hardcoded band names)
-        cnt_value = ee.Number(ee.Dictionary(cnt_dict).values().get(0)).getInfo()
-    
-        if cnt_value is None or cnt_value <= 0:
-            raise ValueError(NDVI_MASK_EMPTY_ERROR)
-    
-    except Exception as e:
-        # instead of stopping, log the issue and assume valid pixels exist
-        print("⚠️ Warning: NDVI pixel count check skipped due to:", str(e))
-        cnt_value = 1
-    # --- end robust counter ---
-
-    # only raise if we *know for sure* there are no valid pixels
-    if cnt_value <= 0:
-        raise ValueError(NDVI_MASK_EMPTY_ERROR)
-
-    classified_image, vectors = _classify_smooth_and_polygonize(
-        ndvi_mean_native,
-        geometry,
-        n_zones=n_classes,
-        mmu_ha=min_mapping_unit_ha,
-        smooth_radius_px=DEFAULT_SMOOTH_RADIUS_PX,
-    )
-
-    workdir = _ensure_working_directory(working_dir)
-    ndvi_path = workdir / "NDVI_mean.tif"
-    mean_export = _download_image_to_path(
-        ndvi_mean_native,
-        geometry,
-        ndvi_path,
-        params=_DownloadParams(crs=DEFAULT_EXPORT_CRS, scale=DEFAULT_SCALE),
-    )
-    ndvi_path = mean_export.path
-
-    classified_path = workdir / "zones.tif"
-    classified_export = _download_image_to_path(
-        classified_image,
-        geometry,
-        classified_path,
-        params=_DownloadParams(crs=DEFAULT_EXPORT_CRS, scale=DEFAULT_SCALE),
-    )
-    classified_path = classified_export.path
-
-    try:
-        unique_classes = (
-            classified_image
-            .reduceRegion(
-                reducer=ee.Reducer.frequencyHistogram(),
+            cnt_dict = ndvi_mean_native.mask().reduceRegion(
+                reducer=ee.Reducer.sum(),
                 geometry=geometry,
-                scale=DEFAULT_SCALE,
+                scale=40,
                 bestEffort=True,
-                tileScale=4,
-                maxPixels=gee.MAX_PIXELS,
+                maxPixels=1e9,
             )
-            .get("zone")
+            cnt_value = ee.Number(ee.Dictionary(cnt_dict).values().get(0)).getInfo()
+            if cnt_value is None or cnt_value <= 0:
+                raise ValueError(NDVI_MASK_EMPTY_ERROR)
+        except Exception as e:
+            print("⚠️ Warning: NDVI pixel count check skipped due to:", str(e))
+            cnt_value = 1
+
+        if cnt_value <= 0:
+            raise ValueError(NDVI_MASK_EMPTY_ERROR)
+
+        # --- 4. Classify and polygonize zones ---
+        classified_image, vectors = _classify_smooth_and_polygonize(
+            ndvi_mean_native,
+            geometry,
+            n_zones=n_classes,
+            mmu_ha=min_mapping_unit_ha,
+            smooth_radius_px=DEFAULT_SMOOTH_RADIUS_PX,
         )
-        unique_classes = list((unique_classes or {}).keys()) if isinstance(unique_classes, dict) else []
-    except Exception:
-        unique_classes = []
 
-    vectors_reprojected = ee.FeatureCollection(
-        vectors.map(
-            lambda feature: feature.setGeometry(
-                feature.geometry().transform("EPSG:4326", 0.1)
+        if classified_image is None or vectors is None:
+            raise ValueError(
+                "Zone classification failed — no valid NDVI variation or geometry produced."
+            )
+
+        # --- 5. Exports ---
+        workdir = _ensure_working_directory(working_dir)
+        ndvi_path = workdir / "NDVI_mean.tif"
+        mean_export = _download_image_to_path(
+            ndvi_mean_native,
+            geometry,
+            ndvi_path,
+            params=_DownloadParams(crs=DEFAULT_EXPORT_CRS, scale=DEFAULT_SCALE),
+        )
+        ndvi_path = mean_export.path
+
+        classified_path = workdir / "zones.tif"
+        classified_export = _download_image_to_path(
+            classified_image,
+            geometry,
+            classified_path,
+            params=_DownloadParams(crs=DEFAULT_EXPORT_CRS, scale=DEFAULT_SCALE),
+        )
+        classified_path = classified_export.path
+
+        # --- 6. Identify unique classes ---
+        try:
+            unique_classes = (
+                classified_image.reduceRegion(
+                    reducer=ee.Reducer.frequencyHistogram(),
+                    geometry=geometry,
+                    scale=DEFAULT_SCALE,
+                    bestEffort=True,
+                    tileScale=4,
+                    maxPixels=gee.MAX_PIXELS,
+                ).get("zone")
+            )
+            unique_classes = (
+                list((unique_classes or {}).keys())
+                if isinstance(unique_classes, dict)
+                else []
+            )
+        except Exception:
+            unique_classes = []
+
+        if not unique_classes:
+            raise ValueError(
+                "NDVI variation too low to produce multiple zones. "
+                "Try a wider time range or larger AOI."
+            )
+
+        # --- 7. Reproject + vector exports ---
+        vectors_reprojected = ee.FeatureCollection(
+            vectors.map(
+                lambda f: f.setGeometry(f.geometry().transform("EPSG:4326", 0.1))
             )
         )
-    )
 
-    geojson_path = workdir / "zones.geojson"
-    kml_path = workdir / "zones.kml"
-    _download_vector_to_path(vectors_reprojected, geojson_path, file_format="geojson")
-    _download_vector_to_path(vectors_reprojected, kml_path, file_format="kml")
+        geojson_path = workdir / "zones.geojson"
+        kml_path = workdir / "zones.kml"
+        _download_vector_to_path(vectors_reprojected, geojson_path, file_format="geojson")
+        _download_vector_to_path(vectors_reprojected, kml_path, file_format="kml")
 
-    stats_path = None
-    zonal_stats: List[Dict[str, Any]] = []
-    if include_stats:
-        stats_path = workdir / "zones_zonal_stats.csv"
-        zonal_stats = _stream_zonal_stats(classified_path, ndvi_path)
-        with stats_path.open("w", newline="") as csv_file:
-            writer = csv.DictWriter(
-                csv_file,
-                fieldnames=[
-                    "zone",
-                    "area_ha",
-                    "mean_ndvi",
-                    "min_ndvi",
-                    "max_ndvi",
-                    "pixel_count",
-                ],
+        # --- 8. Optional zonal stats ---
+        stats_path = None
+        zonal_stats: List[Dict[str, Any]] = []
+        if include_stats:
+            stats_path = workdir / "zones_zonal_stats.csv"
+            zonal_stats = _stream_zonal_stats(classified_path, ndvi_path)
+            with stats_path.open("w", newline="") as csv_file:
+                writer = csv.DictWriter(
+                    csv_file,
+                    fieldnames=[
+                        "zone",
+                        "area_ha",
+                        "mean_ndvi",
+                        "min_ndvi",
+                        "max_ndvi",
+                        "pixel_count",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerows(zonal_stats)
+
+        # --- 9. Metadata ---
+        palette = list(ZONE_PALETTE[: max(1, min(n_classes, len(ZONE_PALETTE)))])
+        metadata: Dict[str, Any] = {
+            "used_months": used_months,
+            "skipped_months": skipped_months,
+            "zone_method": "ndvi_quantiles",
+            "stability_mask_applied": False,
+            "percentile_thresholds": [],
+            "palette": palette,
+            "requested_zone_count": int(n_classes),
+            "effective_zone_count": int(len(unique_classes) or n_classes),
+            "zones": zonal_stats,
+            "classification_method": "quantiles",
+        }
+
+        artifacts = ZoneArtifacts(
+            raster_path=str(classified_path),
+            mean_ndvi_path=str(ndvi_path),
+            vector_path=str(geojson_path),
+            vector_components={
+                "geojson": str(geojson_path),
+                "kml": str(kml_path),
+            },
+            zonal_stats_path=str(stats_path) if stats_path else None,
+            working_dir=str(workdir),
+        )
+
+        metadata["downloaded_mean_ndvi"] = str(ndvi_path)
+        metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
+        metadata["classified_export_task"] = _task_payload(classified_export.task)
+        return artifacts, metadata
+
+    # --- Controlled EE exception translation ---
+    except ee.ee_exception.EEException as ee_err:
+        msg = str(ee_err)
+        if "Image.constant" in msg or "may not be null" in msg:
+            raise ValueError(
+                "NDVI computation failed — empty or invalid image returned from Earth Engine. "
+                "Try widening the date range or relaxing cloud masking."
             )
-            writer.writeheader()
-            writer.writerows(zonal_stats)
+        elif "Collection" in msg and "empty" in msg:
+            raise ValueError(
+                "No Sentinel-2 imagery found for the selected period."
+            )
+        else:
+            raise ValueError(f"Earth Engine error: {msg}")
 
-    palette = list(ZONE_PALETTE[: max(1, min(n_classes, len(ZONE_PALETTE)))])
+    # --- Preserve other ValueErrors (already user-facing) ---
+    except ValueError:
+        raise
 
-    metadata: Dict[str, Any] = {
-        "used_months": used_months,
-        "skipped_months": skipped_months,
-        "zone_method": "ndvi_quantiles",
-        "stability_mask_applied": False,
-        "percentile_thresholds": [],
-        "palette": palette,
-        "requested_zone_count": int(n_classes),
-        "effective_zone_count": int(len(unique_classes) or n_classes),
-        "zones": zonal_stats,
-        "classification_method": "quantiles",
-    }
-
-    artifacts = ZoneArtifacts(
-        raster_path=str(classified_path),
-        mean_ndvi_path=str(ndvi_path),
-        vector_path=str(geojson_path),
-        vector_components={
-            "geojson": str(geojson_path),
-            "kml": str(kml_path),
-        },
-        zonal_stats_path=str(stats_path) if stats_path else None,
-        working_dir=str(workdir),
-    )
-
-    metadata["downloaded_mean_ndvi"] = str(ndvi_path)
-    metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
-    metadata["classified_export_task"] = _task_payload(classified_export.task)
-    return artifacts, metadata
-
+    # --- Catch-all fallback ---
+    except Exception as exc:
+        raise ValueError(f"Unexpected error while preparing NDVI zones: {exc}")
 
 def build_zone_artifacts(
     aoi_geojson: Union[dict, ee.Geometry],
