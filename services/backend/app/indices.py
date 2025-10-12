@@ -11,6 +11,8 @@ import math
 
 import ee
 
+from app.services.ndvi_shared import compute_ndvi_loose
+
 TEN_METER_BANDS = {"B2", "B3", "B4", "B8"}
 TWENTY_METER_BANDS = {"B5", "B6", "B7", "B8A", "B11", "B12"}
 REQUIRED_BANDS: Iterable[str] = (
@@ -61,9 +63,7 @@ IndexFunction = Callable[[ee.Image, ee.Geometry, int], ee.Image]
 
 
 def ndvi(image: ee.Image, geometry: ee.Geometry, scale_m: int) -> ee.Image:
-    nir = _select_band(image, "B8")
-    red = _select_band(image, "B4")
-    result = _safe_divide(nir.subtract(red), nir.add(red))
+    result = compute_ndvi_loose(image)
     return _finish(result, "NDVI", geometry, scale_m)
 
 
