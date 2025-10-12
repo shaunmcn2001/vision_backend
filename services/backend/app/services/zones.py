@@ -343,20 +343,26 @@ def _build_mean_ndvi_for_zones(
     months: Sequence[str] | None = None,
     cloud_prob_max: int = 60,
 ) -> ee.Image:
-    """Build mean NDVI for the selected period."""
+    """Build mean NDVI for the selected period (never aborts for low variation)."""
 
     def _iso(d):
         return d.isoformat() if isinstance(d, date) else str(d)
 
+    # 1) Monthly Sentinel-2 collection
     monthly = gee.monthly_sentinel2_collection(
         aoi=geom, start=_iso(start_date), end=_iso(end_date),
         months=months, cloud_prob_max=cloud_prob_max
     )
 
-    ic_size = int(ee.Number(monthly.size()).getInfo() or 0)
+    # Still hard-fail only when there's truly no imagery.
+    try:
+        ic_size = int(ee.Number(monthly.size()).getInfo() or 0)
+    except Exception:
+        ic_size = 0
     if ic_size == 0:
         raise ValueError(S2_COLLECTION_EMPTY_ERROR)
 
+    # 2) NDVI per image with safe band guard
     def _ndvi(img: ee.Image) -> ee.Image:
         bnames = ee.List(img.bandNames())
         has_b4 = ee.Number(bnames.indexOf('B4')).gte(0)
@@ -370,7 +376,7 @@ def _build_mean_ndvi_for_zones(
 
     ndvi_mean = monthly.map(_ndvi).mean().rename('NDVI_mean').toFloat().clip(geom)
 
-    # variation check (server-side extract -> client number)
+    # 3) Variation check → warn, don't raise
     try:
         std_dict = ndvi_mean.reduceRegion(
             reducer=ee.Reducer.stdDev(),
@@ -379,19 +385,23 @@ def _build_mean_ndvi_for_zones(
             bestEffort=True,
             maxPixels=1e9,
         )
-        # ndvi_mean has a single band: "NDVI_mean"
-        std_val = ee.Number(
-            ee.Dictionary(std_dict).get('NDVI_mean')
-        ).getInfo()
+        std_val = ee.Number(ee.Dictionary(std_dict).get('NDVI_mean')).getInfo()
     except Exception:
         std_val = 0.0
-    
     if std_val is None:
         std_val = 0.0
-    
-    if std_val < 0.0005:
-        raise ValueError(NDVI_VARIATION_TOO_LOW_ERROR)
 
+    # If very flat, continue but tag + log
+    if std_val < 1e-3:  # tweak threshold as you like
+        logger.warning("NDVI variation low (std=%.6f). Proceeding; zones may collapse.", std_val)
+        ndvi_mean = ndvi_mean.set({
+            'ndvi_stdDev': std_val,
+            'ndvi_low_variation': True,
+        })
+    else:
+        ndvi_mean = ndvi_mean.set({'ndvi_stdDev': std_val, 'ndvi_low_variation': False})
+
+    # 4) Reproject to native 10 m if reference is available
     first_img = ee.Image(monthly.first())
     ndvi_native = ee.Algorithms.If(
         first_img,
@@ -400,7 +410,6 @@ def _build_mean_ndvi_for_zones(
     )
 
     return ee.Image(ndvi_native).rename('NDVI_mean').toFloat().clip(geom)
-
 
     def _monthly(aoi, start, end, mths, cprob) -> ee.ImageCollection:
         return gee.monthly_sentinel2_collection(
