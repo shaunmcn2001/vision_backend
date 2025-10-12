@@ -238,44 +238,60 @@ def _build_composite_series(geometry: ee.Geometry, months: Sequence[str], start_
 
 @dataclass
 class _DownloadParams:
-    crs: str = DEFAULT_EXPORT_CRS
+    crs: str | None = DEFAULT_EXPORT_CRS
     scale: int = DEFAULT_SCALE
 
-def _download_image_to_path(image: ee.Image, geometry: ee.Geometry, target: Path, params: _DownloadParams | None = None) -> ImageExportResult:
+def _download_image_to_path(
+    image: ee.Image,
+    geometry: ee.Geometry,
+    target: Path,
+    params: _DownloadParams | None = None,
+) -> ImageExportResult:
     params = params or _DownloadParams()
     image = image.toFloat()  # ensure float32
 
-    region_coords = _geometry_region(geometry)
-    ee_region = ee.Geometry.Polygon(region_coords)
+    try:
+        region_candidate = geometry.geometry() if hasattr(geometry, "geometry") else geometry
+    except Exception:
+        region_candidate = geometry
+    if isinstance(region_candidate, ee.Geometry):
+        ee_region = region_candidate
+    else:
+        region_coords = _geometry_region(geometry)
+        ee_region = ee.Geometry.Polygon(region_coords)
     sanitized_name = sanitize_name(target.stem or 'export')
     description = f'zones_{sanitized_name}'[:100]
     folder = os.getenv('GEE_DRIVE_FOLDER', 'Sentinel2_Zones')
 
     task: ee.batch.Task | None = None
     try:
-        task = ee.batch.Export.image.toDrive(
-            image=image,
-            description=description,
-            folder=folder,
-            fileNamePrefix=sanitized_name,
-            region=ee_region,
-            scale=params.scale,
-            crs=params.crs,
-            fileFormat='GeoTIFF',
-            maxPixels=gee.MAX_PIXELS,
-        )
+        export_kwargs: Dict[str, object] = {
+            'image': image,
+            'description': description,
+            'folder': folder,
+            'fileNamePrefix': sanitized_name,
+            'region': ee_region,
+            'scale': params.scale,
+            'fileFormat': 'GeoTIFF',
+            'maxPixels': gee.MAX_PIXELS,
+        }
+        if params.crs:
+            export_kwargs['crs'] = params.crs
+        task = ee.batch.Export.image.toDrive(**export_kwargs)
         task.start()
     except Exception:
         logger.exception('Failed to start Drive export for %s', sanitized_name)
         task = None
 
-    dl_params = {
+    dl_params: Dict[str, object] = {
         'scale': params.scale,
-        'crs': params.crs,
-        'region': region_coords,
+        'region': ee_region,
         'filePerBand': False,   # only for getDownloadURL
         'format': 'GeoTIFF',
     }
+    if params.crs:
+        dl_params['crs'] = params.crs
+    dl_params['noData'] = -32768
     url = image.getDownloadURL(dl_params)
     with urlopen(url) as response:
         headers = getattr(response, 'headers', None)
