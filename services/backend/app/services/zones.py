@@ -368,28 +368,29 @@ def _build_mean_ndvi_for_zones(
     if ic_size == 0:
         raise ValueError(S2_COLLECTION_EMPTY_ERROR)
 
-    # 2) NDVI per image (safe band presence check)
     def _ndvi(img: ee.Image) -> ee.Image:
         bnames = ee.List(img.bandNames())
     
-        # Boolean: are both B4 and B8 present?
-        both = ee.List(['B4', 'B8']) \
-            .map(lambda n: bnames.contains(ee.String(n))) \
-            .reduce(ee.Reducer.allNonZero()) \
-            .gt(0)  # Boolean
+        # Indices as ee.Number
+        idx4 = ee.Number(bnames.indexOf('B4'))
+        idx8 = ee.Number(bnames.indexOf('B8'))
+    
+        # Presence flags as ee.Number(0/1)
+        has_b4 = idx4.gte(0)            # -> Computed Number (0/1)
+        has_b8 = idx8.gte(0)            # -> Computed Number (0/1)
+    
+        # "Both present" as a numeric boolean, then to a proper Boolean via .eq(1)
+        both = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
     
         ndvi_img = ee.Image(
             ee.Algorithms.If(
                 both,
                 img.normalizedDifference(['B8', 'B4']).rename('NDVI'),
-                # keep masked when bands are missing (no fake constants)
-                ee.Image.constant(float('nan')).rename('NDVI')
+                ee.Image.constant(float('nan')).rename('NDVI')  # keep masked if bands missing
             )
         )
-
-    # Preserve the incoming mask (clouds, etc.)
-        return ndvi_img.updateMask(img.mask())
-
+    
+        return ee.Image(ndvi_img).updateMask(img.mask())
 
     monthly_ndvi = monthly.map(_ndvi)
 
