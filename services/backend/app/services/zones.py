@@ -556,8 +556,8 @@ def _classify_local_zones(
         raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
     unique_values = np.unique(valid_values)
-# Constant NDVI: produce 1 class instead of erroring.
-effective_n_classes = min(n_classes, max(1, unique_values.size))
+    # Constant NDVI: produce 1 class instead of erroring.
+    effective_n_classes = min(n_classes, max(1, unique_values.size))
 
     vmin = float(np.min(valid_values))
     vmax = float(np.max(valid_values))
