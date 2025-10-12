@@ -556,10 +556,8 @@ def _classify_local_zones(
         raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
     unique_values = np.unique(valid_values)
-
-    # Constant NDVI: produce 1 class instead of erroring.
-
-    effective_n_classes = min(n_classes, max(1, unique_values.size))
+# Constant NDVI: produce 1 class instead of erroring.
+effective_n_classes = min(n_classes, max(1, unique_values.size))
 
     vmin = float(np.min(valid_values))
     vmax = float(np.max(valid_values))
@@ -2194,20 +2192,20 @@ def _prepare_selected_period_artifacts(
 
     if ndvi_collection is not None:
         try:
-            # Keep native S2 projection so raster isn't constant
-            valid_mask = ndvi_collection.count().gt(0)
-            first = ee.Image(ndvi_collection.first())
-            proj = first.projection()
-            mean_image = (
-                ndvi_collection.mean()
-                .toFloat()
-                .setDefaultProjection(proj)
-                .reproject(proj, None, DEFAULT_SCALE)
-                .updateMask(valid_mask)
-                .clip(geometry)
-                .rename(\"NDVI_mean\")
-            )
-            ndvi_stats[\"mean\"] = mean_image
+        # Keep native S2 projection so the raster isn't constant
+        valid_mask = ndvi_collection.count().gt(0)
+        first = ee.Image(ndvi_collection.first())
+        proj = first.projection()
+        mean_image = (
+            ndvi_collection.mean()
+            .toFloat()
+            .setDefaultProjection(proj)
+            .reproject(proj, None, DEFAULT_SCALE)
+            .updateMask(valid_mask)
+            .clip(geometry)
+            .rename("NDVI_mean")
+        )
+        ndvi_stats["mean"] = mean_image
         except Exception:  # pragma: no cover - logging guard
             logger.exception("Failed to compute mean NDVI image from collection")
 
