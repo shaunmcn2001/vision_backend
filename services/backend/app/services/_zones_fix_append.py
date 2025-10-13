@@ -1,0 +1,13 @@
+# --- Back-compat constants for legacy imports (s2_indices etc.) ---
+try:
+    DEFAULT_CV_THRESHOLD
+except NameError:
+    DEFAULT_CV_THRESHOLD = float(os.getenv("ZONES_CV_THRESHOLD", "0"))
+
+DEFAULT_SMOOTH_RADIUS_M = locals().get("DEFAULT_SMOOTH_RADIUS_M", 0)
+DEFAULT_OPEN_RADIUS_M = locals().get("DEFAULT_OPEN_RADIUS_M", 0)
+DEFAULT_CLOSE_RADIUS_M = locals().get("DEFAULT_CLOSE_RADIUS_M", 0)
+DEFAULT_SIMPLIFY_TOL_M = locals().get("DEFAULT_SIMPLIFY_TOL_M", 5)
+DEFAULT_SIMPLIFY_BUFFER_M = locals().get("DEFAULT_SIMPLIFY_BUFFER_M", 3)
+DEFAULT_N_CLASSES = locals().get("DEFAULT_N_CLASSES", 5)
+DEFAULT_CLOUD_PROB_MAX = locals().get("DEFAULT_CLOUD_PROB_MAX", 100)
