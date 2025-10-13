@@ -239,22 +239,47 @@ def _download_vector_to_path(
     vectors: ee.FeatureCollection,
     target: Path,
     *,
-    file_format: str,
+    file_format: str | None = None,
 ) -> None:
-    fmt = file_format.lower()
+    """Robust vector downloader. Accepts 'geojson' or 'kml'. Never crashes on dict/None input."""
+    # ---- sanitize and default ----
+    fmt = "geojson"
+    if isinstance(file_format, str):
+        fmt = file_format.lower()
+    elif isinstance(file_format, dict):  # defensive: bad caller passes params dict
+        fmt = (file_format.get("format") or "geojson").lower()
+    elif file_format is None:
+        fmt = "geojson"
+
+    # only two safe options
+    if fmt not in {"geojson", "kml"}:
+        logger.warning("Unknown vector format '%s', defaulting to geojson", fmt)
+        fmt = "geojson"
+
+    # ---- prepare params ----
     params = {
         "format": fmt,
         "filename": target.stem,
         "selectors": ["zone"],
         "crs": "EPSG:4326",
     }
-    url = vectors.getDownloadURL(params)
+
+    try:
+        url = vectors.getDownloadURL(params)
+    except Exception as e:
+        # fallback to safe minimal params
+        logger.warning("EE getDownloadURL failed with %s; retrying simplified", e)
+        url = vectors.getDownloadURL({"format": fmt, "filename": target.stem})
+
+    # ---- ensure extension ----
     if fmt == "geojson" and target.suffix.lower() != ".geojson":
         target = target.with_suffix(".geojson")
-    if fmt == "kml" and target.suffix.lower() != ".kml":
+    elif fmt == "kml" and target.suffix.lower() != ".kml":
         target = target.with_suffix(".kml")
+
     target.parent.mkdir(parents=True, exist_ok=True)
 
+    # ---- download & unpack ----
     with urlopen(url) as response:
         headers = getattr(response, "headers", None)
         content_type = headers.get("Content-Type", "") if headers and hasattr(headers, "get") else ""
@@ -483,7 +508,6 @@ def _classify_smooth_and_polygonize(
 
     # --- detect flatness from image metadata (server -> client safely) ---
     try:
-        # property set upstream in _build_mean_ndvi_for_zones
         flat_prop = ndvi.get("ndvi_low_variation")
         flat_flag = str(flat_prop.getInfo()).lower()
     except Exception:
@@ -778,7 +802,6 @@ def _prepare_selected_period_artifacts(
                 ndvi_min=0.2,
                 ndvi_max=0.9,
             )
-
 
         # --- 7. Reproject + vector exports ---
         vectors_reprojected = ee.FeatureCollection(
