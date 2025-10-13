@@ -243,119 +243,52 @@ def _download_vector_to_path(
     file_format: str,
 ) -> None:
     """
-    Download vectors as GeoJSON or KML via Earth Engine's FeatureCollection.getDownloadURL.
-    NOTE: The API expects a *string* filetype, not a dict. Valid values include "JSON" and "KML".
-    CRSs are not supported in the URL parameters for FeatureCollection downloads.
+    Safe wrapper around ee.FeatureCollection.getDownloadURL.
+    Supports only SHP, KML, or CSV — GeoJSON is not supported by Earth Engine directly.
+    If 'geojson'/'json' is requested, we export SHP (.zip) instead.
     """
-    fmt = (file_format or "geojson").strip().lower()
-    # Map friendly names to EE's expected filetype strings
-    if fmt in ("geojson", "json"):
-        filetype = "JSON"
-        # Ensure file extension
-        if target.suffix.lower() != ".geojson":
-            target = target.with_suffix(".geojson")
-    elif fmt == "kml":
-        filetype = "KML"
-        if target.suffix.lower() != ".kml":
-            target = target.with_suffix(".kml")
-    else:
-        # Fallback safely to JSON
-        filetype = "JSON"
-        if target.suffix.lower() != ".geojson":
-            target = target.with_suffix(".geojson")
+    fmt = (file_format or "shp").strip().lower()
+
+    # EE does not support JSON/GEOJSON for FeatureCollection downloads
+    if fmt in {"geojson", "json"}:
+        fmt = "shp"
+
+    # Map to valid Earth Engine file formats
+    fmt_map = {"shp": "SHP", "csv": "CSV", "kml": "KML"}
+    filetype = fmt_map.get(fmt, "SHP")
+
+    # Normalize target extension
+    if filetype == "SHP":
+        # EE returns a zip containing .shp/.shx/.dbf/.prj
+        target = target.with_suffix(".zip")
+    elif filetype == "KML":
+        target = target.with_suffix(".kml")
+    elif filetype == "CSV":
+        target = target.with_suffix(".csv")
 
     target.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Use positional args compatible with ee.FeatureCollection.getDownloadURL
-        # Signature (cloud): getDownloadURL(filetype=None, selectors=None, filename=None, filePerFeature=None)
+        # Only pass supported kwargs; do NOT pass 'crs' or a dict for filetype.
         url = vectors.getDownloadURL(filetype=filetype, selectors=["zone"], filename=target.stem)
     except Exception as e:
-        # Minimal fallback without selectors argument
-        try:
-            url = vectors.getDownloadURL(filetype=filetype, filename=target.stem)
-        except Exception as e2:
-            raise ValueError(f"EE getDownloadURL failed: {e2}") from e
+        # Surface a clean error to the caller
+        raise ValueError(f"EE getDownloadURL failed: {e}")
 
-    # Stream to disk. EE may return a zip (e.g., SHP), but JSON/KML are usually direct bytes.
     from urllib.request import urlopen
+    import shutil as _shutil
+
     with urlopen(url) as response:
         headers = getattr(response, "headers", None)
         content_type = headers.get("Content-Type", "") if headers and hasattr(headers, "get") else ""
-        data = response.read()
-        # If we accidentally received a ZIP, try to unpack the first member
-        if "zip" in content_type.lower() or (len(data) >= 4 and data[:2] == b"PK"):
-            import io
-            from zipfile import ZipFile
-            with ZipFile(io.BytesIO(data), "r") as archive:
-                members = archive.namelist()
-                if not members:
-                    raise ValueError("Vector download was empty")
-                # choose the first sensible file
-                choice = None
-                if filetype == "KML":
-                    for m in members:
-                        if m.lower().endswith(".kml"):
-                            choice = m
-                            break
-                else:
-                    for m in members:
-                        if m.lower().endswith((".json", ".geojson")):
-                            choice = m
-                            break
-                if choice is None:
-                    choice = members[0]
-                with archive.open(choice) as member:
-                    target.write_bytes(member.read())
+        # If EE streamed a zip (SHP or sometimes KML), write it directly
+        if "zip" in content_type.lower():
+            with target.open("wb") as f:
+                _shutil.copyfileobj(response, f)
         else:
+            # For CSV/KML responses sent directly
+            data = response.read()
             target.write_bytes(data)
-
-    # guard against invalid values
-    if fmt not in {"geojson", "kml"}:
-        logger.warning("Invalid vector format %r; defaulting to geojson", fmt)
-        fmt = "geojson"
-
-    params = {
-        "format": fmt,
-        "filename": target.stem,
-        "selectors": ["zone"],
-        "crs": "EPSG:4326",
-    }
-
-    # --- get URL safely ---
-    try:
-        url = vectors.getDownloadURL(params)
-    except Exception as e:
-        logger.error("getDownloadURL failed: %s", e)
-        # absolute last fallback
-        url = vectors.getDownloadURL({"format": "geojson", "filename": target.stem})
-
-    # --- normalize extension ---
-    if fmt == "geojson" and target.suffix.lower() != ".geojson":
-        target = target.with_suffix(".geojson")
-    elif fmt == "kml" and target.suffix.lower() != ".kml":
-        target = target.with_suffix(".kml")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    # --- download content ---
-    with urlopen(url) as response:
-        content_type = response.headers.get("Content-Type", "").lower()
-        if "zip" in content_type:
-            with NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
-                shutil.copyfileobj(response, tmp_zip)
-                tmp_zip_path = Path(tmp_zip.name)
-            with ZipFile(tmp_zip_path, "r") as archive:
-                for name in archive.namelist():
-                    if name.lower().endswith((".geojson", ".json", ".kml")):
-                        with archive.open(name) as member:
-                            target.write_bytes(member.read())
-                        break
-            tmp_zip_path.unlink(missing_ok=True)
-        else:
-            target.write_bytes(response.read())
-
-
 
 def _ordered_months(months: Sequence[str]) -> List[str]:
     unique: Dict[str, datetime] = {}
