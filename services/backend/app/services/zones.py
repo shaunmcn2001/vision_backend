@@ -30,7 +30,6 @@ from app.utils.sanitization import sanitize_for_json
 
 logger = logging.getLogger(__name__)
 
-# ----------------------- DEFAULTS (kept here for API importers) -----------------------
 DEFAULT_CLOUD_PROB_MAX = 100
 DEFAULT_N_CLASSES = 5
 DEFAULT_CV_THRESHOLD = 0.8
@@ -203,7 +202,7 @@ def _download_image_to_path(
             export_kwargs["crs"] = params.crs
         task = ee.batch.Export.image.toDrive(**export_kwargs)
         task.start()
-    except Exception:  # pragma: no cover
+    except Exception:  # pragma: no cover - defensive guard for Drive failures
         logger.exception("Failed to start Drive export for %s", sanitized_name)
         task = None
 
@@ -240,45 +239,67 @@ def _download_vector_to_path(
     vectors: ee.FeatureCollection,
     target: Path,
     *,
-    file_format: str,
+    file_format: str | None = None,
 ) -> None:
-    fmt = (file_format or "geojson").lower()
-    # IMPORTANT: ee.FeatureCollection.getDownloadURL expects a string filetype, not a dict
-    try:
-        url = vectors.getDownloadURL(filetype=fmt.upper(), selectors=["zone"], filename=target.stem)
-    except Exception as e:
-        logger.warning("getDownloadURL failed (%s); retrying without selectors", e)
-        url = vectors.getDownloadURL(filetype=fmt.upper(), filename=target.stem)
+    """
+    Download EE FeatureCollection as GeoJSON or KML safely.
+    Fixes 'dict' object has no attribute 'upper' error by ensuring file_format is str.
+    """
+    # --- force valid format ---
+    fmt = "geojson"
+    if isinstance(file_format, str):
+        fmt = file_format.lower()
+    elif isinstance(file_format, dict):
+        # in case caller mistakenly sends a dict
+        fmt = (file_format.get("format") or "geojson").lower()
+    elif file_format is None:
+        fmt = "geojson"
 
-    # Fix extension
+    # guard against invalid values
+    if fmt not in {"geojson", "kml"}:
+        logger.warning("Invalid vector format %r; defaulting to geojson", fmt)
+        fmt = "geojson"
+
+    params = {
+        "format": fmt,
+        "filename": target.stem,
+        "selectors": ["zone"],
+        "crs": "EPSG:4326",
+    }
+
+    # --- get URL safely ---
+    try:
+        url = vectors.getDownloadURL(filetype=fmt, selectors=['zone'], filename=target.stem, crs='EPSG:4326')
+    except Exception as e:
+        logger.error("getDownloadURL failed: %s", e)
+        # absolute last fallback
+        url = vectors.getDownloadURL(filetype=fmt, selectors=['zone'], filename=target.stem, crs='EPSG:4326')
+
+    # --- normalize extension ---
     if fmt == "geojson" and target.suffix.lower() != ".geojson":
         target = target.with_suffix(".geojson")
-    if fmt == "kml" and target.suffix.lower() != ".kml":
+    elif fmt == "kml" and target.suffix.lower() != ".kml":
         target = target.with_suffix(".kml")
+
     target.parent.mkdir(parents=True, exist_ok=True)
 
+    # --- download content ---
     with urlopen(url) as response:
-        headers = getattr(response, "headers", None)
-        content_type = headers.get("Content-Type", "") if headers and hasattr(headers, "get") else ""
-        if "zip" in content_type.lower():
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "zip" in content_type:
             with NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
                 shutil.copyfileobj(response, tmp_zip)
                 tmp_zip_path = Path(tmp_zip.name)
-            try:
-                with ZipFile(tmp_zip_path, "r") as archive:
-                    members = archive.namelist()
-                    if not members:
-                        raise ValueError("Vector download was empty")
-                    first = members[0]
-                    with archive.open(first) as member:
-                        target.write_bytes(member.read())
-            finally:
-                try:
-                    tmp_zip_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            with ZipFile(tmp_zip_path, "r") as archive:
+                for name in archive.namelist():
+                    if name.lower().endswith((".geojson", ".json", ".kml")):
+                        with archive.open(name) as member:
+                            target.write_bytes(member.read())
+                        break
+            tmp_zip_path.unlink(missing_ok=True)
         else:
             target.write_bytes(response.read())
+
 
 
 def _ordered_months(months: Sequence[str]) -> List[str]:
@@ -338,13 +359,13 @@ def _resolve_geometry(aoi: Union[dict, ee.Geometry]) -> ee.Geometry:
     try:
         if isinstance(aoi, ee.Geometry):
             return aoi
-    except TypeError:  # pragma: no cover
+    except TypeError:  # pragma: no cover - ee.Geometry on old ee module can raise TypeError
         pass
     return gee.geometry_from_geojson(aoi)
 
 
 # ---------------------------------------------------------------------------
-# NDVI MEAN BUILDER
+# NDVI MEAN BUILDER (robust mask; warn on low variance; native reprojection)
 # ---------------------------------------------------------------------------
 def _build_mean_ndvi_for_zones(
     geom: ee.Geometry,
@@ -354,9 +375,12 @@ def _build_mean_ndvi_for_zones(
     months: Sequence[str] | None = None,
     cloud_prob_max: int = 60,
 ) -> ee.Image:
+    """Build mean NDVI for the selected period (warn on low variation, don't abort)."""
+
     def _iso(d):
         return d.isoformat() if isinstance(d, date) else str(d)
 
+    # 1) Monthly Sentinel-2 collection
     monthly = gee.monthly_sentinel2_collection(
         aoi=geom,
         start=_iso(start_date),
@@ -365,6 +389,7 @@ def _build_mean_ndvi_for_zones(
         cloud_prob_max=cloud_prob_max,
     )
 
+    # Hard-fail only when there's truly no imagery
     try:
         ic_size = int(ee.Number(monthly.size()).getInfo() or 0)
     except Exception:
@@ -372,13 +397,20 @@ def _build_mean_ndvi_for_zones(
     if ic_size == 0:
         raise ValueError(S2_COLLECTION_EMPTY_ERROR)
 
+    # 2) NDVI per image with safe band guard
     def _ndvi(img: ee.Image) -> ee.Image:
+        """
+        Compute NDVI and apply a single-band mask (B8 ∧ B4) only.
+        Avoids multi-band img.mask() side effects and NaN constants.
+        """
         bnames = ee.List(img.bandNames())
         has_b4 = ee.Number(bnames.indexOf("B4")).gte(0)
         has_b8 = ee.Number(bnames.indexOf("B8")).gte(0)
         both = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
 
+        # fully masked placeholder (no NaN)
         empty = ee.Image(0).updateMask(ee.Image(0)).rename("NDVI")
+
         ndvi = ee.Image(
             ee.Algorithms.If(
                 both,
@@ -386,38 +418,60 @@ def _build_mean_ndvi_for_zones(
                 empty,
             )
         )
+
+        # single-band validity mask from B8 & B4
         mask_1band = img.select("B8").mask().multiply(img.select("B4").mask()).gt(0)
         return ndvi.updateMask(mask_1band)
 
+    # Keep NDVI masked for stats (avoid unmask(0) before thresholds)
     ndvi_mean = monthly.map(_ndvi).mean().rename("NDVI_mean").toFloat().clip(geom)
 
-    # Annotate low-variation hint
+    # 3) Variation check → warn, don't raise
     try:
+        std_dict = ee.Dictionary(
+            ndvi_mean.reduceRegion(
+                reducer=ee.Reducer.stdDev(),
+                geometry=geom,
+                scale=10,
+                bestEffort=True,
+                maxPixels=1e9,
+            )
+        )
         std_val = ee.Number(
-            ee.Dictionary(
-                ndvi_mean.reduceRegion(
-                    reducer=ee.Reducer.stdDev(),
-                    geometry=geom,
-                    scale=10,
-                    bestEffort=True,
-                    maxPixels=1e9,
-                )
-            ).values().get(0)
+            ee.Algorithms.If(
+                std_dict.contains("NDVI_mean_stdDev"),
+                std_dict.get("NDVI_mean_stdDev"),
+                ee.Dictionary(
+                    ndvi_mean.reduceRegion(
+                        reducer=ee.Reducer.stdDev(),
+                        geometry=geom,
+                        scale=10,
+                        bestEffort=True,
+                        maxPixels=1e9,
+                    )
+                ).values().get(0),
+            )
         ).getInfo()
     except Exception:
         std_val = 0.0
-    std_val = float(std_val or 0.0)
-    ndvi_mean = ndvi_mean.set({
-        "ndvi_stdDev": std_val,
-        "ndvi_low_variation": std_val < 1e-3,
-    })
 
+    if std_val is None:
+        std_val = 0.0
+
+    if std_val < 1e-3:
+        logger.warning("NDVI variation low (std=%.6f). Proceeding; zones may collapse.", std_val)
+        ndvi_mean = ndvi_mean.set({"ndvi_stdDev": std_val, "ndvi_low_variation": True})
+    else:
+        ndvi_mean = ndvi_mean.set({"ndvi_stdDev": std_val, "ndvi_low_variation": False})
+
+    # 4) Native 10 m reprojection if reference is available
     first_img = ee.Image(monthly.first())
     ndvi_native = ee.Algorithms.If(
         first_img,
         reproject_native_10m(ndvi_mean, first_img, ref_band="B8", scale=10),
         ndvi_mean,
     )
+
     return ee.Image(ndvi_native).rename("NDVI_mean").toFloat().clip(geom)
 
 
@@ -431,24 +485,35 @@ def _classify_smooth_and_polygonize(
     n_zones: int = 3,
     mmu_ha: float = 1.0,
     smooth_radius_px: int = 1,
-    mode: str = DEFAULT_MODE,
+    mode: str = DEFAULT_MODE,                 # "linear" | "quantile" | "auto"
     ndvi_min: float | None = None,
     ndvi_max: float | None = None,
 ):
+    """
+    Classify NDVI into production zones.
+
+    Modes:
+      - 'linear': fixed equal-width bins in [ndvi_min, ndvi_max] (defaults 0.35–0.73)
+      - 'quantile': equal-frequency bins (by percentiles)
+      - 'auto': use quantile if variation exists, else linear
+    """
     ndvi = ndvi_mean_native.rename("NDVI_mean").clip(geom)
 
     lo = DEFAULT_NDVI_MIN if ndvi_min is None else float(ndvi_min)
     hi = DEFAULT_NDVI_MAX if ndvi_max is None else float(ndvi_max)
     if hi <= lo:
-        hi = lo + 1e-6
+        hi = lo + 1e-6  # avoid zero span
 
+    # --- detect flatness from image metadata (server -> client safely) ---
     try:
-        flat_flag = str(ndvi.get("ndvi_low_variation").getInfo()).lower() == "true"
+        flat_prop = ndvi.get("ndvi_low_variation")
+        flat_flag = str(flat_prop.getInfo()).lower()
     except Exception:
-        flat_flag = False
+        flat_flag = "false"
 
-    thresholds_py: List[float]
-    if mode == "quantile" or (mode == "auto" and not flat_flag):
+    # --- thresholds selection ---
+    if mode == "quantile" or (mode == "auto" and flat_flag != "true"):
+        # quantile bin edges (0..100)
         percentiles = [100.0 * (i / n_zones) for i in range(n_zones + 1)]
         stats = ndvi.reduceRegion(
             reducer=ee.Reducer.percentile(percentiles),
@@ -457,31 +522,38 @@ def _classify_smooth_and_polygonize(
             bestEffort=True,
             maxPixels=1e9,
         )
-        thresholds_py = []
+        thresholds_py: List[float] = []
         for p in percentiles:
             key = f"NDVI_mean_p{int(p)}"
             try:
                 val = ee.Number(ee.Dictionary(stats).get(key)).getInfo()
+                if val is None:
+                    raise Exception()
                 thresholds_py.append(float(val))
             except Exception:
+                # fallback to linear edge inside [lo, hi]
                 thresholds_py.append(lo + (hi - lo) * (p / 100.0))
         method_used = "quantile"
     else:
+        # linear (default and 'auto' fallback when flat)
         step = (hi - lo) / n_zones
         thresholds_py = [lo + i * step for i in range(n_zones + 1)]
         method_used = "linear"
 
+    # --- classification by thresholds ---
     def classify(img: ee.Image, edges: List[float]) -> ee.Image:
         zones = ee.Image.constant(0)
         for i in range(len(edges) - 1):
             lower = edges[i]
             upper = edges[i + 1]
             zones = zones.where(img.gte(lower).And(img.lt(upper)), i + 1)
+        # include the top edge in last bin
         zones = zones.where(img.gte(edges[-2]).And(img.lte(edges[-1])), len(edges) - 1)
         return zones.rename("zone").updateMask(img.mask()).toInt8()
 
     cls_raw = classify(ndvi, thresholds_py)
 
+    # --- optional smoothing ---
     cls_smooth = ee.Image(
         ee.Algorithms.If(
             ee.Number(smooth_radius_px).gt(0),
@@ -490,11 +562,12 @@ def _classify_smooth_and_polygonize(
         )
     ).toInt8()
 
-    # EE limit for maxSize is 1024; omit the parameter
+    # --- MMU filter ---
     min_px = ee.Number(mmu_ha).multiply(100).round().max(1)
 
     def keep_big(c):
         mask = cls_smooth.eq(c)
+        # EE limit for maxSize is 1024; omit it for full-tile connectivity
         valid = mask.connectedPixelCount(eightConnected=True).gte(min_px)
         return cls_smooth.updateMask(mask.And(valid))
 
@@ -502,6 +575,7 @@ def _classify_smooth_and_polygonize(
         [keep_big(ee.Number(c)) for c in range(1, n_zones + 1)]
     ).mosaic().rename("zone").toInt8().clip(geom)
 
+    # --- vectorize ---
     vectors = cls_mmu.reduceToVectors(
         geometry=geom,
         scale=10,
@@ -512,6 +586,7 @@ def _classify_smooth_and_polygonize(
         maxPixels=1e9,
     )
 
+    # metadata on the image
     cls_mmu = cls_mmu.set(
         {
             "thresholds": thresholds_py,
@@ -595,14 +670,17 @@ def _prepare_selected_period_artifacts(
     method: str,
     sample_size: int,
     include_stats: bool,
+    # NEW:
     mode: str = DEFAULT_MODE,
     ndvi_min: float | None = None,
     ndvi_max: float | None = None,
 ) -> tuple[ZoneArtifacts, Dict[str, object]]:
+    """Prepares classified NDVI production zones, raster + vector exports, and metadata."""
     try:
         ordered_months = _ordered_months(months)
         skipped_months: List[str] = []
 
+        # --- 1. Validate imagery availability ---
         for month in ordered_months:
             try:
                 collection, _ = gee.monthly_sentinel2_collection(geometry, month, cloud_prob_max)
@@ -619,6 +697,7 @@ def _prepare_selected_period_artifacts(
                 "Try adjusting the date range or cloud probability threshold."
             )
 
+        # --- 2. Build mean NDVI ---
         ndvi_mean_native = _build_mean_ndvi_for_zones(
             geometry,
             start_date,
@@ -626,27 +705,32 @@ def _prepare_selected_period_artifacts(
             months=ordered_months,
             cloud_prob_max=cloud_prob_max,
         )
-        if ndvi_mean_native is None:
-            raise ValueError("NDVI computation failed — EE returned an empty image.")
 
-        # Validate mask (sum of mask > 0)
+        if ndvi_mean_native is None:
+            raise ValueError(
+                "NDVI computation failed — Earth Engine returned an empty or invalid image."
+            )
+
+        # --- 3. Validate NDVI pixel mask ---
         try:
-            cnt_value = ee.Number(
-                ee.Dictionary(
-                    ndvi_mean_native.mask().reduceRegion(
-                        reducer=ee.Reducer.sum(),
-                        geometry=geometry,
-                        scale=10,
-                        bestEffort=True,
-                        maxPixels=1e9,
-                    )
-                ).values().get(0)
-            ).getInfo()
-        except Exception:
+            cnt_dict = ndvi_mean_native.mask().reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=geometry,
+                scale=10,
+                bestEffort=True,
+                maxPixels=1e9,
+            )
+            cnt_value = ee.Number(ee.Dictionary(cnt_dict).values().get(0)).getInfo()
+            if cnt_value is None or cnt_value <= 0:
+                raise ValueError(NDVI_MASK_EMPTY_ERROR)
+        except Exception as e:
+            print("⚠️ Warning: NDVI pixel count check skipped due to:", str(e))
             cnt_value = 1
-        if not cnt_value or cnt_value <= 0:
+
+        if cnt_value <= 0:
             raise ValueError(NDVI_MASK_EMPTY_ERROR)
 
+        # --- 4. Classify and polygonize zones ---
         classified_image, vectors = _classify_smooth_and_polygonize(
             ndvi_mean_native,
             geometry,
@@ -658,6 +742,12 @@ def _prepare_selected_period_artifacts(
             ndvi_max=ndvi_max,
         )
 
+        if classified_image is None or vectors is None:
+            raise ValueError(
+                "Zone classification failed — no valid NDVI variation or geometry produced."
+            )
+
+        # --- 5. Exports ---
         workdir = _ensure_working_directory(working_dir)
         ndvi_path = workdir / "NDVI_mean.tif"
         mean_export = _download_image_to_path(
@@ -677,6 +767,7 @@ def _prepare_selected_period_artifacts(
         )
         classified_path = classified_export.path
 
+        # --- 6. Identify unique classes ---
         try:
             unique_classes = (
                 classified_image.reduceRegion(
@@ -698,6 +789,7 @@ def _prepare_selected_period_artifacts(
 
         if not unique_classes or len(unique_classes) < 2:
             logger.warning("NDVI variation very low — forcing linear fallback zones.")
+            # force 3-band linear bins
             classified_image, vectors = _classify_smooth_and_polygonize(
                 ndvi_mean_native,
                 geometry,
@@ -709,6 +801,7 @@ def _prepare_selected_period_artifacts(
                 ndvi_max=0.9,
             )
 
+        # --- 7. Reproject + vector exports ---
         vectors_reprojected = ee.FeatureCollection(
             vectors.map(lambda f: f.setGeometry(f.geometry().transform("EPSG:4326", 0.1)))
         )
@@ -718,6 +811,7 @@ def _prepare_selected_period_artifacts(
         _download_vector_to_path(vectors_reprojected, geojson_path, file_format="geojson")
         _download_vector_to_path(vectors_reprojected, kml_path, file_format="kml")
 
+        # --- 8. Optional zonal stats ---
         stats_path = None
         zonal_stats: List[Dict[str, Any]] = []
         if include_stats:
@@ -738,6 +832,7 @@ def _prepare_selected_period_artifacts(
                 writer.writeheader()
                 writer.writerows(zonal_stats)
 
+        # --- 9. Metadata ---
         palette = list(ZONE_PALETTE[: max(1, min(n_classes, len(ZONE_PALETTE)))])
         metadata: Dict[str, Any] = {
             "used_months": used_months,
@@ -745,19 +840,24 @@ def _prepare_selected_period_artifacts(
             "stability_mask_applied": False,
             "palette": palette,
             "requested_zone_count": int(n_classes),
-            "effective_zone_count": int(max(len(unique_classes or []), n_classes)),
+            "effective_zone_count": int(len(unique_classes) or n_classes),
             "zones": zonal_stats,
-            "classification_mode": (classified_image.get("mode").getInfo() if hasattr(classified_image, "get") else None) or "linear",
-            "thresholds": (classified_image.get("thresholds").getInfo() if hasattr(classified_image, "get") else None) or [],
-            "ndvi_min": (classified_image.get("ndvi_min").getInfo() if hasattr(classified_image, "get") else None),
-            "ndvi_max": (classified_image.get("ndvi_max").getInfo() if hasattr(classified_image, "get") else None),
+            # classification info:
+            "classification_mode": classified_image.get("mode").getInfo() if hasattr(classified_image, "get") else mode,
+            "percentile_thresholds": [],
+            "thresholds": classified_image.get("thresholds").getInfo() if hasattr(classified_image, "get") else [],
+            "ndvi_min": classified_image.get("ndvi_min").getInfo() if hasattr(classified_image, "get") else ndvi_min,
+            "ndvi_max": classified_image.get("ndvi_max").getInfo() if hasattr(classified_image, "get") else ndvi_max,
         }
 
         artifacts = ZoneArtifacts(
             raster_path=str(classified_path),
             mean_ndvi_path=str(ndvi_path),
             vector_path=str(geojson_path),
-            vector_components={"geojson": str(geojson_path), "kml": str(kml_path)},
+            vector_components={
+                "geojson": str(geojson_path),
+                "kml": str(kml_path),
+            },
             zonal_stats_path=str(stats_path) if stats_path else None,
             working_dir=str(workdir),
         )
@@ -765,8 +865,9 @@ def _prepare_selected_period_artifacts(
         metadata["downloaded_mean_ndvi"] = str(ndvi_path)
         metadata["mean_ndvi_export_task"] = _task_payload(mean_export.task)
         metadata["classified_export_task"] = _task_payload(classified_export.task)
-        return artifacts, sanitize_for_json(metadata)
+        return artifacts, metadata
 
+    # --- Controlled EE exception translation ---
     except ee.ee_exception.EEException as ee_err:
         msg = str(ee_err)
         if "Image.constant" in msg or "may not be null" in msg:
@@ -778,8 +879,12 @@ def _prepare_selected_period_artifacts(
             raise ValueError("No Sentinel-2 imagery found for the selected period.")
         else:
             raise ValueError(f"Earth Engine error: {msg}")
+
+    # --- Preserve other ValueErrors (already user-facing) ---
     except ValueError:
         raise
+
+    # --- Catch-all fallback ---
     except Exception as exc:
         raise ValueError(f"Unexpected error while preparing NDVI zones: {exc}")
 
@@ -801,6 +906,7 @@ def build_zone_artifacts(
     method: str = DEFAULT_METHOD,
     sample_size: int = DEFAULT_SAMPLE_SIZE,
     include_stats: bool = True,
+    # NEW:
     mode: str = DEFAULT_MODE,
     ndvi_min: float | None = None,
     ndvi_max: float | None = None,
@@ -879,6 +985,7 @@ def export_selected_period_zones(
     include_stats: bool | None = None,
     apply_stability_mask: bool = True,
     method: str | None = None,
+    # NEW:
     mode: str = DEFAULT_MODE,
     ndvi_min: float | None = None,
     ndvi_max: float | None = None,
@@ -900,6 +1007,7 @@ def export_selected_period_zones(
         export_target = destination
 
     def _coerce_date_any(d):
+        """Accepts str, date, or datetime."""
         if isinstance(d, datetime):
             return d.date()
         if isinstance(d, date):
@@ -958,9 +1066,9 @@ def export_selected_period_zones(
         method=method_key,
         sample_size=DEFAULT_SAMPLE_SIZE,
         include_stats=include_stats_flag,
-        mode=mode,
-        ndvi_min=ndvi_min,
-        ndvi_max=ndvi_max,
+        mode=mode,                 # NEW
+        ndvi_min=ndvi_min,         # NEW
+        ndvi_max=ndvi_max,         # NEW
     )
 
     metadata = dict(metadata)
@@ -1006,7 +1114,7 @@ def _task_payload(task: ee.batch.Task | None) -> Dict[str, object]:
     payload: Dict[str, object] = {"id": getattr(task, "id", None)}
     try:
         status = task.status() or {}
-    except Exception:
+    except Exception:  # pragma: no cover - Earth Engine failure mode
         status = {}
     if status.get("state"):
         payload["state"] = status.get("state")
