@@ -46,6 +46,11 @@ DEFAULT_SCALE = int(os.getenv("ZONES_SCALE_M", "10"))
 DEFAULT_EXPORT_CRS = "EPSG:3857"
 DEFAULT_CRS = DEFAULT_EXPORT_CRS
 
+# NEW: zoning controls
+DEFAULT_MODE = "linear"           # "linear" | "quantile" | "auto"
+DEFAULT_NDVI_MIN = 0.35
+DEFAULT_NDVI_MAX = 0.73
+
 ZONE_PALETTE: Tuple[str, ...] = (
     "#112f1d",
     "#1b4d2a",
@@ -334,7 +339,11 @@ def _resolve_geometry(aoi: Union[dict, ee.Geometry]) -> ee.Geometry:
     except TypeError:  # pragma: no cover - ee.Geometry on old ee module can raise TypeError
         pass
     return gee.geometry_from_geojson(aoi)
-    
+
+
+# ---------------------------------------------------------------------------
+# NDVI MEAN BUILDER (robust mask; warn on low variance; native reprojection)
+# ---------------------------------------------------------------------------
 def _build_mean_ndvi_for_zones(
     geom: ee.Geometry,
     start_date: date | str,
@@ -343,18 +352,21 @@ def _build_mean_ndvi_for_zones(
     months: Sequence[str] | None = None,
     cloud_prob_max: int = 60,
 ) -> ee.Image:
-    """Build mean NDVI for the selected period (never aborts for low variation)."""
+    """Build mean NDVI for the selected period (warn on low variation, don't abort)."""
 
     def _iso(d):
         return d.isoformat() if isinstance(d, date) else str(d)
 
     # 1) Monthly Sentinel-2 collection
     monthly = gee.monthly_sentinel2_collection(
-        aoi=geom, start=_iso(start_date), end=_iso(end_date),
-        months=months, cloud_prob_max=cloud_prob_max
+        aoi=geom,
+        start=_iso(start_date),
+        end=_iso(end_date),
+        months=months,
+        cloud_prob_max=cloud_prob_max,
     )
 
-    # Still hard-fail only when there's truly no imagery.
+    # Hard-fail only when there's truly no imagery
     try:
         ic_size = int(ee.Number(monthly.size()).getInfo() or 0)
     except Exception:
@@ -372,10 +384,10 @@ def _build_mean_ndvi_for_zones(
         has_b4 = ee.Number(bnames.indexOf("B4")).gte(0)
         has_b8 = ee.Number(bnames.indexOf("B8")).gte(0)
         both = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
-    
-        # Empty (fully masked) placeholder; no NaNs.
+
+        # fully masked placeholder (no NaN)
         empty = ee.Image(0).updateMask(ee.Image(0)).rename("NDVI")
-    
+
         ndvi = ee.Image(
             ee.Algorithms.If(
                 both,
@@ -383,15 +395,15 @@ def _build_mean_ndvi_for_zones(
                 empty,
             )
         )
-    
-        # Single-band validity mask from B8 & B4
+
+        # single-band validity mask from B8 & B4
         mask_1band = img.select("B8").mask().multiply(img.select("B4").mask()).gt(0)
         return ndvi.updateMask(mask_1band)
 
-# Keep NDVI masked for stats (don't unmask(0) yet)
+    # Keep NDVI masked for stats (avoid unmask(0) before thresholds)
     ndvi_mean = monthly.map(_ndvi).mean().rename("NDVI_mean").toFloat().clip(geom)
-    
-    # Variation check → warn, don't raise; robust key handling
+
+    # 3) Variation check → warn, don't raise
     try:
         std_dict = ee.Dictionary(
             ndvi_mean.reduceRegion(
@@ -402,232 +414,129 @@ def _build_mean_ndvi_for_zones(
                 maxPixels=1e9,
             )
         )
-        # stdDev reducer usually returns "<band>_stdDev"
         std_val = ee.Number(
             ee.Algorithms.If(
                 std_dict.contains("NDVI_mean_stdDev"),
                 std_dict.get("NDVI_mean_stdDev"),
-                ee.Dictionary(ndvi_mean.reduceRegion(
-                    reducer=ee.Reducer.stdDev(),
-                    geometry=geom,
-                    scale=10,
-                    bestEffort=True,
-                    maxPixels=1e9,
-                )).values().get(0)  # fallback: first value
+                ee.Dictionary(
+                    ndvi_mean.reduceRegion(
+                        reducer=ee.Reducer.stdDev(),
+                        geometry=geom,
+                        scale=10,
+                        bestEffort=True,
+                        maxPixels=1e9,
+                    )
+                ).values().get(0),
             )
         ).getInfo()
     except Exception:
         std_val = 0.0
-    
+
     if std_val is None:
         std_val = 0.0
-    
-    if std_val < 1e-3:  # tweak threshold as needed
+
+    if std_val < 1e-3:
         logger.warning("NDVI variation low (std=%.6f). Proceeding; zones may collapse.", std_val)
-        ndvi_mean = ndvi_mean.set({
-            "ndvi_stdDev": std_val,
-            "ndvi_low_variation": True,
-        })
+        ndvi_mean = ndvi_mean.set({"ndvi_stdDev": std_val, "ndvi_low_variation": True})
     else:
         ndvi_mean = ndvi_mean.set({"ndvi_stdDev": std_val, "ndvi_low_variation": False})
-    
-    # Reproject to native 10 m if reference is available
+
+    # 4) Native 10 m reprojection if reference is available
     first_img = ee.Image(monthly.first())
     ndvi_native = ee.Algorithms.If(
         first_img,
         reproject_native_10m(ndvi_mean, first_img, ref_band="B8", scale=10),
         ndvi_mean,
     )
-    
+
     return ee.Image(ndvi_native).rename("NDVI_mean").toFloat().clip(geom)
-    
 
-    def _monthly(aoi, start, end, mths, cprob) -> ee.ImageCollection:
-        return gee.monthly_sentinel2_collection(
-            aoi=aoi, start=start, end=end, months=mths, cloud_prob_max=cprob
-        )
 
-    def _mean_ndvi(ic: ee.ImageCollection) -> ee.Image:
-        return ic.map(_ndvi).mean().rename('NDVI_mean').toFloat().clip(geom)
-
-    def _valid_pixel_count(img: ee.Image) -> int | None:
-        """Sum of mask (approx pixel count). Returns an int or None if it can’t be fetched."""
-        try:
-            d = img.mask().reduceRegion(
-                reducer=ee.Reducer.sum(),
-                geometry=geom,
-                scale=10,
-                bestEffort=True,
-                maxPixels=1e9,
-            )
-            # get the first (and only) value safely
-            val = ee.Number(ee.Dictionary(d).values().get(0)).getInfo()
-            return int(val) if val is not None else None
-        except Exception:
-            return None
-
-    def _std_val(img: ee.Image) -> float:
-        """StdDev for variation gate (server→client once)."""
-        try:
-            d = img.reduceRegion(
-                reducer=ee.Reducer.stdDev(),
-                geometry=geom,
-                scale=40,
-                bestEffort=True,
-                maxPixels=1e9,
-            )
-            val = ee.Dictionary(d).values().get(0)
-            return float(ee.Number(val).getInfo() if val is not None else 0.0)
-        except Exception:
-            return 0.0
-
-    # -- build (strict pass) ---------------------------------------------------
-
-    start_iso = _iso(start_date)
-    end_iso   = _iso(end_date)
-
-    monthly_strict = _monthly(geom, start_iso, end_iso, months, cloud_prob_max)
-
-    # collection exists?
-    try:
-        ic_size = int(ee.Number(monthly_strict.size()).getInfo() or 0)
-    except Exception:
-        ic_size = 0
-    if ic_size == 0:
-        raise ValueError(S2_COLLECTION_EMPTY_ERROR)
-
-    ndvi_mean = _mean_ndvi(monthly_strict)
-    cnt = _valid_pixel_count(ndvi_mean)
-
-    # -- relax once if strict is fully masked ---------------------------------
-
-    if cnt is None or cnt <= 0:
-        monthly_relaxed = _monthly(geom, start_iso, end_iso, months, max(cloud_prob_max, 60) + 35)
-        # If helper respects cloud_prob_max, this pushes to ~95; clamp at 100 if needed.
-        ndvi_mean_relaxed = _mean_ndvi(monthly_relaxed)
-        cnt2 = _valid_pixel_count(ndvi_mean_relaxed)
-
-        if cnt2 is None or cnt2 <= 0:
-            # truly no valid pixels for the period
-            raise ValueError(NDVI_MASK_EMPTY_ERROR)
-
-        ndvi_mean = ndvi_mean_relaxed  # use the relaxed result
-
-    # -- variation gate (avoid “single-zone”) ---------------------------------
-
-    std_val = _std_val(ndvi_mean)
-    if std_val < 0.01:  # tweak threshold to suit agronomy
-        raise ValueError(NDVI_VARIATION_TOO_LOW_ERROR)
-
-    # -- optional native reprojection (if you have a real source reference) ----
-
-    first_img = ee.Image(ee.ImageCollection(monthly_strict).first())
-    ndvi_native = ee.Image(
-        ee.Algorithms.If(
-            first_img,
-            reproject_native_10m(ndvi_mean, first_img, ref_band='B8', scale=10),
-            ndvi_mean
-        )
-    )
-
-    return ee.Image(ndvi_native).rename('NDVI_mean').toFloat().clip(geom)
-
-    monthly_ndvi = monthly.map(_ndvi)
-
-    # 3) Mean NDVI
-    ndvi_mean = monthly_ndvi.mean().rename("NDVI_mean").toFloat().clip(geom)
-
-    # 4) Valid-pixel check (sum of mask > 0)
-    try:
-        mask_sum_dict = ndvi_mean.mask().reduceRegion(
-            reducer=ee.Reducer.sum(),
-            geometry=geom,
-            scale=10,
-            bestEffort=True,
-            maxPixels=1e9,
-        )
-        mask_sum = ee.Number(ee.Dictionary(mask_sum_dict).values().get(0)).getInfo()
-    except Exception:
-        mask_sum = None
-
-    if mask_sum is None or mask_sum <= 0:
-        raise ValueError(NDVI_MASK_EMPTY_ERROR)
-
-    # 5) Variation check (avoid single-zone outcomes)
-    try:
-        std_dict = ndvi_mean.reduceRegion(
-            reducer=ee.Reducer.stdDev(),
-            geometry=geom,
-            scale=10,
-            bestEffort=True,
-            maxPixels=1e9,
-        )
-        std_val = ee.Number(ee.Dictionary(std_dict).values().get(0)).getInfo()
-        std_val = float(std_val if std_val is not None else 0.0)
-    except Exception:
-        std_val = 0.0
-
-    if std_val < 0.01:
-        raise ValueError(NDVI_VARIATION_TOO_LOW_ERROR)
-
-    # 6) Reproject to native 10 m if possible
-    first_img = ee.Image(monthly.first())
-    ndvi_mean_native = ee.Image(
-        ee.Algorithms.If(
-            first_img,
-            reproject_native_10m(ndvi_mean, first_img, ref_band="B8", scale=10),
-            ndvi_mean,
-        )
-    )
-
-    return ndvi_mean_native.rename("NDVI_mean").toFloat().clip(geom)
-
+# ---------------------------------------------------------------------------
+# CLASSIFY + OPTIONAL SMOOTH + POLYGONIZE
+# ---------------------------------------------------------------------------
 def _classify_smooth_and_polygonize(
     ndvi_mean_native: ee.Image,
     geom: ee.Geometry,
     *,
-    n_zones=3,
-    mmu_ha=1.0,
-    smooth_radius_px=1,
+    n_zones: int = 3,
+    mmu_ha: float = 1.0,
+    smooth_radius_px: int = 1,
+    mode: str = DEFAULT_MODE,                 # NEW
+    ndvi_min: float | None = None,            # NEW
+    ndvi_max: float | None = None,            # NEW
 ):
     """
-    Classify NDVI into fixed production zones (no k-means).
-    Uses defined NDVI breakpoints between 0.35 and 0.73, evenly spaced.
+    Classify NDVI into production zones.
+
+    Modes:
+      - 'linear': fixed equal-width bins in [ndvi_min, ndvi_max] (defaults 0.35–0.73)
+      - 'quantile': equal-frequency bins (by percentiles)
+      - 'auto': use quantile if variation exists, else linear
     """
 
-    # --- 1. Clip and limit NDVI range ---
     ndvi = ndvi_mean_native.rename("NDVI_mean").clip(geom)
-    ndvi_clipped = ndvi.max(0.35).min(0.73)
 
-    # --- 2. Compute fixed thresholds ---
-    # e.g. for 3 zones -> [0.35, 0.48, 0.61, 0.73]
-    step = (0.73 - 0.35) / n_zones
-    thresholds = [0.35 + i * step for i in range(n_zones + 1)]
+    lo = DEFAULT_NDVI_MIN if ndvi_min is None else float(ndvi_min)
+    hi = DEFAULT_NDVI_MAX if ndvi_max is None else float(ndvi_max)
+    if hi <= lo:
+        hi = lo + 1e-6  # avoid zero span
 
-    # --- 3. Classify zones by threshold values ---
-    def classify(img, thr_list):
+    # detect flatness from image metadata (set upstream)
+    flat_flag = ee.String(ndvi.get("ndvi_low_variation")).format()
+
+    # --- thresholds selection ---
+    thresholds_py: List[float]
+
+    if mode == "quantile" or (mode == "auto" and flat_flag.lower() != "true"):
+        percentiles = [100.0 * (i / n_zones) for i in range(n_zones + 1)]
+        stats = ndvi.reduceRegion(
+            reducer=ee.Reducer.percentile(percentiles),
+            geometry=geom,
+            scale=10,
+            bestEffort=True,
+            maxPixels=1e9,
+        )
+        thresholds_py = []
+        for p in percentiles:
+            key = f"NDVI_mean_p{int(p)}"
+            try:
+                val = ee.Number(ee.Dictionary(stats).get(key)).getInfo()
+                if val is None:
+                    raise Exception()
+                thresholds_py.append(float(val))
+            except Exception:
+                thresholds_py.append(lo + (hi - lo) * (p / 100.0))
+        method_used = "quantile"
+    else:
+        # linear (default + 'auto' fallback when flat)
+        step = (hi - lo) / n_zones
+        thresholds_py = [lo + i * step for i in range(n_zones + 1)]
+        method_used = "linear"
+
+    # --- classification by thresholds ---
+    def classify(img: ee.Image, edges: List[float]) -> ee.Image:
         zones = ee.Image.constant(0)
-        for i in range(len(thr_list) - 1):
-            lower = thr_list[i]
-            upper = thr_list[i + 1]
-            zones = zones.where(
-                img.gte(lower).And(img.lte(upper)),
-                i + 1
-            )
+        for i in range(len(edges) - 1):
+            lower = edges[i]
+            upper = edges[i + 1]
+            zones = zones.where(img.gte(lower).And(img.lt(upper)), i + 1)
+        # include the top edge in last bin
+        zones = zones.where(img.gte(edges[-2]).And(img.lte(edges[-1])), len(edges) - 1)
         return zones.rename("zone").updateMask(img.mask()).toInt8()
 
-    cls_raw = classify(ndvi_clipped, thresholds)
+    cls_raw = classify(ndvi, thresholds_py)
 
-    # --- 4. Optional smoothing ---
+    # --- optional smoothing ---
     cls_smooth = ee.Image(
         ee.Algorithms.If(
             ee.Number(smooth_radius_px).gt(0),
             cls_raw.focalMode(radius=smooth_radius_px, units="pixels"),
-            cls_raw
+            cls_raw,
         )
     ).toInt8()
 
-    # --- 5. Apply MMU filter ---
+    # --- MMU filter ---
     min_px = ee.Number(mmu_ha).multiply(100).round().max(1)
 
     def keep_big(c):
@@ -635,11 +544,11 @@ def _classify_smooth_and_polygonize(
         valid = mask.connectedPixelCount(maxSize=1e6, eightConnected=True).gte(min_px)
         return cls_smooth.updateMask(mask.And(valid))
 
-    cls_mmu = ee.ImageCollection([
-        keep_big(ee.Number(c)) for c in range(1, n_zones + 1)
-    ]).mosaic().rename("zone").toInt8().clip(geom)
+    cls_mmu = ee.ImageCollection(
+        [keep_big(ee.Number(c)) for c in range(1, n_zones + 1)]
+    ).mosaic().rename("zone").toInt8().clip(geom)
 
-    # --- 6. Polygonize ---
+    # --- vectorize ---
     vectors = cls_mmu.reduceToVectors(
         geometry=geom,
         scale=10,
@@ -650,15 +559,18 @@ def _classify_smooth_and_polygonize(
         maxPixels=1e9,
     )
 
-    # --- 7. Save thresholds to image metadata ---
-    cls_mmu = cls_mmu.set({
-        "thresholds": thresholds,
-        "zones": n_zones,
-        "method": "fixed_linear_0.35_0.73"
-    })
+    # metadata on the image
+    cls_mmu = cls_mmu.set(
+        {
+            "thresholds": thresholds_py,
+            "zones": n_zones,
+            "mode": method_used,
+            "ndvi_min": lo,
+            "ndvi_max": hi,
+        }
+    )
 
     return cls_mmu, vectors
-
 
 
 def _stream_zonal_stats(classified_path: Path, ndvi_path: Path) -> List[Dict[str, Any]]:
@@ -731,6 +643,10 @@ def _prepare_selected_period_artifacts(
     method: str,
     sample_size: int,
     include_stats: bool,
+    # NEW:
+    mode: str = DEFAULT_MODE,
+    ndvi_min: float | None = None,
+    ndvi_max: float | None = None,
 ) -> tuple[ZoneArtifacts, Dict[str, object]]:
     """Prepares classified NDVI production zones, raster + vector exports, and metadata."""
     try:
@@ -793,7 +709,10 @@ def _prepare_selected_period_artifacts(
             geometry,
             n_zones=n_classes,
             mmu_ha=min_mapping_unit_ha,
-            smooth_radius_px=DEFAULT_SMOOTH_RADIUS_PX,
+            smooth_radius_px=max(0, int(round(smooth_radius_m / 10))),
+            mode=mode,
+            ndvi_min=ndvi_min,
+            ndvi_max=ndvi_max,
         )
 
         if classified_image is None or vectors is None:
@@ -849,9 +768,7 @@ def _prepare_selected_period_artifacts(
 
         # --- 7. Reproject + vector exports ---
         vectors_reprojected = ee.FeatureCollection(
-            vectors.map(
-                lambda f: f.setGeometry(f.geometry().transform("EPSG:4326", 0.1))
-            )
+            vectors.map(lambda f: f.setGeometry(f.geometry().transform("EPSG:4326", 0.1)))
         )
 
         geojson_path = workdir / "zones.geojson"
@@ -885,14 +802,17 @@ def _prepare_selected_period_artifacts(
         metadata: Dict[str, Any] = {
             "used_months": used_months,
             "skipped_months": skipped_months,
-            "zone_method": "ndvi_quantiles",
             "stability_mask_applied": False,
-            "percentile_thresholds": [],
             "palette": palette,
             "requested_zone_count": int(n_classes),
             "effective_zone_count": int(len(unique_classes) or n_classes),
             "zones": zonal_stats,
-            "classification_method": "quantiles",
+            # classification info:
+            "classification_mode": classified_image.get("mode").getInfo() if hasattr(classified_image, "get") else mode,
+            "percentile_thresholds": [],
+            "thresholds": classified_image.get("thresholds").getInfo() if hasattr(classified_image, "get") else [],
+            "ndvi_min": classified_image.get("ndvi_min").getInfo() if hasattr(classified_image, "get") else ndvi_min,
+            "ndvi_max": classified_image.get("ndvi_max").getInfo() if hasattr(classified_image, "get") else ndvi_max,
         }
 
         artifacts = ZoneArtifacts(
@@ -921,9 +841,7 @@ def _prepare_selected_period_artifacts(
                 "Try widening the date range or relaxing cloud masking."
             )
         elif "Collection" in msg and "empty" in msg:
-            raise ValueError(
-                "No Sentinel-2 imagery found for the selected period."
-            )
+            raise ValueError("No Sentinel-2 imagery found for the selected period.")
         else:
             raise ValueError(f"Earth Engine error: {msg}")
 
@@ -934,6 +852,7 @@ def _prepare_selected_period_artifacts(
     # --- Catch-all fallback ---
     except Exception as exc:
         raise ValueError(f"Unexpected error while preparing NDVI zones: {exc}")
+
 
 def build_zone_artifacts(
     aoi_geojson: Union[dict, ee.Geometry],
@@ -952,6 +871,10 @@ def build_zone_artifacts(
     method: str = DEFAULT_METHOD,
     sample_size: int = DEFAULT_SAMPLE_SIZE,
     include_stats: bool = True,
+    # NEW:
+    mode: str = DEFAULT_MODE,
+    ndvi_min: float | None = None,
+    ndvi_max: float | None = None,
 ) -> ZoneArtifacts:
     if n_classes < 2 or n_classes > 7:
         raise ValueError("n_classes must be between 2 and 7")
@@ -993,6 +916,9 @@ def build_zone_artifacts(
         method=method_key,
         sample_size=sample_size,
         include_stats=include_stats,
+        mode=mode,
+        ndvi_min=ndvi_min,
+        ndvi_max=ndvi_max,
     )
     return artifacts
 
@@ -1024,6 +950,10 @@ def export_selected_period_zones(
     include_stats: bool | None = None,
     apply_stability_mask: bool = True,
     method: str | None = None,
+    # NEW:
+    mode: str = DEFAULT_MODE,
+    ndvi_min: float | None = None,
+    ndvi_max: float | None = None,
 ) -> Dict[str, Any]:
     working_dir = _ensure_working_directory(None)
     aoi = _to_ee_geometry(aoi_geojson)
@@ -1048,10 +978,8 @@ def export_selected_period_zones(
         if isinstance(d, date):
             return d
         if isinstance(d, str):
-            # handle full ISO or YYYY-MM-DD
             return datetime.fromisoformat(d[:10]).date()
         raise TypeError(f"Invalid date type: {type(d)}")
-
 
     if not months:
         if start_date is None or end_date is None:
@@ -1059,9 +987,9 @@ def export_selected_period_zones(
         start_dt = _coerce_date_any(start_date)
         end_dt = _coerce_date_any(end_date)
         months = _months_from_dates(start_dt, end_dt)
-    
+
     ordered_months = _ordered_months(months)
-    
+
     if start_date is None or end_date is None:
         start_dt, end_dt = _month_range_dates(ordered_months)
     else:
@@ -1103,13 +1031,15 @@ def export_selected_period_zones(
         method=method_key,
         sample_size=DEFAULT_SAMPLE_SIZE,
         include_stats=include_stats_flag,
+        mode=mode,                 # NEW
+        ndvi_min=ndvi_min,         # NEW
+        ndvi_max=ndvi_max,         # NEW
     )
 
     metadata = dict(metadata)
     metadata["zone_method"] = method_key
     metadata = sanitize_for_json(metadata)
     used_months: list[str] = list(metadata.get("used_months", []))
-    skipped: list[str] = list(metadata.get("skipped_months", []))
     if not used_months:
         raise ValueError("No valid Sentinel-2 scenes available for the selected period")
 
@@ -1130,7 +1060,7 @@ def export_selected_period_zones(
     }
 
     palette = metadata.get("palette")
-    thresholds = metadata.get("percentile_thresholds")
+    thresholds = metadata.get("thresholds") or metadata.get("percentile_thresholds")
     if palette is not None:
         result["palette"] = palette
     if thresholds is not None:
