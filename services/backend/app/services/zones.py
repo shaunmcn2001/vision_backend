@@ -661,12 +661,19 @@ def _prepare_selected_period_artifacts(
 
         # --- 2. Build mean NDVI ---
         ndvi_mean_native = _build_mean_ndvi_for_zones(
-ndvi_mean_export = ee.Image(ndvi_mean_native).rename('NDVI_mean').toFloat().unmask(-9999).clip(geometry)
             geometry,
             start_date,
             end_date,
             months=ordered_months,
             cloud_prob_max=cloud_prob_max,
+        )
+        
+        ndvi_mean_export = (
+            ee.Image(ndvi_mean_native)
+            .rename('NDVI_mean')
+            .toFloat()
+            .unmask(-9999)
+            .clip(geometry)
         )
 
         if ndvi_mean_native is None:
