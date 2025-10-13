@@ -235,25 +235,80 @@ def _download_image_to_path(
     return ImageExportResult(path=target, task=task)
 
 
+
 def _download_vector_to_path(
     vectors: ee.FeatureCollection,
     target: Path,
     *,
-    file_format: str | None = None,
+    file_format: str,
 ) -> None:
     """
-    Download EE FeatureCollection as GeoJSON or KML safely.
-    Fixes 'dict' object has no attribute 'upper' error by ensuring file_format is str.
+    Download vectors as GeoJSON or KML via Earth Engine's FeatureCollection.getDownloadURL.
+    NOTE: The API expects a *string* filetype, not a dict. Valid values include "JSON" and "KML".
+    CRSs are not supported in the URL parameters for FeatureCollection downloads.
     """
-    # --- force valid format ---
-    fmt = "geojson"
-    if isinstance(file_format, str):
-        fmt = file_format.lower()
-    elif isinstance(file_format, dict):
-        # in case caller mistakenly sends a dict
-        fmt = (file_format.get("format") or "geojson").lower()
-    elif file_format is None:
-        fmt = "geojson"
+    fmt = (file_format or "geojson").strip().lower()
+    # Map friendly names to EE's expected filetype strings
+    if fmt in ("geojson", "json"):
+        filetype = "JSON"
+        # Ensure file extension
+        if target.suffix.lower() != ".geojson":
+            target = target.with_suffix(".geojson")
+    elif fmt == "kml":
+        filetype = "KML"
+        if target.suffix.lower() != ".kml":
+            target = target.with_suffix(".kml")
+    else:
+        # Fallback safely to JSON
+        filetype = "JSON"
+        if target.suffix.lower() != ".geojson":
+            target = target.with_suffix(".geojson")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Use positional args compatible with ee.FeatureCollection.getDownloadURL
+        # Signature (cloud): getDownloadURL(filetype=None, selectors=None, filename=None, filePerFeature=None)
+        url = vectors.getDownloadURL(filetype=filetype, selectors=["zone"], filename=target.stem)
+    except Exception as e:
+        # Minimal fallback without selectors argument
+        try:
+            url = vectors.getDownloadURL(filetype=filetype, filename=target.stem)
+        except Exception as e2:
+            raise ValueError(f"EE getDownloadURL failed: {e2}") from e
+
+    # Stream to disk. EE may return a zip (e.g., SHP), but JSON/KML are usually direct bytes.
+    from urllib.request import urlopen
+    with urlopen(url) as response:
+        headers = getattr(response, "headers", None)
+        content_type = headers.get("Content-Type", "") if headers and hasattr(headers, "get") else ""
+        data = response.read()
+        # If we accidentally received a ZIP, try to unpack the first member
+        if "zip" in content_type.lower() or (len(data) >= 4 and data[:2] == b"PK"):
+            import io
+            from zipfile import ZipFile
+            with ZipFile(io.BytesIO(data), "r") as archive:
+                members = archive.namelist()
+                if not members:
+                    raise ValueError("Vector download was empty")
+                # choose the first sensible file
+                choice = None
+                if filetype == "KML":
+                    for m in members:
+                        if m.lower().endswith(".kml"):
+                            choice = m
+                            break
+                else:
+                    for m in members:
+                        if m.lower().endswith((".json", ".geojson")):
+                            choice = m
+                            break
+                if choice is None:
+                    choice = members[0]
+                with archive.open(choice) as member:
+                    target.write_bytes(member.read())
+        else:
+            target.write_bytes(data)
 
     # guard against invalid values
     if fmt not in {"geojson", "kml"}:
