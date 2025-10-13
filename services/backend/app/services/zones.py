@@ -586,227 +586,60 @@ def _classify_smooth_and_polygonize(
     ndvi_mean_native: ee.Image,
     geom: ee.Geometry,
     *,
-    n_zones=5,
+    n_zones=3,
     mmu_ha=1.0,
     smooth_radius_px=1,
-    mode="auto",  # "auto" | "quantile" | "linear"
 ):
     """
-    Classifies NDVI into production zones with optional auto-fallback.
-    - mode="auto": try quantile, fall back to linear if it collapses to one class
-    - mode="quantile": percentile-based bins
-    - mode="linear": evenly spaced bins between min–max
-    Ensures at least 2 classes and contiguous labels 1..n_zones.
+    Classify NDVI into fixed production zones (no k-means).
+    Uses defined NDVI breakpoints between 0.35 and 0.73, evenly spaced.
     """
 
-    # --- 1) Guard NDVI ---
-    ndvi_safe = ee.Image(
-        ee.Algorithms.If(
-            ndvi_mean_native,
-            ndvi_mean_native.unmask(0),
-            ee.Image.constant(0)
-        )
-    ).select([0]).rename("NDVI_mean")
+    # --- 1. Clip and limit NDVI range ---
+    ndvi = ndvi_mean_native.rename("NDVI_mean").clip(geom)
+    ndvi_clipped = ndvi.max(0.35).min(0.73)
 
-    # --- 2) Winsorize to tame outliers ---
-    q = ndvi_safe.reduceRegion(
-        ee.Reducer.percentile([2, 98]),
-        geometry=geom,
-        scale=10,
-        bestEffort=True,
-        maxPixels=1e9,
-    )
-    p2  = ee.Number(ee.Algorithms.If(q.get("NDVI_mean_p2"),  q.get("NDVI_mean_p2"),  0))
-    p98 = ee.Number(ee.Algorithms.If(q.get("NDVI_mean_p98"), q.get("NDVI_mean_p98"), 1))
-    ndvi_w = ndvi_safe.max(p2).min(p98)
+    # --- 2. Compute fixed thresholds ---
+    # e.g. for 3 zones -> [0.35, 0.48, 0.61, 0.73]
+    step = (0.73 - 0.35) / n_zones
+    thresholds = [0.35 + i * step for i in range(n_zones + 1)]
 
-    # --- 3) Threshold builders ---
-    def _quantile_thresholds():
-        cuts = ee.List.sequence(100.0 / n_zones, 100.0 - 100.0 / n_zones, 100.0 / n_zones)
-        quants = ndvi_w.reduceRegion(
-            ee.Reducer.percentile(cuts),
-            geometry=geom,
-            scale=10,
-            bestEffort=True,
-            maxPixels=1e9,
-        )
-        def safe_quantile(p):
-            key = ee.String("NDVI_mean_p").cat(ee.Number(p).toInt().format())
-            val = quants.get(key)
-            return ee.Number(
-                ee.Algorithms.If(
-                    ee.Algorithms.IsEqual(val, None),
-                    0.0,
-                    ee.Number(ee.Algorithms.If(val, val, 0.0))
-                )
+    # --- 3. Classify zones by threshold values ---
+    def classify(img, thr_list):
+        zones = ee.Image.constant(0)
+        for i in range(len(thr_list) - 1):
+            lower = thr_list[i]
+            upper = thr_list[i + 1]
+            zones = zones.where(
+                img.gte(lower).And(img.lte(upper)),
+                i + 1
             )
-        return ee.List(cuts.map(safe_quantile))
+        return zones.rename("zone").updateMask(img.mask()).toInt8()
 
-    def _linear_thresholds():
-        stats = ndvi_w.reduceRegion(
-            ee.Reducer.minMax(),
-            geometry=geom,
-            scale=10,
-            bestEffort=True,
-            maxPixels=1e9,
-        )
-        ndvi_min = ee.Number(ee.Algorithms.If(stats.get("NDVI_mean_min"), stats.get("NDVI_mean_min"), 0))
-        ndvi_max = ee.Number(ee.Algorithms.If(stats.get("NDVI_mean_max"), stats.get("NDVI_mean_max"), 1))
-        span = ndvi_max.subtract(ndvi_min)
-        flat = span.lte(0)
-        eps = ee.Number(1e-6)
-        step = ee.Number(ee.Algorithms.If(flat, eps, span.divide(n_zones)))
-        return ee.List.sequence(1, n_zones - 1).map(lambda i: ndvi_min.add(step.multiply(ee.Number(i))))
+    cls_raw = classify(ndvi_clipped, thresholds)
 
-    # --- 4) Pick thresholds (with "auto" logic) ---
-    mode_key = ee.String(mode).lower()
-
-    def _pick_thresholds():
-        # For "quantile" or "linear" explicitly
-        return ee.List(
-            ee.Algorithms.If(
-                mode_key.equals("linear"),
-                _linear_thresholds(),
-                _quantile_thresholds()
-            )
-        )
-
-    thresholds = _pick_thresholds()
-
-    # If mode is "auto", check if quantile thresholds collapse and fallback to linear
-    def _auto_thresholds():
-        q_thr = _quantile_thresholds()
-        q_min = ee.Number(ee.List(q_thr).reduce(ee.Reducer.min()))
-        q_max = ee.Number(ee.List(q_thr).reduce(ee.Reducer.max()))
-        distinct = q_max.subtract(q_min).gt(1e-6)
-        return ee.List(ee.Algorithms.If(distinct, q_thr, _linear_thresholds()))
-
-    thresholds = ee.List(
+    # --- 4. Optional smoothing ---
+    cls_smooth = ee.Image(
         ee.Algorithms.If(
-            mode_key.equals("auto"),
-            _auto_thresholds(),
-            thresholds
-        )
-    )
-
-    # Validate & ensure some spread
-    thresholds_sum = ee.Number(thresholds.reduce(ee.Reducer.sum()))
-    thresholds = ee.List(
-        ee.Algorithms.If(
-            thresholds_sum.eq(0),
-            ee.List.sequence(0.2, 0.8, 0.2),
-            thresholds
-        )
-    )
-    def _ensure_two(thr_list):
-        thr_list = ee.List(thr_list)
-        min_thr = ee.Number(thr_list.reduce(ee.Reducer.min()))
-        max_thr = ee.Number(thr_list.reduce(ee.Reducer.max()))
-        range_ok = max_thr.subtract(min_thr).gt(0.001)
-        return ee.List(
-            ee.Algorithms.If(
-                range_ok,
-                thr_list,
-                ee.List.sequence(0.3, 0.7, 0.4)  # force at least 2 bins
-            )
-        )
-    thresholds = _ensure_two(thresholds)
-
-    # --- 5) Classification helper ---
-    def classify_by_thresholds(img, thr_list):
-        def _sanit(t):
-            return ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(t, None), 1e9, t))
-        thr_list = ee.List(thr_list).map(_sanit)
-        def _step(acc, t):
-            return ee.Image(acc).add(img.gte(ee.Number(t)))
-        zones_img = ee.Image(thr_list.iterate(_step, ee.Image.constant(1))).rename("zone").toInt8()
-        zones_img = zones_img.min(n_zones).max(1)
-        return zones_img.updateMask(img.mask())
-
-    # Build both versions for "auto" fallback after we see class count
-    cls_quant = classify_by_thresholds(ndvi_w, _quantile_thresholds())
-    cls_linear = classify_by_thresholds(ndvi_w, _linear_thresholds())
-    cls_chosen = classify_by_thresholds(ndvi_w, thresholds)
-
-    # If auto: re-check if chosen (quantile) collapsed → swap to linear
-    def _zone_count(img):
-        hist = img.reduceRegion(
-            reducer=ee.Reducer.frequencyHistogram(),
-            geometry=geom,
-            scale=10,
-            bestEffort=True,
-            maxPixels=1e9,
-        )
-        z = ee.Dictionary(ee.Algorithms.If(
-            ee.Algorithms.IsEqual(hist, None), ee.Dictionary({}), ee.Dictionary(hist).get("zone")
-        ))
-        z = ee.Dictionary(ee.Algorithms.If(ee.Algorithms.IsEqual(z, None), ee.Dictionary({}), z))
-        return ee.Number(z.size())
-
-    cls_auto = ee.Image(
-        ee.Algorithms.If(
-            _zone_count(cls_quant).lte(1),
-            cls_linear,
-            cls_quant
+            ee.Number(smooth_radius_px).gt(0),
+            cls_raw.focalMode(radius=smooth_radius_px, units="pixels"),
+            cls_raw
         )
     ).toInt8()
 
-    cls_raw = ee.Image(
-        ee.Algorithms.If(
-            mode_key.equals("auto"),
-            cls_auto,
-            cls_chosen
-        )
-    ).toInt8()
-
-    # Final guard: median split if still one class
-    q50 = ndvi_w.reduceRegion(
-        ee.Reducer.percentile([50]),
-        geometry=geom,
-        scale=10,
-        bestEffort=True,
-        maxPixels=1e9,
-    ).get("NDVI_mean_p50")
-    mean_fb = ndvi_w.reduceRegion(
-        ee.Reducer.mean(),
-        geometry=geom,
-        scale=10,
-        bestEffort=True,
-        maxPixels=1e9,
-    ).get("NDVI_mean")
-    med_val = ee.Number(ee.Algorithms.If(
-        ee.Algorithms.IsEqual(q50, None),
-        ee.Algorithms.If(ee.Algorithms.IsEqual(mean_fb, None), 0.0, mean_fb),
-        q50
-    ))
-
-    cls_raw = ee.Image(ee.Algorithms.If(
-        _zone_count(cls_raw).lte(1),
-        ndvi_w.gt(med_val).add(1).toInt8().updateMask(ndvi_w.mask()).rename("zone"),
-        cls_raw
-    )).toInt8().rename("zone")
-
-    # --- 6) Optional smoothing ---
-    cls_smooth = ee.Image(ee.Algorithms.If(
-        ee.Number(smooth_radius_px).gt(0),
-        cls_raw.focalMode(radius=smooth_radius_px, units="pixels"),
-        cls_raw
-    )).toInt8()
-
-    # --- 7) MMU filter (boolean AND via multiply/gt) ---
+    # --- 5. Apply MMU filter ---
     min_px = ee.Number(mmu_ha).multiply(100).round().max(1)
+
     def keep_big(c):
-        c = ee.Number(c)
         mask = cls_smooth.eq(c)
         valid = mask.connectedPixelCount(maxSize=1e6, eightConnected=True).gte(min_px)
-        combined = mask.multiply(valid).gt(0)
-        return cls_smooth.updateMask(combined)
+        return cls_smooth.updateMask(mask.And(valid))
 
-    cls_mmu = ee.ImageCollection(
-        ee.List.sequence(1, n_zones).map(lambda c: keep_big(ee.Number(c)))
-    ).mosaic().rename("zone").toInt8().clip(geom)
+    cls_mmu = ee.ImageCollection([
+        keep_big(ee.Number(c)) for c in range(1, n_zones + 1)
+    ]).mosaic().rename("zone").toInt8().clip(geom)
 
-    # --- 8) Polygonize ---
+    # --- 6. Polygonize ---
     vectors = cls_mmu.reduceToVectors(
         geometry=geom,
         scale=10,
@@ -817,7 +650,15 @@ def _classify_smooth_and_polygonize(
         maxPixels=1e9,
     )
 
+    # --- 7. Save thresholds to image metadata ---
+    cls_mmu = cls_mmu.set({
+        "thresholds": thresholds,
+        "zones": n_zones,
+        "method": "fixed_linear_0.35_0.73"
+    })
+
     return cls_mmu, vectors
+
 
 
 def _stream_zonal_stats(classified_path: Path, ndvi_path: Path) -> List[Dict[str, Any]]:
