@@ -236,59 +236,79 @@ def _download_image_to_path(
 
 
 
+
 def _download_vector_to_path(
     vectors: ee.FeatureCollection,
     target: Path,
     *,
     file_format: str,
 ) -> None:
-    """
-    Safe wrapper around ee.FeatureCollection.getDownloadURL.
-    Supports only SHP, KML, or CSV — GeoJSON is not supported by Earth Engine directly.
-    If 'geojson'/'json' is requested, we export SHP (.zip) instead.
-    """
-    fmt = (file_format or "shp").strip().lower()
+    fmt = (file_format or "geojson").strip().lower()
+    # Map to EE TableFileFormat
+    fmt_map = {
+        "geojson": "GEO_JSON",
+        "json": "GEO_JSON",
+        "kml": "KML",
+        "kmz": "KMZ",
+        "csv": "CSV",
+        "shp": "SHP",
+        "shapefile": "SHP",
+    }
+    filetype = fmt_map.get(fmt, "GEO_JSON")
 
-    # EE does not support JSON/GEOJSON for FeatureCollection downloads
-    if fmt in {"geojson", "json"}:
-        fmt = "shp"
+    # ee.FeatureCollection.getDownloadURL only supports (filetype, selectors, filename, selectors)
+    try:
+        url = vectors.getDownloadURL(filetype=filetype, selectors=["zone"], filename=target.stem)
+    except Exception as e:
+        # Surface a clear error that will be caught upstream
+        raise ValueError(f"EE getDownloadURL failed: {e}")
 
-    # Map to valid Earth Engine file formats
-    fmt_map = {"shp": "SHP", "csv": "CSV", "kml": "KML"}
-    filetype = fmt_map.get(fmt, "SHP")
-
-    # Normalize target extension
-    if filetype == "SHP":
-        # EE returns a zip containing .shp/.shx/.dbf/.prj
-        target = target.with_suffix(".zip")
-    elif filetype == "KML":
+    # Ensure extension
+    if fmt == "geojson" and target.suffix.lower() != ".geojson":
+        target = target.with_suffix(".geojson")
+    if fmt == "kml" and target.suffix.lower() != ".kml":
         target = target.with_suffix(".kml")
-    elif filetype == "CSV":
+    if fmt == "csv" and target.suffix.lower() != ".csv":
         target = target.with_suffix(".csv")
+    if fmt in ("shp", "shapefile") and target.suffix.lower() != ".zip":
+        # SHP downloads come as a zip
+        target = target.with_suffix(".zip")
 
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    try:
-        # Only pass supported kwargs; do NOT pass 'crs' or a dict for filetype.
-        url = vectors.getDownloadURL(filetype=filetype, selectors=["zone"], filename=target.stem)
-    except Exception as e:
-        # Surface a clean error to the caller
-        raise ValueError(f"EE getDownloadURL failed: {e}")
-
     from urllib.request import urlopen
-    import shutil as _shutil
+    from zipfile import ZipFile
+    from tempfile import NamedTemporaryFile
+    import shutil
 
     with urlopen(url) as response:
-        headers = getattr(response, "headers", None)
-        content_type = headers.get("Content-Type", "") if headers and hasattr(headers, "get") else ""
-        # If EE streamed a zip (SHP or sometimes KML), write it directly
-        if "zip" in content_type.lower():
-            with target.open("wb") as f:
-                _shutil.copyfileobj(response, f)
+        content_type = response.headers.get("Content-Type", "") if hasattr(response, "headers") else ""
+        # If it's a zip, stream and if needed, extract first member to target (for geojson/kml) or keep zip (for shp)
+        if "zip" in content_type.lower() or target.suffix.lower() == ".zip":
+            with NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
+                shutil.copyfileobj(response, tmp_zip)
+                tmp_zip_path = Path(tmp_zip.name)
+
+            if fmt in ("geojson", "kml", "csv"):
+                # Extract the first matching file
+                with ZipFile(tmp_zip_path, "r") as archive:
+                    # Prefer exact extension
+                    wanted_ext = { "geojson": ".geojson", "kml": ".kml", "csv": ".csv" }[fmt]
+                    members = [m for m in archive.namelist() if m.lower().endswith(wanted_ext)]
+                    if not members:
+                        # fallback: first member
+                        members = archive.namelist()
+                    first = members[0]
+                    with archive.open(first) as member, target.open("wb") as out:
+                        shutil.copyfileobj(member, out)
+                tmp_zip_path.unlink(missing_ok=True)
+            else:
+                # For SHP, leave as zip
+                shutil.move(str(tmp_zip_path), str(target))
         else:
-            # For CSV/KML responses sent directly
-            data = response.read()
-            target.write_bytes(data)
+            # Direct file (e.g., application/json or application/vnd.google-earth.kml+xml)
+            with target.open("wb") as out:
+                shutil.copyfileobj(response, out)
 
 def _ordered_months(months: Sequence[str]) -> List[str]:
     unique: Dict[str, datetime] = {}
@@ -569,7 +589,7 @@ def _classify_smooth_and_polygonize(
         scale=10,
         geometryType="polygon",
         labelProperty="zone",
-        reducer=ee.Reducer.first(),
+        reducer=ee.Reducer.countEvery(),
         bestEffort=True,
         maxPixels=1e9,
     )
