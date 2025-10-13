@@ -22,6 +22,7 @@ from rasterio.windows import Window
 
 from app import gee
 from app.exports import sanitize_name
+from app.api.s2_indices import router as router  
 from app.services.ndvi_shared import (
     compute_ndvi_loose,
     mean_from_collection_sum_count,
