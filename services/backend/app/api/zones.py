@@ -15,8 +15,6 @@ from app.utils.sanitization import sanitize_for_json
 
 
 router = APIRouter(prefix="/zones", tags=["zones"])
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -53,6 +51,15 @@ class ProductionZonesRequest(_BaseAOIRequest):
         "auto",
         description="Binning strategy for NDVI zones: 'auto' (adaptive), 'quantile', or 'linear'",
     )
+
+    # optional fixed-range overrides for linear mode (and available to others if desired)
+    min_ndvi: Optional[float] = Field(
+        None, ge=-1.0, le=1.0, description="Lower NDVI bound for fixed-range zoning."
+    )
+    max_ndvi: Optional[float] = Field(
+        None, ge=-1.0, le=1.0, description="Upper NDVI bound for fixed-range zoning."
+    )
+
     months: Optional[List[str]] = Field(
         None, description="Months in YYYY-MM format"
     )
@@ -93,6 +100,13 @@ class ProductionZonesRequest(_BaseAOIRequest):
             "environment variable."
         ),
     )
+
+    @validator("max_ndvi")
+    def _check_ndvi_bounds(cls, v, values):
+        min_val = values.get("min_ndvi")
+        if v is not None and min_val is not None and v <= min_val:
+            raise ValueError("max_ndvi must be greater than min_ndvi")
+        return v
 
     @root_validator(pre=True)
     def _coerce_months(cls, values: dict) -> dict:
@@ -262,7 +276,10 @@ def create_production_zones(request: ProductionZonesRequest):
             gcs_prefix=request.gcs_prefix,
             include_stats=request.include_zonal_stats,
             apply_stability_mask=request.apply_stability_mask,
+            # NEW: pass mode and optional fixed NDVI bounds
             mode=request.mode,
+            min_ndvi=request.min_ndvi,
+            max_ndvi=request.max_ndvi,
         )
     except ValueError as exc:
         logger.warning(
@@ -349,5 +366,3 @@ def create_production_zones(request: ProductionZonesRequest):
         response["debug"] = sanitize_for_json(response.get("debug"))
 
     return response
-
-
