@@ -276,10 +276,9 @@ def create_production_zones(request: ProductionZonesRequest):
             gcs_prefix=request.gcs_prefix,
             include_stats=request.include_zonal_stats,
             apply_stability_mask=request.apply_stability_mask,
-            # NEW: pass mode and optional fixed NDVI bounds
             mode=request.mode,
-            min_ndvi=request.min_ndvi,
-            max_ndvi=request.max_ndvi,
+            ndvi_min=request.min_ndvi,
+            ndvi_max=request.max_ndvi,
         )
     except ValueError as exc:
         logger.warning(
