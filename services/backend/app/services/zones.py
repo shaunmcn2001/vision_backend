@@ -241,22 +241,25 @@ def _download_vector_to_path(
     *,
     file_format: str | None = None,
 ) -> None:
-    """Robust vector downloader. Accepts 'geojson' or 'kml'. Never crashes on dict/None input."""
-    # ---- sanitize and default ----
+    """
+    Download EE FeatureCollection as GeoJSON or KML safely.
+    Fixes 'dict' object has no attribute 'upper' error by ensuring file_format is str.
+    """
+    # --- force valid format ---
     fmt = "geojson"
     if isinstance(file_format, str):
         fmt = file_format.lower()
-    elif isinstance(file_format, dict):  # defensive: bad caller passes params dict
+    elif isinstance(file_format, dict):
+        # in case caller mistakenly sends a dict
         fmt = (file_format.get("format") or "geojson").lower()
     elif file_format is None:
         fmt = "geojson"
 
-    # only two safe options
+    # guard against invalid values
     if fmt not in {"geojson", "kml"}:
-        logger.warning("Unknown vector format '%s', defaulting to geojson", fmt)
+        logger.warning("Invalid vector format %r; defaulting to geojson", fmt)
         fmt = "geojson"
 
-    # ---- prepare params ----
     params = {
         "format": fmt,
         "filename": target.stem,
@@ -264,14 +267,15 @@ def _download_vector_to_path(
         "crs": "EPSG:4326",
     }
 
+    # --- get URL safely ---
     try:
         url = vectors.getDownloadURL(params)
     except Exception as e:
-        # fallback to safe minimal params
-        logger.warning("EE getDownloadURL failed with %s; retrying simplified", e)
-        url = vectors.getDownloadURL({"format": fmt, "filename": target.stem})
+        logger.error("getDownloadURL failed: %s", e)
+        # absolute last fallback
+        url = vectors.getDownloadURL({"format": "geojson", "filename": target.stem})
 
-    # ---- ensure extension ----
+    # --- normalize extension ---
     if fmt == "geojson" and target.suffix.lower() != ".geojson":
         target = target.with_suffix(".geojson")
     elif fmt == "kml" and target.suffix.lower() != ".kml":
@@ -279,29 +283,23 @@ def _download_vector_to_path(
 
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # ---- download & unpack ----
+    # --- download content ---
     with urlopen(url) as response:
-        headers = getattr(response, "headers", None)
-        content_type = headers.get("Content-Type", "") if headers and hasattr(headers, "get") else ""
-        if "zip" in content_type.lower():
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "zip" in content_type:
             with NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
                 shutil.copyfileobj(response, tmp_zip)
                 tmp_zip_path = Path(tmp_zip.name)
-            try:
-                with ZipFile(tmp_zip_path, "r") as archive:
-                    members = archive.namelist()
-                    if not members:
-                        raise ValueError("Vector download was empty")
-                    first = members[0]
-                    with archive.open(first) as member:
-                        target.write_bytes(member.read())
-            finally:
-                try:
-                    tmp_zip_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            with ZipFile(tmp_zip_path, "r") as archive:
+                for name in archive.namelist():
+                    if name.lower().endswith((".geojson", ".json", ".kml")):
+                        with archive.open(name) as member:
+                            target.write_bytes(member.read())
+                        break
+            tmp_zip_path.unlink(missing_ok=True)
         else:
             target.write_bytes(response.read())
+
 
 
 def _ordered_months(months: Sequence[str]) -> List[str]:
