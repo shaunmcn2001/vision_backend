@@ -237,78 +237,32 @@ def _download_image_to_path(
 
 
 
-def _download_vector_to_path(
-    vectors: ee.FeatureCollection,
-    target: Path,
-    *,
-    file_format: str,
-) -> None:
-    fmt = (file_format or "geojson").strip().lower()
-    # Map to EE TableFileFormat
-    fmt_map = {
-        "geojson": "GEO_JSON",
-        "json": "GEO_JSON",
-        "kml": "KML",
-        "kmz": "KMZ",
-        "csv": "CSV",
-        "shp": "SHP",
-        "shapefile": "SHP",
-    }
-    filetype = fmt_map.get(fmt, "GEO_JSON")
 
-    # ee.FeatureCollection.getDownloadURL only supports (filetype, selectors, filename, selectors)
+def _download_vector_to_path(vectors: ee.FeatureCollection, target: Path, *, file_format: str) -> None:
+    fmt = (file_format or "geojson").strip().lower()
+    ft_map = {
+        "geojson": "GEO_JSON", "json": "GEO_JSON", "kml": "KML",
+        "csv": "CSV", "shp": "SHP", "shapefile": "SHP",
+    }
+    filetype = ft_map.get(fmt, "GEO_JSON")
+    vectors = ee.FeatureCollection(vectors.map(lambda f: f.setGeometry(f.geometry().transform("EPSG:4326", 0.1))))
+    if fmt == "geojson" and target.suffix.lower() != ".geojson":
+        target = target.with_suffix(".geojson")
+    elif fmt == "kml" and target.suffix.lower() != ".kml":
+        target = target.with_suffix(".kml")
+    elif fmt == "csv" and target.suffix.lower() != ".csv":
+        target = target.with_suffix(".csv")
+    elif fmt in {"shp", "shapefile"} and target.suffix.lower() != ".zip":
+        target = target.with_suffix(".zip")
+    target.parent.mkdir(parents=True, exist_ok=True)
     try:
         url = vectors.getDownloadURL(filetype=filetype, selectors=["zone"], filename=target.stem)
     except Exception as e:
-        # Surface a clear error that will be caught upstream
         raise ValueError(f"EE getDownloadURL failed: {e}")
-
-    # Ensure extension
-    if fmt == "geojson" and target.suffix.lower() != ".geojson":
-        target = target.with_suffix(".geojson")
-    if fmt == "kml" and target.suffix.lower() != ".kml":
-        target = target.with_suffix(".kml")
-    if fmt == "csv" and target.suffix.lower() != ".csv":
-        target = target.with_suffix(".csv")
-    if fmt in ("shp", "shapefile") and target.suffix.lower() != ".zip":
-        # SHP downloads come as a zip
-        target = target.with_suffix(".zip")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-
     from urllib.request import urlopen
-    from zipfile import ZipFile
-    from tempfile import NamedTemporaryFile
-    import shutil
+    with urlopen(url) as r, open(target, "wb") as f:
+        f.write(r.read())
 
-    with urlopen(url) as response:
-        content_type = response.headers.get("Content-Type", "") if hasattr(response, "headers") else ""
-        # If it's a zip, stream and if needed, extract first member to target (for geojson/kml) or keep zip (for shp)
-        if "zip" in content_type.lower() or target.suffix.lower() == ".zip":
-            with NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
-                shutil.copyfileobj(response, tmp_zip)
-                tmp_zip_path = Path(tmp_zip.name)
-
-            if fmt in ("geojson", "kml", "csv"):
-                # Extract the first matching file
-                with ZipFile(tmp_zip_path, "r") as archive:
-                    # Prefer exact extension
-                    wanted_ext = { "geojson": ".geojson", "kml": ".kml", "csv": ".csv" }[fmt]
-                    members = [m for m in archive.namelist() if m.lower().endswith(wanted_ext)]
-                    if not members:
-                        # fallback: first member
-                        members = archive.namelist()
-                    first = members[0]
-                    with archive.open(first) as member, target.open("wb") as out:
-                        shutil.copyfileobj(member, out)
-                tmp_zip_path.unlink(missing_ok=True)
-            else:
-                # For SHP, leave as zip
-                shutil.move(str(tmp_zip_path), str(target))
-        else:
-            # Direct file (e.g., application/json or application/vnd.google-earth.kml+xml)
-            with target.open("wb") as out:
-                shutil.copyfileobj(response, out)
 
 def _ordered_months(months: Sequence[str]) -> List[str]:
     unique: Dict[str, datetime] = {}
@@ -707,6 +661,7 @@ def _prepare_selected_period_artifacts(
 
         # --- 2. Build mean NDVI ---
         ndvi_mean_native = _build_mean_ndvi_for_zones(
+ndvi_mean_export = ee.Image(ndvi_mean_native).rename('NDVI_mean').toFloat().unmask(-9999).clip(geometry)
             geometry,
             start_date,
             end_date,
