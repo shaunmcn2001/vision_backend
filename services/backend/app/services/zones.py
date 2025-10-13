@@ -765,11 +765,20 @@ def _prepare_selected_period_artifacts(
         except Exception:
             unique_classes = []
 
-        if not unique_classes:
-            raise ValueError(
-                "NDVI variation too low to produce multiple zones. "
-                "Try a wider time range or larger AOI."
+        if not unique_classes or len(unique_classes) < 2:
+            logger.warning("NDVI variation very low — forcing linear fallback zones.")
+            # force 3-band linear bins
+            classified_image, vectors = _classify_smooth_and_polygonize(
+                ndvi_mean_native,
+                geometry,
+                n_zones=max(3, n_classes),
+                mmu_ha=min_mapping_unit_ha,
+                smooth_radius_px=max(0, int(round(smooth_radius_m / 10))),
+                mode="linear",
+                ndvi_min=0.2,
+                ndvi_max=0.9,
             )
+
 
         # --- 7. Reproject + vector exports ---
         vectors_reprojected = ee.FeatureCollection(
