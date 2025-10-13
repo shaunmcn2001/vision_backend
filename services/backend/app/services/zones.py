@@ -364,52 +364,83 @@ def _build_mean_ndvi_for_zones(
 
     # 2) NDVI per image with safe band guard
     def _ndvi(img: ee.Image) -> ee.Image:
+        """
+        Compute NDVI and apply a single-band mask (B8 ∧ B4) only.
+        Avoids multi-band img.mask() side effects and NaN constants.
+        """
         bnames = ee.List(img.bandNames())
-        has_b4 = ee.Number(bnames.indexOf('B4')).gte(0)
-        has_b8 = ee.Number(bnames.indexOf('B8')).gte(0)
-        both   = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
-        ndvi   = ee.Image(ee.Algorithms.If(
-            both, img.normalizedDifference(['B8', 'B4']).rename('NDVI'),
-            ee.Image.constant(float('nan')).rename('NDVI')
-        ))
-        return ee.Image(ndvi).updateMask(img.mask())
-
-    ndvi_mean = monthly.map(_ndvi).mean().rename('NDVI_mean').toFloat().clip(geom)
-
-    # 3) Variation check → warn, don't raise
-    try:
-        std_dict = ndvi_mean.reduceRegion(
-            reducer=ee.Reducer.stdDev(),
-            geometry=geom,
-            scale=10,
-            bestEffort=True,
-            maxPixels=1e9,
+        has_b4 = ee.Number(bnames.indexOf("B4")).gte(0)
+        has_b8 = ee.Number(bnames.indexOf("B8")).gte(0)
+        both = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
+    
+        # Empty (fully masked) placeholder; no NaNs.
+        empty = ee.Image(0).updateMask(ee.Image(0)).rename("NDVI")
+    
+        ndvi = ee.Image(
+            ee.Algorithms.If(
+                both,
+                img.toFloat().normalizedDifference(["B8", "B4"]).rename("NDVI"),
+                empty,
+            )
         )
-        std_val = ee.Number(ee.Dictionary(std_dict).get('NDVI_mean')).getInfo()
+    
+        # Single-band validity mask from B8 & B4
+        mask_1band = img.select("B8").mask().multiply(img.select("B4").mask()).gt(0)
+        return ndvi.updateMask(mask_1band)
+
+# Keep NDVI masked for stats (don't unmask(0) yet)
+    ndvi_mean = monthly.map(_ndvi).mean().rename("NDVI_mean").toFloat().clip(geom)
+    
+    # Variation check → warn, don't raise; robust key handling
+    try:
+        std_dict = ee.Dictionary(
+            ndvi_mean.reduceRegion(
+                reducer=ee.Reducer.stdDev(),
+                geometry=geom,
+                scale=10,
+                bestEffort=True,
+                maxPixels=1e9,
+            )
+        )
+        # stdDev reducer usually returns "<band>_stdDev"
+        std_val = ee.Number(
+            ee.Algorithms.If(
+                std_dict.contains("NDVI_mean_stdDev"),
+                std_dict.get("NDVI_mean_stdDev"),
+                ee.Dictionary(ndvi_mean.reduceRegion(
+                    reducer=ee.Reducer.stdDev(),
+                    geometry=geom,
+                    scale=10,
+                    bestEffort=True,
+                    maxPixels=1e9,
+                )).values().get(0)  # fallback: first value
+            )
+        ).getInfo()
     except Exception:
         std_val = 0.0
+    
     if std_val is None:
         std_val = 0.0
-
-    # If very flat, continue but tag + log
-    if std_val < 1e-3:  # tweak threshold as you like
+    
+    if std_val < 1e-3:  # tweak threshold as needed
         logger.warning("NDVI variation low (std=%.6f). Proceeding; zones may collapse.", std_val)
         ndvi_mean = ndvi_mean.set({
-            'ndvi_stdDev': std_val,
-            'ndvi_low_variation': True,
+            "ndvi_stdDev": std_val,
+            "ndvi_low_variation": True,
         })
     else:
-        ndvi_mean = ndvi_mean.set({'ndvi_stdDev': std_val, 'ndvi_low_variation': False})
-
-    # 4) Reproject to native 10 m if reference is available
+        ndvi_mean = ndvi_mean.set({"ndvi_stdDev": std_val, "ndvi_low_variation": False})
+    
+    # Reproject to native 10 m if reference is available
     first_img = ee.Image(monthly.first())
     ndvi_native = ee.Algorithms.If(
         first_img,
-        reproject_native_10m(ndvi_mean, first_img, ref_band='B8', scale=10),
+        reproject_native_10m(ndvi_mean, first_img, ref_band="B8", scale=10),
         ndvi_mean,
     )
-
-    return ee.Image(ndvi_native).rename('NDVI_mean').toFloat().clip(geom)
+    
+    return ee.Image(ndvi_native).rename("NDVI_mean").toFloat().clip(geom)
+    
 
     def _monthly(aoi, start, end, mths, cprob) -> ee.ImageCollection:
         return gee.monthly_sentinel2_collection(
