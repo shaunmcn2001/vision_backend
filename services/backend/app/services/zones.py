@@ -269,11 +269,11 @@ def _download_vector_to_path(
 
     # --- get URL safely ---
     try:
-        url = vectors.getDownloadURL(filetype=fmt, selectors=['zone'], filename=target.stem, crs='EPSG:4326')
+        url = vectors.getDownloadURL(params)
     except Exception as e:
         logger.error("getDownloadURL failed: %s", e)
         # absolute last fallback
-        url = vectors.getDownloadURL(filetype=fmt, selectors=['zone'], filename=target.stem, crs='EPSG:4326')
+        url = vectors.getDownloadURL({"format": "geojson", "filename": target.stem})
 
     # --- normalize extension ---
     if fmt == "geojson" and target.suffix.lower() != ".geojson":
