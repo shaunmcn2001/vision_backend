@@ -462,9 +462,9 @@ def _classify_smooth_and_polygonize(
     n_zones: int = 3,
     mmu_ha: float = 1.0,
     smooth_radius_px: int = 1,
-    mode: str = DEFAULT_MODE,                 # NEW
-    ndvi_min: float | None = None,            # NEW
-    ndvi_max: float | None = None,            # NEW
+    mode: str = DEFAULT_MODE,                 # "linear" | "quantile" | "auto"
+    ndvi_min: float | None = None,
+    ndvi_max: float | None = None,
 ):
     """
     Classify NDVI into production zones.
@@ -474,7 +474,6 @@ def _classify_smooth_and_polygonize(
       - 'quantile': equal-frequency bins (by percentiles)
       - 'auto': use quantile if variation exists, else linear
     """
-
     ndvi = ndvi_mean_native.rename("NDVI_mean").clip(geom)
 
     lo = DEFAULT_NDVI_MIN if ndvi_min is None else float(ndvi_min)
@@ -482,13 +481,17 @@ def _classify_smooth_and_polygonize(
     if hi <= lo:
         hi = lo + 1e-6  # avoid zero span
 
-    # detect flatness from image metadata (set upstream)
-    flat_flag = ee.String(ndvi.get("ndvi_low_variation")).format()
+    # --- detect flatness from image metadata (server -> client safely) ---
+    try:
+        # property set upstream in _build_mean_ndvi_for_zones
+        flat_prop = ndvi.get("ndvi_low_variation")
+        flat_flag = str(flat_prop.getInfo()).lower()
+    except Exception:
+        flat_flag = "false"
 
     # --- thresholds selection ---
-    thresholds_py: List[float]
-
-    if mode == "quantile" or (mode == "auto" and flat_flag.lower() != "true"):
+    if mode == "quantile" or (mode == "auto" and flat_flag != "true"):
+        # quantile bin edges (0..100)
         percentiles = [100.0 * (i / n_zones) for i in range(n_zones + 1)]
         stats = ndvi.reduceRegion(
             reducer=ee.Reducer.percentile(percentiles),
@@ -497,7 +500,7 @@ def _classify_smooth_and_polygonize(
             bestEffort=True,
             maxPixels=1e9,
         )
-        thresholds_py = []
+        thresholds_py: List[float] = []
         for p in percentiles:
             key = f"NDVI_mean_p{int(p)}"
             try:
@@ -506,10 +509,11 @@ def _classify_smooth_and_polygonize(
                     raise Exception()
                 thresholds_py.append(float(val))
             except Exception:
+                # fallback to linear edge inside [lo, hi]
                 thresholds_py.append(lo + (hi - lo) * (p / 100.0))
         method_used = "quantile"
     else:
-        # linear (default + 'auto' fallback when flat)
+        # linear (default and 'auto' fallback when flat)
         step = (hi - lo) / n_zones
         thresholds_py = [lo + i * step for i in range(n_zones + 1)]
         method_used = "linear"
