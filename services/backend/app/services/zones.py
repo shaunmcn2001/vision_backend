@@ -545,7 +545,8 @@ def _classify_smooth_and_polygonize(
 
     def keep_big(c):
         mask = cls_smooth.eq(c)
-        valid = mask.connectedPixelCount(maxSize=1e6, eightConnected=True).gte(min_px)
+        # EE limit for maxSize is 1024; omit it for full-tile connectivity
+        valid = mask.connectedPixelCount(eightConnected=True).gte(min_px)
         return cls_smooth.updateMask(mask.And(valid))
 
     cls_mmu = ee.ImageCollection(
