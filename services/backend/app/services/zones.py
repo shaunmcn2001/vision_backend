@@ -40,7 +40,10 @@ DEFAULT_CRS = DEFAULT_EXPORT_CRS
 
 DEFAULT_NDVI_MIN = 0.35
 DEFAULT_NDVI_MAX = 0.73
-
+try:
+    DEFAULT_CV_THRESHOLD
+except NameError:
+    DEFAULT_CV_THRESHOLD = float(os.getenv("ZONES_CV_THRESHOLD", "0"))
 ZONE_PALETTE: Tuple[str, ...] = (
     "#112f1d", "#1b4d2a", "#2c6a39", "#3f8749", "#58a35d", "#80bf7d", "#b6dcb1",
 )
