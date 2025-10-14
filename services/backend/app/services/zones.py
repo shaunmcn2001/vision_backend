@@ -43,7 +43,7 @@ DEFAULT_SMOOTH_RADIUS_PX = 1
 DEFAULT_METHOD = "ndvi_percentiles"
 DEFAULT_SAMPLE_SIZE = 4000
 DEFAULT_SCALE = int(os.getenv("ZONES_SCALE_M", "10"))
-DEFAULT_EXPORT_CRS = "EPSG:4326"
+DEFAULT_EXPORT_CRS = "EPSG:3857"
 DEFAULT_CRS = DEFAULT_EXPORT_CRS
 
 # NEW: zoning controls
@@ -188,13 +188,13 @@ def _download_image_to_path(
 
     task: ee.batch.Task | None = None
     try:
-        export_kwargs: Dict[str, object] = { 
+        export_kwargs: Dict[str, object] = {
             "image": image,
             "description": description,
             "folder": folder,
             "fileNamePrefix": sanitized_name,
             "region": ee_region,
-            "scale": (0.0000898315284128 if (params.crs == "EPSG:4326" or params.crs == "epsg:4326") else params.scale),
+            "scale": params.scale,
             "fileFormat": "GeoTIFF",
             "maxPixels": gee.MAX_PIXELS,
         }
