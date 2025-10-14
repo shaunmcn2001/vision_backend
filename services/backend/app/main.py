@@ -11,7 +11,6 @@ from app.api.tiles import router as tiles_router
 from app.api.s2_indices import router as s2_indices_router
 from app.api.zones import router as zones_router
 from app import gee
-import ee
 import app.services.monkey_patches 
 import os
 
@@ -45,11 +44,7 @@ def _startup_init_gee() -> None:
 
 @app.get("/healthz")
 def healthz():
-    
-    from app import gee
-import ee
-    gee.initialize_ee()
-return {
+    return {
         "ok": True,
         "service": "vision-backend",
         "project": os.getenv("GCP_PROJECT"),
@@ -1396,13 +1391,3 @@ app.include_router(s2_indices_router)
 app.include_router(zones_router, prefix="/api")
 app.include_router(export_shapefile_router)
 
-
-
-@app.get("/healthz/ee")
-def ee_health():
-    # Touch EE once to verify auth works
-    try:
-        ee.Image('COPERNICUS/S2_SR_HARMONIZED/20210101T000239_20210101T001100_T56KLD').bandNames().getInfo()
-        return {"earth_engine": "ok"}
-    except Exception as e:
-        return {"earth_engine": "error", "detail": str(e)}
