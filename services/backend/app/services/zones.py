@@ -188,13 +188,13 @@ def _download_image_to_path(
 
     task: ee.batch.Task | None = None
     try:
-        export_kwargs: Dict[str, object] = {
+        export_kwargs: Dict[str, object] = { 
             "image": image,
             "description": description,
             "folder": folder,
             "fileNamePrefix": sanitized_name,
             "region": ee_region,
-            "scale": params.scale,
+            "scale": (0.0000898315284128 if (params.crs == "EPSG:4326" or params.crs == "epsg:4326") else params.scale),
             "fileFormat": "GeoTIFF",
             "maxPixels": gee.MAX_PIXELS,
         }
