@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import calendar
 import csv
+import json
 import logging
 import os
+import secrets
 import shutil
 import tempfile
+import threading
+import time
+import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -18,11 +23,15 @@ from zipfile import ZipFile
 import ee
 import numpy as np
 import rasterio
+from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field, root_validator, validator
 from rasterio.windows import Window
+from starlette.background import BackgroundTask
 
 from app import gee
 from app.exports import sanitize_name
-from app.api.s2_indices import router as router  
+from app.api.s2_indices import router as router
 from app.services.ndvi_shared import (
     compute_ndvi_loose,
     mean_from_collection_sum_count,
@@ -47,6 +56,170 @@ DEFAULT_SAMPLE_SIZE = 4000
 DEFAULT_SCALE = int(os.getenv("ZONES_SCALE_M", "10"))
 DEFAULT_EXPORT_CRS = "EPSG:3857"
 DEFAULT_CRS = DEFAULT_EXPORT_CRS
+
+ZONE_BUNDLE_TTL_SECONDS = 60 * 60  # 1 hour
+
+
+class ProductionZonesRequest(BaseModel):
+    aoi_geojson: dict
+    aoi_name: str
+    months: List[str] = Field(default_factory=list)
+    start_month: str | None = Field(None, description="YYYY-MM")
+    end_month: str | None = Field(None, description="YYYY-MM")
+    cloud_prob_max: int = Field(DEFAULT_CLOUD_PROB_MAX, ge=0, le=100)
+    n_classes: int = Field(DEFAULT_N_CLASSES, ge=2, le=7)
+    cv_mask_threshold: float = Field(DEFAULT_CV_THRESHOLD, ge=0)
+    apply_stability_mask: bool = True
+    mmu_ha: float = Field(DEFAULT_MIN_MAPPING_UNIT_HA, gt=0)
+    smooth_radius_m: float = Field(DEFAULT_SMOOTH_RADIUS_M, ge=0)
+    open_radius_m: float = Field(DEFAULT_OPEN_RADIUS_M, ge=0)
+    close_radius_m: float = Field(DEFAULT_CLOSE_RADIUS_M, ge=0)
+    simplify_tol_m: float = Field(DEFAULT_SIMPLIFY_TOL_M, ge=0)
+    simplify_buffer_m: float = Field(DEFAULT_SIMPLIFY_BUFFER_M)
+    include_zonal_stats: bool = True
+    export_target: str = Field("zip")
+    mode: str = Field(DEFAULT_MODE)
+    ndvi_min: float | None = None
+    ndvi_max: float | None = None
+
+    @validator("months", each_item=True)
+    def _validate_month(cls, value: str) -> str:
+        month = str(value).strip()
+        if not month:
+            raise ValueError("Month entries cannot be empty")
+        try:
+            datetime.strptime(month, "%Y-%m")
+        except ValueError as exc:
+            raise ValueError(f"Invalid month format: {value}") from exc
+        return month
+
+    @validator("export_target")
+    def _validate_target(cls, value: str) -> str:
+        target = (value or "zip").strip().lower()
+        if target not in {"zip", "local"}:
+            raise ValueError("export_target must be 'zip' or 'local'")
+        return target
+
+    @root_validator
+    def _ensure_month_inputs(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        months = values.get("months") or []
+        start = values.get("start_month")
+        end = values.get("end_month")
+        if not months and not (start and end):
+            raise ValueError("Supply either months[] or start_month/end_month")
+        return values
+
+
+_zone_bundles: Dict[str, Dict[str, Any]] = {}
+_zone_bundle_lock = threading.Lock()
+
+
+def _purge_expired_zone_bundles(now: float | None = None) -> None:
+    timestamp = now or time.time()
+    expired: List[str] = []
+    for token, payload in list(_zone_bundles.items()):
+        created = payload.get("created", 0.0)
+        if timestamp - created > ZONE_BUNDLE_TTL_SECONDS:
+            expired.append(token)
+    for token in expired:
+        bundle = _zone_bundles.pop(token, None) or {}
+        path = bundle.get("path")
+        if isinstance(path, Path):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def _register_zone_bundle(path: Path, filename: str) -> str:
+    token = secrets.token_urlsafe(16)
+    with _zone_bundle_lock:
+        _purge_expired_zone_bundles()
+        _zone_bundles[token] = {
+            "path": path,
+            "filename": filename,
+            "created": time.time(),
+        }
+    return token
+
+
+def _consume_zone_bundle(token: str) -> tuple[Path, str] | None:
+    with _zone_bundle_lock:
+        bundle = _zone_bundles.pop(token, None)
+    if not bundle:
+        return None
+    path = bundle.get("path")
+    filename = bundle.get("filename")
+    if isinstance(path, Path) and isinstance(filename, str):
+        return path, filename
+    return None
+
+
+def _create_zone_bundle(
+    artifacts: ZoneArtifacts,
+    prefix: str,
+    metadata: Mapping[str, Any] | None,
+    *,
+    include_stats: bool,
+) -> tuple[Path, str]:
+    base_name = Path(prefix).name or sanitize_name(prefix or "zones")
+    archive_filename = f"{base_name}_bundle.zip"
+    temp_file = NamedTemporaryFile(delete=False, suffix=".zip")
+    temp_path = Path(temp_file.name)
+    temp_file.close()
+
+    try:
+        with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            mean_src = Path(artifacts.mean_ndvi_path)
+            if not mean_src.exists():
+                raise FileNotFoundError(f"Mean NDVI raster missing at {mean_src}")
+            archive.write(mean_src, arcname=f"{base_name}_NDVI_mean.tif")
+
+            raster_src = Path(artifacts.raster_path)
+            if not raster_src.exists():
+                raise FileNotFoundError(f"Classified raster missing at {raster_src}")
+            archive.write(raster_src, arcname=f"{base_name}.tif")
+
+            components = dict(artifacts.vector_components or {})
+            if components and "geojson" not in components and artifacts.vector_path:
+                components.setdefault("geojson", artifacts.vector_path)
+            elif not components and artifacts.vector_path:
+                components = {"geojson": artifacts.vector_path}
+
+            for ext, src in components.items():
+                dest_name = f"{base_name}.{str(ext).lower()}"
+                if isinstance(src, (bytes, bytearray)):
+                    archive.writestr(dest_name, bytes(src))
+                    continue
+                src_path = Path(str(src))
+                if not src_path.exists():
+                    continue
+                archive.write(src_path, arcname=dest_name)
+
+            if include_stats and artifacts.zonal_stats_path:
+                stats_src_obj = artifacts.zonal_stats_path
+                dest_name = f"{base_name}_zonal_stats.csv"
+                if isinstance(stats_src_obj, (bytes, bytearray)):
+                    archive.writestr(dest_name, bytes(stats_src_obj))
+                else:
+                    stats_src = Path(str(stats_src_obj))
+                    if stats_src.exists():
+                        archive.write(stats_src, arcname=dest_name)
+
+            if metadata:
+                try:
+                    manifest = json.dumps(metadata, indent=2, sort_keys=True)
+                    archive.writestr(f"{base_name}_metadata.json", manifest)
+                except Exception:
+                    pass
+    except Exception:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+    return temp_path, archive_filename
 
 # NEW: zoning controls
 DEFAULT_MODE = "linear"           # "linear" | "quantile" | "auto"
@@ -1069,3 +1242,135 @@ def _task_payload(task: ee.batch.Task | None) -> Dict[str, object]:
     if error:
         payload["error"] = error
     return payload
+
+
+@router.post("/zones/production")
+def create_production_zones(payload: ProductionZonesRequest) -> Dict[str, Any]:
+    months = list(payload.months)
+    if not months and payload.start_month and payload.end_month:
+        try:
+            start_dt = datetime.strptime(payload.start_month, "%Y-%m")
+            end_dt = datetime.strptime(payload.end_month, "%Y-%m")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        start_date = date(start_dt.year, start_dt.month, 1)
+        end_last_day = calendar.monthrange(end_dt.year, end_dt.month)[1]
+        end_date = date(end_dt.year, end_dt.month, end_last_day)
+        months = _months_from_dates(start_date, end_date)
+
+    try:
+        result = export_selected_period_zones(
+            payload.aoi_geojson,
+            payload.aoi_name,
+            months,
+            cloud_prob_max=payload.cloud_prob_max,
+            n_classes=payload.n_classes,
+            cv_mask_threshold=payload.cv_mask_threshold,
+            min_mapping_unit_ha=payload.mmu_ha,
+            smooth_radius_m=payload.smooth_radius_m,
+            open_radius_m=payload.open_radius_m,
+            close_radius_m=payload.close_radius_m,
+            simplify_tolerance_m=int(round(payload.simplify_tol_m)),
+            simplify_buffer_m=payload.simplify_buffer_m,
+            export_target=payload.export_target,
+            include_zonal_stats=payload.include_zonal_stats,
+            include_stats=payload.include_zonal_stats,
+            apply_stability_mask=payload.apply_stability_mask,
+            mode=payload.mode,
+            ndvi_min=payload.ndvi_min,
+            ndvi_max=payload.ndvi_max,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Production zone export failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Zone export failed: {exc}") from exc
+
+    artifacts = result.pop("artifacts", None)
+    result.pop("working_dir", None)
+
+    paths = result.get("paths") or {}
+    if isinstance(paths, dict):
+        cleaned_paths: Dict[str, Any] = {}
+        for key, value in paths.items():
+            if isinstance(value, str):
+                cleaned_paths[key] = Path(value).name
+            elif isinstance(value, Mapping):
+                cleaned_paths[key] = {
+                    ext: Path(str(name)).name if isinstance(name, str) else name
+                    for ext, name in value.items()
+                }
+            else:
+                cleaned_paths[key] = value
+        result["paths"] = cleaned_paths
+
+    metadata = result.get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop("downloaded_mean_ndvi", None)
+        metadata.pop("mean_ndvi_export_task", None)
+        metadata.pop("classified_export_task", None)
+
+    download_token: str | None = None
+    download_filename: str | None = None
+    if (
+        payload.export_target == "zip"
+        and isinstance(artifacts, ZoneArtifacts)
+    ):
+        try:
+            bundle_path, bundle_name = _create_zone_bundle(
+                artifacts,
+                result.get("prefix") or payload.aoi_name,
+                metadata if isinstance(metadata, Mapping) else None,
+                include_stats=payload.include_zonal_stats,
+            )
+            download_token = _register_zone_bundle(bundle_path, bundle_name)
+            download_filename = bundle_name
+        except Exception as exc:
+            logger.exception("Failed to prepare zone bundle for download: %s", exc)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to prepare zone bundle: {exc}",
+            ) from exc
+        finally:
+            if artifacts.working_dir:
+                try:
+                    shutil.rmtree(artifacts.working_dir, ignore_errors=True)
+                except Exception:
+                    pass
+    elif isinstance(artifacts, ZoneArtifacts) and artifacts.working_dir:
+        try:
+            shutil.rmtree(artifacts.working_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+    response: Dict[str, Any] = {"ok": True, **result}
+    if download_token:
+        response["download_token"] = download_token
+        response["download_filename"] = download_filename
+
+    return response
+
+
+@router.get("/zones/production/download/{token}")
+def download_production_zone_bundle(token: str):
+    bundle = _consume_zone_bundle(token)
+    if not bundle:
+        raise HTTPException(status_code=404, detail="Download expired or invalid")
+    path, filename = bundle
+    if not path.exists():
+        raise HTTPException(status_code=410, detail="Bundle no longer available")
+
+    def _stream() -> Any:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+
+    response = StreamingResponse(_stream(), media_type="application/zip")
+    response.headers["Content-Disposition"] = f"attachment; filename=\"{filename}\""
+    response.background = BackgroundTask(lambda: path.unlink(missing_ok=True))
+    return response
