@@ -2,6 +2,7 @@ import ee
 import pytest
 from shapely.geometry import Polygon, mapping
 
+from app.services import zones_workflow
 from app.services.zones import _build_mean_ndvi_for_zones, _classify_smooth_and_polygonize
 
 try:
@@ -46,3 +47,34 @@ def test_mean_and_classes():
     )
     assert classified.bandNames().getInfo() == ["zone"]
     assert vectors.size().getInfo() >= 0
+
+
+@pytest.mark.skipif(not _EE_AVAILABLE, reason=_SKIP_REASON or "Earth Engine unavailable")
+def test_long_term_mean_sets_metadata():
+    geom = _geom()
+    mean_img = zones_workflow.long_term_mean_ndvi(geom, "2021-06-01", "2021-08-31")
+
+    bands = mean_img.bandNames().getInfo()
+    assert bands == ["NDVI"]
+
+    props = mean_img.toDictionary().getInfo()
+    assert props.get("period_start") == "2021-06-01"
+    assert props.get("period_end") == "2021-08-31"
+    assert "ndvi_stdDev" in props
+    assert "ndvi_low_variation" in props
+
+    nominal_scale = mean_img.projection().nominalScale().getInfo()
+    assert nominal_scale == pytest.approx(10, rel=0.1)
+
+
+@pytest.mark.skipif(not _EE_AVAILABLE, reason=_SKIP_REASON or "Earth Engine unavailable")
+def test_long_term_mean_raises_on_empty_collection(monkeypatch):
+    geom = _geom()
+
+    def _empty_monthly_collection(**kwargs):
+        return ee.ImageCollection([])
+
+    monkeypatch.setattr(zones_workflow.gee, "monthly_sentinel2_collection", _empty_monthly_collection)
+
+    with pytest.raises(ValueError):
+        zones_workflow.long_term_mean_ndvi(geom, "2021-01-01", "2021-01-31")

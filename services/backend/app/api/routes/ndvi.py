@@ -42,7 +42,12 @@ def generate_ndvi(req: NDVIRequest) -> Dict[str, Any]:
         )
 
         monthly = zw.monthly_ndvi_mean(s2)
-        lt_mean = zw.long_term_mean_ndvi(s2)
+        lt_mean = zw.long_term_mean_ndvi(
+            aoi,
+            req.start,
+            req.end,
+            cloud_prob_max=req.cloud_prob_max,
+        )
 
         z = zw.classify_zones(
             lt_mean, aoi,

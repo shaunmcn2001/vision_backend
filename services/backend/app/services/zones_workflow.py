@@ -18,8 +18,13 @@ Design goals:
 
 from __future__ import annotations
 
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Sequence
+
 import ee
-from typing import Dict, Any, List, Optional
+
+from app import gee
+from app.services.ndvi_shared import reproject_native_10m
 
 # -----------------------------
 # EE Init
@@ -115,8 +120,105 @@ def monthly_ndvi_mean(collection: ee.ImageCollection) -> ee.ImageCollection:
     return ee.ImageCollection(years.map(ym_to_img)).flatten()
 
 
-def long_term_mean_ndvi(collection: ee.ImageCollection) -> ee.Image:
-    return collection.select('NDVI').mean().rename('NDVI')
+def long_term_mean_ndvi(
+    aoi: ee.Geometry,
+    start: date | datetime | str,
+    end: date | datetime | str,
+    *,
+    months: Sequence[str] | None = None,
+    cloud_prob_max: int = 40,
+) -> ee.Image:
+    """Compute the long-term mean NDVI at native 10 m resolution."""
+
+    def _iso(value: date | datetime | str) -> str:
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        return str(value)
+
+    start_iso = _iso(start)
+    end_iso = _iso(end)
+
+    monthly = gee.monthly_sentinel2_collection(
+        aoi=aoi,
+        start=start_iso,
+        end=end_iso,
+        months=months,
+        cloud_prob_max=cloud_prob_max,
+    )
+
+    try:
+        count = int(ee.Number(monthly.size()).getInfo() or 0)
+    except Exception:
+        count = 0
+    if count == 0:
+        raise ValueError("No Sentinel-2 imagery found for the requested period.")
+
+    def _ndvi(image: ee.Image) -> ee.Image:
+        img = ee.Image(image)
+        band_names = ee.List(img.bandNames())
+        has_b4 = ee.Number(band_names.indexOf("B4")).gte(0)
+        has_b8 = ee.Number(band_names.indexOf("B8")).gte(0)
+        both = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
+
+        empty = ee.Image(0).updateMask(ee.Image(0)).rename("NDVI")
+        ndvi = ee.Image(
+            ee.Algorithms.If(
+                both,
+                img.toFloat().normalizedDifference(["B8", "B4"]).rename("NDVI"),
+                empty,
+            )
+        )
+
+        mask = img.select("B8").mask().multiply(img.select("B4").mask()).gt(0)
+        return ndvi.updateMask(mask)
+
+    ndvi_collection = monthly.map(_ndvi)
+    ndvi_mean = ee.Image(ndvi_collection.mean()).rename("NDVI").toFloat()
+    ndvi_mean = ndvi_mean.set({
+        "period_start": start_iso,
+        "period_end": end_iso,
+    })
+
+    try:
+        std_dict = ee.Dictionary(
+            ndvi_mean.reduceRegion(
+                reducer=ee.Reducer.stdDev(),
+                geometry=aoi,
+                scale=10,
+                bestEffort=True,
+                maxPixels=1e9,
+            )
+        )
+        std_val = ee.Number(
+            ee.Algorithms.If(
+                std_dict.size(),
+                std_dict.values().get(0),
+                0,
+            )
+        ).getInfo()
+    except Exception:
+        std_val = 0.0
+
+    if std_val is None:
+        std_val = 0.0
+
+    low_variation = float(std_val) < 1e-3
+    ndvi_mean = ndvi_mean.set({
+        "ndvi_stdDev": float(std_val),
+        "ndvi_low_variation": low_variation,
+    })
+
+    first_image = ee.Image(monthly.first())
+    ndvi_native = ee.Algorithms.If(
+        first_image,
+        reproject_native_10m(ndvi_mean, first_image, ref_band="B8", scale=10),
+        ndvi_mean,
+    )
+
+    props = ee.Dictionary(ndvi_mean.toDictionary())
+    return ee.Image(ndvi_native).rename("NDVI").toFloat().clip(aoi).set(props)
 
 
 def classify_zones(ndvi_img: ee.Image,
