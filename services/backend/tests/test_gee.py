@@ -51,6 +51,21 @@ def test_initialize_accepts_base64_credentials(monkeypatch):
     assert captured["credentials"] is creds_object
 
 
+def test_initialize_accepts_mapping_credentials(monkeypatch):
+    info = {"client_email": "svc@example.com", "type": "service_account"}
+
+    monkeypatch.delenv(gee.SERVICE_ACCOUNT_ENV, raising=False)
+    monkeypatch.delenv(gee.FALLBACK_SERVICE_ACCOUNT_ENV, raising=False)
+
+    captured, creds_object = _stub_ee(monkeypatch)
+
+    gee.initialize(force=True, credentials=info)
+
+    assert captured["email"] == info["client_email"]
+    assert json.loads(captured["key_data"]) == info
+    assert captured["credentials"] is creds_object
+
+
 def test_initialize_uses_google_application_credentials_path(tmp_path, monkeypatch):
     info = {"client_email": "svc@example.com", "type": "service_account"}
     cred_file = tmp_path / "service-account.json"
