@@ -1005,34 +1005,59 @@ def export_ui():
          }
        };
 
-       const downloadZip = async (jobId, headers) => {
-         const response = await fetch(buildUrl(`export/s2/indices/${jobId}/download`), {
-           method: 'GET',
-           headers,
-         });
-         if (!response.ok) {
-           throw new Error(await readError(response));
-         }
-         const blob = await response.blob();
-         const disposition = response.headers.get('content-disposition') || '';
-         const match = disposition.match(/filename\*?=(?:UTF-8''|"?)([^";]+)/i);
-         const filename = match ? decodeURIComponent(match[1]) : 'sentinel2_indices.zip';
+        const downloadZip = async (jobId, headers) => {
+          const response = await fetch(buildUrl(`export/s2/indices/${jobId}/download`), {
+            method: 'GET',
+            headers,
+          });
+          if (!response.ok) {
+            throw new Error(await readError(response));
+          }
+          const blob = await response.blob();
+          const disposition = response.headers.get('content-disposition') || '';
+          const match = disposition.match(/filename\*?=(?:UTF-8''|"?)([^";]+)/i);
+          const filename = match ? decodeURIComponent(match[1]) : 'sentinel2_indices.zip';
 
-         const url = window.URL.createObjectURL(blob);
-         const link = document.createElement('a');
-         link.href = url;
-         link.download = filename;
-         document.body.appendChild(link);
-         link.click();
-         link.remove();
-         window.URL.revokeObjectURL(url);
-       };
+          const url = window.URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          window.URL.revokeObjectURL(url);
+        };
 
-       const fetchExportSummary = async (jobId, headers) => {
-         const response = await fetch(buildUrl(`export/s2/indices/${jobId}/download`), {
-           method: 'GET',
-           headers,
-         });
+      const downloadZoneBundle = async (token, headers, suggestedName) => {
+        if (!token) {
+          return;
+        }
+        const response = await fetch(buildUrl(`api/zones/production/download/${token}`), {
+          method: 'GET',
+          headers,
+        });
+        if (!response.ok) {
+          throw new Error(await readError(response));
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get('content-disposition') || '';
+        const match = disposition.match(/filename\*=?(?:UTF-8''|"?)([^";]+)/i);
+        const filename = match ? decodeURIComponent(match[1]) : suggestedName || 'production_zones_bundle.zip';
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+      };
+
+      const fetchExportSummary = async (jobId, headers) => {
+        const response = await fetch(buildUrl(`export/s2/indices/${jobId}/download`), {
+          method: 'GET',
+          headers,
+        });
          if (!response.ok) {
            throw new Error(await readError(response));
          }
@@ -1067,13 +1092,21 @@ def export_ui():
             include_zonal_stats: zoneParams.include_zonal_stats,
           }),
          });
-         if (!response.ok) {
-           throw new Error(await readError(response));
-         }
-         const data = await response.json();
-         updateZonePanelFromEndpoint(data);
-         return data;
-       };
+        if (!response.ok) {
+          throw new Error(await readError(response));
+        }
+        const data = await response.json();
+        if (exportTarget === 'zip' && data && data.download_token) {
+          try {
+            await downloadZoneBundle(data.download_token, headers, data.download_filename);
+          } catch (bundleError) {
+            console.error('Zone bundle download failed:', bundleError);
+            throw bundleError;
+          }
+        }
+        updateZonePanelFromEndpoint(data);
+        return data;
+      };
 
        let isProcessing = false;
 
