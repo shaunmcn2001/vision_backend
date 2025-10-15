@@ -7,7 +7,7 @@ import json
 import os
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Set, Tuple
 
 import ee
 
@@ -36,7 +36,13 @@ def _looks_like_path(value: str) -> bool:
     return any(sep in value for sep in ("/", "\\")) or value.lower().endswith(".json")
 
 
-def _load_service_account_info(raw_credentials: str) -> Dict:
+def _load_service_account_info(raw_credentials: str | Mapping[str, Any]) -> Dict:
+    if isinstance(raw_credentials, Mapping):
+        info = dict(raw_credentials)
+        if not info:
+            raise RuntimeError("Service account credential value is empty")
+        return info
+
     trimmed = raw_credentials.strip()
     if not trimmed:
         raise RuntimeError("Service account credential value is empty")
@@ -91,20 +97,27 @@ def _load_service_account_info(raw_credentials: str) -> Dict:
     )
 
 
-def initialize(force: bool = False) -> None:
+def initialize(
+    force: bool = False,
+    *,
+    credentials: str | Mapping[str, Any] | None = None,
+) -> None:
     """Initialise Earth Engine using configured service account credentials."""
     global _initialized
     if _initialized and not force:
         return
 
-    primary = (os.getenv(SERVICE_ACCOUNT_ENV) or "").strip()
-    fallback = (os.getenv(FALLBACK_SERVICE_ACCOUNT_ENV) or "").strip()
-    raw_credentials = primary or fallback
-    if not raw_credentials:
-        raise RuntimeError(
-            "Set GEE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS to a service account credential JSON string, "
-            "base64-encoded JSON, or file path."
-        )
+    if credentials is not None:
+        raw_credentials = credentials
+    else:
+        primary = (os.getenv(SERVICE_ACCOUNT_ENV) or "").strip()
+        fallback = (os.getenv(FALLBACK_SERVICE_ACCOUNT_ENV) or "").strip()
+        raw_credentials = primary or fallback
+        if not raw_credentials:
+            raise RuntimeError(
+                "Set GEE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS to a service account credential JSON string, "
+                "base64-encoded JSON, or file path."
+            )
 
     info = _load_service_account_info(raw_credentials)
 
