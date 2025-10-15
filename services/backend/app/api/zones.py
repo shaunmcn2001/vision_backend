@@ -52,6 +52,7 @@ DEFAULT_SIMPLIFY_TOL_M = 5
 DEFAULT_SIMPLIFY_BUFFER_M = 3
 DEFAULT_SMOOTH_RADIUS_PX = 1
 DEFAULT_METHOD = "ndvi_percentiles"
+DEFAULT_MODE = "linear"  # "linear" | "quantile" | "auto"
 DEFAULT_SAMPLE_SIZE = 4000
 DEFAULT_SCALE = int(os.getenv("ZONES_SCALE_M", "10"))
 DEFAULT_EXPORT_CRS = "EPSG:3857"
@@ -222,7 +223,6 @@ def _create_zone_bundle(
     return temp_path, archive_filename
 
 # NEW: zoning controls
-DEFAULT_MODE = "linear"           # "linear" | "quantile" | "auto"
 DEFAULT_NDVI_MIN = 0.35
 DEFAULT_NDVI_MAX = 0.73
 
