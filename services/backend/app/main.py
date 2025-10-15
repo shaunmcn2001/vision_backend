@@ -1,3 +1,4 @@
+from app.api.routes import ndvi
 import logging
 
 from fastapi import FastAPI, Request
@@ -1391,3 +1392,5 @@ app.include_router(s2_indices_router)
 app.include_router(zones_router, prefix="/api")
 app.include_router(export_shapefile_router)
 
+
+app.include_router(ndvi.router)
