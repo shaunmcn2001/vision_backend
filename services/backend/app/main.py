@@ -1,10 +1,11 @@
-from app.api.routes_ndvi import router as ndvi_router
-app.include_router(ndvi_router)
 import logging
+import os
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+
+# your existing routers
 from app.api.export import sentinel2_router as export_shapefile_router
 from app.api.routes import router as api_router
 from app.api.fields import router as fields_router
@@ -12,18 +13,21 @@ from app.api.fields_upload import router as fields_upload_router
 from app.api.tiles import router as tiles_router
 from app.api.s2_indices import router as s2_indices_router
 from app.api.zones import router as zones_router
+
+# NDVI router (keep this import)
+from app.api.routes_ndvi import router as ndvi_router
+
 from app import gee
-import app.services.monkey_patches 
-import os
+import app.services.monkey_patches
 
 app = FastAPI(
     title="Agri NDVI Backend",
     version="0.1.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
 )
 
-# Allow all origins (adjust later if needed)
+# CORS and logger exactly as you had
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,18 +35,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 logger = logging.getLogger(__name__)
 
 
 @app.on_event("startup")
 def _startup_init_gee() -> None:
-    """Initialise Earth Engine once the application starts."""
     try:
         gee.initialize()
         logger.info("Earth Engine initialised for Sentinel-2 exports")
-    except Exception as exc:  # pragma: no cover - best effort
+    except Exception as exc:  # pragma: no cover
         logger.warning("Earth Engine initialisation skipped: %s", exc)
+
 
 @app.get("/healthz")
 def healthz():
@@ -52,6 +55,7 @@ def healthz():
         "project": os.getenv("GCP_PROJECT"),
         "region": os.getenv("GCP_REGION"),
     }
+
 
 @app.get("/")
 def root():
@@ -1369,8 +1373,8 @@ async def require_api_key(req: Request, call_next):
         "/healthz",
         "/docs",
         "/redoc",
-        "/openapi.json",           # needed for Swagger UI to load
-        "/docs/oauth2-redirect",   # docs assets
+        "/openapi.json",
+        "/docs/oauth2-redirect",
         "/docs/swagger-ui",
         "/docs/swagger-ui-init.js",
         "/docs/swagger-ui-bundle.js",
@@ -1384,7 +1388,7 @@ async def require_api_key(req: Request, call_next):
         return JSONResponse(status_code=401, content={"detail": "Invalid API key"})
     return await call_next(req)
 
-# Mount API routes
+# ---- Mount API routes AFTER app is created ----
 app.include_router(api_router, prefix="/api")
 app.include_router(fields_router, prefix="/api/fields")
 app.include_router(fields_upload_router, prefix="/api/fields")
@@ -1393,5 +1397,5 @@ app.include_router(s2_indices_router)
 app.include_router(zones_router, prefix="/api")
 app.include_router(export_shapefile_router)
 
-
-app.include_router(ndvi.router)
+# NDVI endpoint (this is the correct include)
+app.include_router(ndvi_router)
