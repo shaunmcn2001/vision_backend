@@ -1,4 +1,5 @@
-from app.api.routes import ndvi
+from app.api.routes_ndvi import router as ndvi_router
+app.include_router(ndvi_router)
 import logging
 
 from fastapi import FastAPI, Request
