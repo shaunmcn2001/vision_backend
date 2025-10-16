@@ -50,6 +50,53 @@ def test_mean_and_classes():
 
 
 @pytest.mark.skipif(not _EE_AVAILABLE, reason=_SKIP_REASON or "Earth Engine unavailable")
+def test_mean_masks_union_of_partial_months(monkeypatch):
+    geom = _geom()
+
+    def _monthly_partial_masks(**kwargs):
+        base = ee.Image.pixelLonLat()
+        mask_left = base.select("longitude").lt(153.005)
+        mask_right = base.select("longitude").gte(153.005)
+
+        img_left = (
+            ee.Image.constant([0.2, 0.6])
+            .rename(["B4", "B8"])
+            .updateMask(mask_left)
+        )
+        img_right = (
+            ee.Image.constant([0.2, 0.6])
+            .rename(["B4", "B8"])
+            .updateMask(mask_right)
+        )
+
+        return ee.ImageCollection([img_left, img_right])
+
+    monkeypatch.setattr(
+        zones_workflow.gee, "monthly_sentinel2_collection", _monthly_partial_masks
+    )
+
+    mean_img = _build_mean_ndvi_for_zones(geom, "2021-06-01", "2021-08-31")
+
+    left_stats = mean_img.reduceRegion(
+        reducer=ee.Reducer.first(),
+        geometry=ee.Geometry.Point(153.0025, -27.5055).buffer(30),
+        scale=10,
+        maxPixels=1e9,
+        bestEffort=True,
+    ).getInfo()
+    right_stats = mean_img.reduceRegion(
+        reducer=ee.Reducer.first(),
+        geometry=ee.Geometry.Point(153.0075, -27.5055).buffer(30),
+        scale=10,
+        maxPixels=1e9,
+        bestEffort=True,
+    ).getInfo()
+
+    assert left_stats.get("NDVI_mean") is not None
+    assert right_stats.get("NDVI_mean") is not None
+
+
+@pytest.mark.skipif(not _EE_AVAILABLE, reason=_SKIP_REASON or "Earth Engine unavailable")
 def test_long_term_mean_sets_metadata():
     geom = _geom()
     mean_img = zones_workflow.long_term_mean_ndvi(geom, "2021-06-01", "2021-08-31")

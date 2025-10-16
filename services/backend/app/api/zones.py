@@ -593,7 +593,9 @@ def _build_mean_ndvi_for_zones(
         mask_1band = img.select("B8").mask().multiply(img.select("B4").mask()).gt(0)
         return ndvi.updateMask(mask_1band)
 
-    ndvi_mean = monthly.map(_ndvi).mean().rename("NDVI_mean").toFloat().clip(geom)
+    ndvi_mean = (
+        mean_from_collection_sum_count(monthly.map(_ndvi)).toFloat().clip(geom)
+    )
 
     try:
         std_dict = ee.Dictionary(
