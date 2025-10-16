@@ -25,7 +25,7 @@ import numpy as np
 import rasterio
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, root_validator, validator
+from pydantic import BaseModel, Field, model_validator, validator
 from rasterio.windows import Window
 from starlette.background import BackgroundTask
 
@@ -101,14 +101,14 @@ class ProductionZonesRequest(BaseModel):
             raise ValueError("export_target must be 'zip' or 'local'")
         return target
 
-    @root_validator
-    def _ensure_month_inputs(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        months = values.get("months") or []
-        start = values.get("start_month")
-        end = values.get("end_month")
+    @model_validator(mode="after")
+    def _ensure_month_inputs(self) -> "ProductionZonesRequest":
+        months = self.months or []
+        start = self.start_month
+        end = self.end_month
         if not months and not (start and end):
             raise ValueError("Supply either months[] or start_month/end_month")
-        return values
+        return self
 
 
 _zone_bundles: Dict[str, Dict[str, Any]] = {}
