@@ -158,6 +158,14 @@ def long_term_mean_ndvi(
     def _ndvi(image: ee.Image) -> ee.Image:
         img = ee.Image(image)
         band_names = ee.List(img.bandNames())
+        has_precomputed = ee.Number(band_names.indexOf("NDVI_mean")).gte(0)
+        precomputed = ee.Image(
+            ee.Algorithms.If(
+                has_precomputed,
+                img.select("NDVI_mean").rename("NDVI"),
+                ee.Image(0).updateMask(ee.Image(0)).rename("NDVI"),
+            )
+        )
         has_b4 = ee.Number(band_names.indexOf("B4")).gte(0)
         has_b8 = ee.Number(band_names.indexOf("B8")).gte(0)
         both = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
@@ -165,9 +173,13 @@ def long_term_mean_ndvi(
         empty = ee.Image(0).updateMask(ee.Image(0)).rename("NDVI")
         ndvi = ee.Image(
             ee.Algorithms.If(
-                both,
-                img.toFloat().normalizedDifference(["B8", "B4"]).rename("NDVI"),
-                empty,
+                has_precomputed,
+                precomputed,
+                ee.Algorithms.If(
+                    both,
+                    img.toFloat().normalizedDifference(["B8", "B4"]).rename("NDVI"),
+                    empty,
+                ),
             )
         )
 

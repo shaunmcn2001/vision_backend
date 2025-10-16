@@ -108,7 +108,8 @@ def test_mask_sentinel2_scales_and_selects_bands():
             return DummyMask(self.value != other)
 
     class DummyImage:
-        def __init__(self) -> None:
+        def __init__(self, scl_value: int) -> None:
+            self.scl_value = scl_value
             self.mask_value: bool | None = None
             self.divide_by: int | None = None
             self.selected_bands: list[str] | None = None
@@ -119,10 +120,8 @@ def test_mask_sentinel2_scales_and_selects_bands():
                 return self
             if band == "cloud_probability":
                 return DummyScalar(20)
-            if band == "QA60":
-                return DummyScalar(0)
             if band == "SCL":
-                return DummyScalar(5)
+                return DummyScalar(self.scl_value)
             raise AssertionError(f"Unexpected band request: {band}")
 
         def updateMask(self, mask: DummyMask) -> "DummyImage":
@@ -133,11 +132,16 @@ def test_mask_sentinel2_scales_and_selects_bands():
             self.divide_by = value
             return self
 
-    image = DummyImage()
+    clear_image = DummyImage(5)
+    cloudy_image = DummyImage(9)
 
-    result = gee._mask_sentinel2(image, cloud_prob_max=30)
+    result_clear = gee._mask_sentinel2(clear_image, cloud_prob_max=30)
+    result_cloudy = gee._mask_sentinel2(cloudy_image, cloud_prob_max=30)
 
-    assert result is image
-    assert image.mask_value is True
-    assert image.divide_by == 10_000
-    assert image.selected_bands == list(gee.S2_BANDS)
+    assert result_clear is clear_image
+    assert clear_image.mask_value is True
+    assert clear_image.divide_by == 10_000
+    assert clear_image.selected_bands == list(gee.S2_BANDS)
+
+    assert result_cloudy is cloudy_image
+    assert cloudy_image.mask_value is False
