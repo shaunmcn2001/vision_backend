@@ -2,10 +2,11 @@
 from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 import ee
 
 from app.services import zones_workflow as zw
+from app.services.ndvi_shared import reproject_native_10m
 
 router = APIRouter(prefix="/api/zones", tags=["zones"])
 
@@ -28,6 +29,27 @@ class NDVIRequest(BaseModel):
         description="CRS for GeoTIFF exports (default Web Mercator, EPSG:3857)",
     )
     export_scale: float = 10.0
+
+
+def _prepare_image_for_download(
+    image: ee.Image,
+    req: NDVIRequest,
+    *,
+    native_reference: ee.Image | None = None,
+) -> ee.Image:
+    """Return an image reprojected to the requested CRS/scale for downloads."""
+
+    prepared = ee.Image(image)
+
+    if native_reference is not None:
+        try:
+            prepared = ee.Image(
+                reproject_native_10m(prepared, ee.Image(native_reference), ref_band="B8", scale=10)
+            )
+        except Exception:
+            prepared = ee.Image(prepared)
+
+    return prepared.reproject(req.export_crs, None, req.export_scale)
 
 @router.post("/ndvi", summary="Generate NDVI artifacts and return download URLs")
 def generate_ndvi(req: NDVIRequest) -> Dict[str, Any]:
@@ -62,7 +84,7 @@ def generate_ndvi(req: NDVIRequest) -> Dict[str, Any]:
         classified = z["classified"]
         breaks = z["breaks"]
 
-        def img_url(img: ee.Image, name: str) -> Dict[str, str]:
+        def img_url(img: ee.Image, name: str, *, native_ref: ee.Image | None = None) -> Dict[str, str]:
             params = {
                 "name": name,
                 "region": aoi,
@@ -71,7 +93,8 @@ def generate_ndvi(req: NDVIRequest) -> Dict[str, Any]:
                 "filePerBand": False,
                 "format": "GEO_TIFF",
             }
-            url = img.getDownloadURL(params)
+            download_img = _prepare_image_for_download(img, req, native_reference=native_ref)
+            url = download_img.getDownloadURL(params)
             return {"name": name, "url": url}
 
         monthly_list = monthly.toList(monthly.size())
