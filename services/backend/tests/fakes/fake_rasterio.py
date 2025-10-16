@@ -15,6 +15,11 @@ int16 = np.int16
 float32 = np.float32
 
 
+class Resampling:
+    bilinear = "bilinear"
+    nearest = "nearest"
+
+
 @dataclass
 class _Profile:
     width: int
@@ -174,6 +179,43 @@ def open(path: str | Path, mode: str = "r", **kwargs: Any) -> Dataset:
     return Dataset(path, mode, **kwargs)
 
 
+def band(dataset: Dataset, index: int):
+    return dataset, index
+
+
+def _extract_dataset_pair(handle: Any) -> tuple[Dataset, int]:
+    if isinstance(handle, tuple) and len(handle) == 2 and isinstance(handle[0], Dataset):
+        dataset, index = handle
+        return dataset, int(index)
+    if isinstance(handle, Dataset):
+        return handle, 1
+    raise TypeError("Unsupported band handle for fake rasterio")
+
+
+def calculate_default_transform(*_args: Any, **_kwargs: Any):
+    width = _args[2] if len(_args) > 2 else None
+    height = _args[3] if len(_args) > 3 else None
+    return Affine.identity(), width, height
+
+
+def reproject(
+    *,
+    source: Any,
+    destination: Any,
+    src_transform: Any | None = None,
+    dst_transform: Any | None = None,
+    src_crs: Any | None = None,
+    dst_crs: Any | None = None,
+    src_nodata: Any | None = None,
+    dst_nodata: Any | None = None,
+    resampling: Any | None = None,
+) -> None:
+    src_ds, src_index = _extract_dataset_pair(source)
+    dst_ds, dst_index = _extract_dataset_pair(destination)
+    data = src_ds.read(src_index)
+    dst_ds.write(data.astype(dst_ds._profile.dtype), dst_index)
+
+
 class Affine:
     def __init__(self, a: float, b: float, c: float, d: float, e: float, f: float) -> None:
         self.a = a
@@ -218,6 +260,14 @@ class Window:
 
 windows = ModuleType("rasterio.windows")
 windows.Window = Window
+
+
+warp = ModuleType("rasterio.warp")
+warp.calculate_default_transform = calculate_default_transform
+warp.reproject = reproject
+
+enums = ModuleType("rasterio.enums")
+enums.Resampling = Resampling
 
 
 def shapes(
@@ -265,11 +315,17 @@ __all__ = [
     "uint8",
     "int16",
     "float32",
+    "Resampling",
     "Dataset",
     "open",
+    "band",
+    "calculate_default_transform",
+    "reproject",
     "Affine",
     "from_origin",
     "shapes",
     "transform",
     "features",
+    "warp",
+    "enums",
 ]
