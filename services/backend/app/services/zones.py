@@ -162,6 +162,7 @@ def _write_zip_geotiff_from_file(zip_path: Path, target: Path) -> None:
 class _DownloadParams:
     crs: str | None = DEFAULT_EXPORT_CRS
     scale: int = DEFAULT_SCALE
+    nodata_value: float | None = DEFAULT_NODATA_VALUE
 
 
 def _resolve_image_crs(image: ee.Image) -> str | None:
@@ -203,7 +204,7 @@ def _maybe_reproject_image(
     *,
     native_crs: str | None,
     output_crs: str | None,
-    nodata_value: float = DEFAULT_NODATA_VALUE,
+    nodata_value: float | None = DEFAULT_NODATA_VALUE,
 ) -> None:
     desired_crs = output_crs or native_crs
     try:
@@ -246,10 +247,19 @@ def _maybe_reproject_image(
             needs_reproject = bool(dst_crs and src_crs and dst_crs != src_crs)
             needs_assign_crs = bool(dst_crs and src_crs is None)
             needs_dtype_update = not np.issubdtype(src_dtype, np.floating)
+            target_nodata = (
+                nodata_value if nodata_value is not None else src_nodata
+            )
+            if target_nodata is None or not np.isfinite(target_nodata):
+                target_nodata = DEFAULT_NODATA_VALUE
+
+            if src_nodata is not None and np.isfinite(src_nodata):
+                sanitized_src_nodata = float(src_nodata)
+            else:
+                sanitized_src_nodata = None
+
             needs_nodata_update = (
-                src_nodata is None
-                or not np.isfinite(src_nodata)
-                or (nodata_value is not None and src_nodata != nodata_value)
+                sanitized_src_nodata is None or sanitized_src_nodata != target_nodata
             )
 
             if not any((needs_reproject, needs_assign_crs, needs_dtype_update, needs_nodata_update)):
@@ -268,7 +278,7 @@ def _maybe_reproject_image(
 
             target_crs = dst_crs or src_crs
             target_dtype = "float32" if needs_dtype_update else src_meta["dtype"]
-            target_nodata = nodata_value if nodata_value is not None else src_nodata
+            effective_src_nodata = target_nodata
 
             dst_meta = src_meta.copy()
             dst_meta.update(
@@ -288,18 +298,69 @@ def _maybe_reproject_image(
                     Resampling.bilinear if np.issubdtype(src_dtype, np.floating) else Resampling.nearest
                 )
                 with rasterio.open(tmp_path, "w", **dst_meta) as dst:
+                    dst_dtype = np.dtype(dst_meta["dtype"])
                     for band_idx in range(1, src.count + 1):
-                        reproject(
-                            source=rasterio.band(src, band_idx),
-                            destination=rasterio.band(dst, band_idx),
-                            src_transform=src.transform,
-                            src_crs=src_crs or target_crs,
-                            dst_transform=dst_transform,
-                            dst_crs=target_crs,
-                            src_nodata=src_nodata if src_nodata is not None else target_nodata,
-                            dst_nodata=target_nodata,
-                            resampling=resampling,
-                        )
+                        source_band = src.read(band_idx, masked=True)
+                        if isinstance(source_band, np.ma.MaskedArray):
+                            source_array = source_band.filled(target_nodata)
+                        else:
+                            source_array = source_band
+                        source_array = np.asarray(source_array, dtype=dst_dtype)
+                        try:
+                            reproject(
+                                source=source_array,
+                                destination=rasterio.band(dst, band_idx),
+                                src_transform=src.transform,
+                                src_crs=src_crs or target_crs,
+                                dst_transform=dst_transform,
+                                dst_crs=target_crs,
+                                src_nodata=effective_src_nodata,
+                                dst_nodata=target_nodata,
+                                resampling=resampling,
+                            )
+                        except TypeError:
+                            tmp_src_path: Path | None = None
+                            try:
+                                fd, tmp_name_src = tempfile.mkstemp(suffix=".tif")
+                                os.close(fd)
+                                tmp_src_path = Path(tmp_name_src)
+                                tmp_meta = dict(
+                                    driver="GTiff",
+                                    height=src.height,
+                                    width=src.width,
+                                    count=1,
+                                    dtype=dst_dtype,
+                                    crs=src_crs or target_crs,
+                                    transform=src.transform,
+                                    nodata=target_nodata,
+                                )
+                                with rasterio.open(tmp_src_path, "w", **tmp_meta) as tmp_src_ds:
+                                    reshaped = source_array.reshape(1, source_array.shape[0], source_array.shape[1])
+                                    tmp_src_ds.write(reshaped, 1)
+                                with rasterio.open(tmp_src_path) as tmp_src_ds:
+                                    reproject(
+                                        source=rasterio.band(tmp_src_ds, 1),
+                                        destination=rasterio.band(dst, band_idx),
+                                        src_transform=src.transform,
+                                        src_crs=src_crs or target_crs,
+                                        dst_transform=dst_transform,
+                                        dst_crs=target_crs,
+                                        src_nodata=effective_src_nodata,
+                                        dst_nodata=target_nodata,
+                                        resampling=resampling,
+                                    )
+                            finally:
+                                if tmp_src_path is not None:
+                                    try:
+                                        tmp_src_path.unlink(missing_ok=True)
+                                    except Exception:
+                                        pass
+                    if target_nodata is not None:
+                        for band_idx in range(1, dst.count + 1):
+                            data = dst.read(band_idx, masked=True)
+                            if isinstance(data, np.ma.MaskedArray) and data.mask is not np.ma.nomask:
+                                if np.any(data.mask):
+                                    dst.write(data.filled(target_nodata), band_idx)
                 tmp_path.replace(path)
             finally:
                 try:
@@ -381,7 +442,12 @@ def _download_image_to_path(
             with target.open("wb") as output:
                 shutil.copyfileobj(response, output)
 
-    _maybe_reproject_image(target, native_crs=native_crs, output_crs=params.crs)
+    _maybe_reproject_image(
+        target,
+        native_crs=native_crs,
+        output_crs=params.crs,
+        nodata_value=params.nodata_value,
+    )
     return ImageExportResult(path=target, task=task)
 
 
@@ -889,7 +955,7 @@ def _prepare_selected_period_artifacts(
             ndvi_mean_native,
             geometry,
             ndvi_path,
-            params=_DownloadParams(scale=DEFAULT_SCALE),
+            params=_DownloadParams(scale=DEFAULT_SCALE, nodata_value=DEFAULT_NODATA_VALUE),
         )
         ndvi_path = mean_export.path
 
@@ -898,7 +964,7 @@ def _prepare_selected_period_artifacts(
             classified_image,
             geometry,
             classified_path,
-            params=_DownloadParams(scale=DEFAULT_SCALE),
+            params=_DownloadParams(scale=DEFAULT_SCALE, nodata_value=0),
         )
         classified_path = classified_export.path
 
