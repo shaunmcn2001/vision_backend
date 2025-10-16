@@ -558,53 +558,88 @@ def _build_mean_ndvi_for_zones(
     def _iso(d):
         return d.isoformat() if isinstance(d, date) else str(d)
 
-    # 1) Monthly Sentinel-2 collection
-    monthly = gee.monthly_sentinel2_collection(
-        aoi=geom,
-        start=_iso(start_date),
-        end=_iso(end_date),
-        months=months,
-        cloud_prob_max=cloud_prob_max,
-    )
+    def _to_date(value: date | str) -> date:
+        if isinstance(value, date):
+            return value
+        return datetime.fromisoformat(str(value)[:10]).date()
 
-    # Hard-fail only when there's truly no imagery
-    try:
-        ic_size = int(ee.Number(monthly.size()).getInfo() or 0)
-    except Exception:
-        ic_size = 0
-    if ic_size == 0:
-        raise ValueError(S2_COLLECTION_EMPTY_ERROR)
+    if months:
+        ordered_months = _ordered_months(months)
+        start_iso = _iso(start_date)
+        end_iso = _iso(end_date)
+    else:
+        start_dt = _to_date(start_date)
+        end_dt = _to_date(end_date)
+        ordered_months = _months_from_dates(start_dt, end_dt)
+        start_iso = start_dt.isoformat()
+        end_iso = end_dt.isoformat()
 
-    # 2) NDVI per image with safe band guard
+    ndvi_collections: List[ee.ImageCollection] = []
+    first_reference: ee.Image | None = None
+
     def _ndvi(img: ee.Image) -> ee.Image:
         """
-        Compute NDVI and apply a single-band mask (B8 ∧ B4) only.
+        Compute NDVI (or reuse NDVI_mean) with a single-band mask (B8 ∧ B4).
         Avoids multi-band img.mask() side effects and NaN constants.
         """
         bnames = ee.List(img.bandNames())
+        has_precomputed = ee.Number(bnames.indexOf("NDVI_mean")).gte(0)
+        ndvi_from_band = ee.Image(
+            ee.Algorithms.If(
+                has_precomputed,
+                img.select("NDVI_mean").rename("NDVI"),
+                ee.Image(0).updateMask(ee.Image(0)).rename("NDVI"),
+            )
+        )
+
         has_b4 = ee.Number(bnames.indexOf("B4")).gte(0)
         has_b8 = ee.Number(bnames.indexOf("B8")).gte(0)
         both = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
 
-        # fully masked placeholder (no NaN)
-        empty = ee.Image(0).updateMask(ee.Image(0)).rename("NDVI")
-
+        computed_ndvi = img.toFloat().normalizedDifference(["B8", "B4"]).rename("NDVI")
         ndvi = ee.Image(
             ee.Algorithms.If(
-                both,
-                img.toFloat().normalizedDifference(["B8", "B4"]).rename("NDVI"),
-                empty,
+                has_precomputed,
+                ndvi_from_band,
+                ee.Algorithms.If(both, computed_ndvi, ndvi_from_band),
             )
         )
 
-        # single-band validity mask from B8 & B4
         mask_1band = img.select("B8").mask().multiply(img.select("B4").mask()).gt(0)
-        return ndvi.updateMask(mask_1band)
+        return ee.Image(ndvi).updateMask(mask_1band)
+
+    for month_str in ordered_months:
+        month_result = gee.monthly_sentinel2_collection(
+            geom,
+            month_str,
+            cloud_prob_max=cloud_prob_max,
+        )
+        if isinstance(month_result, tuple):
+            month_collection = month_result[0]
+        else:
+            month_collection = month_result
+
+        try:
+            month_size = int(ee.Number(month_collection.size()).getInfo() or 0)
+        except Exception:
+            month_size = 0
+        if month_size == 0:
+            continue
+
+        ndvi_collections.append(month_collection.map(_ndvi))
+        if first_reference is None:
+            first_reference = ee.Image(month_collection.first())
+
+    if not ndvi_collections:
+        raise ValueError(S2_COLLECTION_EMPTY_ERROR)
+
+    ndvi_collection = ndvi_collections[0]
+    for extra in ndvi_collections[1:]:
+        ndvi_collection = ndvi_collection.merge(extra)
 
     # Keep NDVI masked for stats (avoid unmask(0) before thresholds)
-    ndvi_mean = (
-        mean_from_collection_sum_count(monthly.map(_ndvi)).toFloat().clip(geom)
-    )
+    ndvi_mean = mean_from_collection_sum_count(ndvi_collection).toFloat().clip(geom)
+    ndvi_mean = ndvi_mean.set({"period_start": start_iso, "period_end": end_iso})
 
     # 3) Variation check → warn, don't raise
     try:
@@ -645,7 +680,7 @@ def _build_mean_ndvi_for_zones(
         ndvi_mean = ndvi_mean.set({"ndvi_stdDev": std_val, "ndvi_low_variation": False})
 
     # 4) Native 10 m reprojection if reference is available
-    first_img = ee.Image(monthly.first())
+    first_img = ee.Image(first_reference) if first_reference is not None else ee.Image(ndvi_collection.first())
     ndvi_native = ee.Algorithms.If(
         first_img,
         reproject_native_10m(ndvi_mean, first_img, ref_band="B8", scale=10),
