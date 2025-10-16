@@ -25,6 +25,7 @@ S2_BANDS: Iterable[str] = (
     "B11",
     "B12",
 )
+CLOUD_SHADOW_SNOW_SCL_VALUES: Tuple[int, ...] = (3, 8, 9, 10, 11)
 SERVICE_ACCOUNT_ENV = "GEE_SERVICE_ACCOUNT_JSON"
 FALLBACK_SERVICE_ACCOUNT_ENV = "GOOGLE_APPLICATION_CREDENTIALS"
 MAX_PIXELS = int(1e13)
@@ -169,10 +170,22 @@ def _attach_cloud_probability(collection: ee.ImageCollection, probability: ee.Im
     return ee.ImageCollection(matches).map(_add_probability)
 
 
+def _scl_clear_mask(image: ee.Image) -> ee.Image:
+    """Mask out cloud/shadow/snow pixels using the SCL band."""
+
+    scl = image.select("SCL")
+    mask = scl.neq(CLOUD_SHADOW_SNOW_SCL_VALUES[0])
+    for value in CLOUD_SHADOW_SNOW_SCL_VALUES[1:]:
+        mask = mask.And(scl.neq(value))
+    return mask
+
+
 def _mask_sentinel2(image: ee.Image, cloud_prob_max: int) -> ee.Image:
     cloud_probability = image.select("cloud_probability")
     prob_mask = cloud_probability.lte(cloud_prob_max)  # keep pixels <= threshold
-    scaled = image.updateMask(prob_mask).divide(10_000)
+    scl_mask = _scl_clear_mask(image)
+    combined_mask = prob_mask.And(scl_mask)
+    scaled = image.updateMask(combined_mask).divide(10_000)
     return scaled.select(list(S2_BANDS))
 
 
@@ -208,7 +221,24 @@ def monthly_sentinel2_collection(
         with_clouds = _attach_cloud_probability(base_collection, probability)
         masked = with_clouds.map(lambda img: _mask_sentinel2(img, cloud_prob_max))
 
-        composite = masked.median().select(S2_BANDS)
+        def _ndvi(image: ee.Image) -> ee.Image:
+            ndvi = (
+                image.select(["B8", "B4"])
+                .toFloat()
+                .normalizedDifference(["B8", "B4"])
+                .rename("NDVI")
+            )
+            mask = image.select("B8").mask().multiply(image.select("B4").mask()).gt(0)
+            return ndvi.updateMask(mask)
+
+        ndvi_collection = masked.map(_ndvi)
+        ndvi_sum = ndvi_collection.sum().rename("NDVI_sum")
+        ndvi_count = ndvi_collection.count().rename("NDVI_count")
+        ndvi_mean = ndvi_sum.divide(ndvi_count.max(1)).rename("NDVI_mean")
+        ndvi_mean = ndvi_mean.updateMask(ndvi_count.gt(0))
+
+        median = masked.median().select(S2_BANDS)
+        composite = median.addBands(ndvi_mean)
         composite = composite.set(
             {"system:time_start": ee.Date(start_iso).millis(), "month": month}
         )
