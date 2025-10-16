@@ -17,6 +17,8 @@ from zipfile import ZipFile
 import ee
 import numpy as np
 import rasterio
+from rasterio.enums import Resampling
+from rasterio.warp import calculate_default_transform, reproject
 from rasterio.windows import Window
 
 from app import gee
@@ -43,8 +45,9 @@ DEFAULT_SMOOTH_RADIUS_PX = 1
 DEFAULT_METHOD = "ndvi_percentiles"
 DEFAULT_SAMPLE_SIZE = 4000
 DEFAULT_SCALE = int(os.getenv("ZONES_SCALE_M", "10"))
-DEFAULT_EXPORT_CRS = "EPSG:3857"
+DEFAULT_EXPORT_CRS: str | None = None
 DEFAULT_CRS = DEFAULT_EXPORT_CRS
+DEFAULT_NODATA_VALUE = -9999.0
 
 # NEW: zoning controls
 DEFAULT_MODE = "linear"           # "linear" | "quantile" | "auto"
@@ -161,6 +164,152 @@ class _DownloadParams:
     scale: int = DEFAULT_SCALE
 
 
+def _resolve_image_crs(image: ee.Image) -> str | None:
+    projection = getattr(image, "projection", None)
+    if not callable(projection):
+        return None
+    try:
+        proj = projection()
+    except Exception:
+        return None
+
+    try:
+        crs_attr = getattr(proj, "crs", None)
+        if callable(crs_attr):
+            crs_value = crs_attr()
+            info = getattr(crs_value, "getInfo", None)
+            if callable(info):
+                resolved = info()
+                if isinstance(resolved, str) and resolved:
+                    return resolved
+    except Exception:
+        pass
+
+    try:
+        info_method = getattr(proj, "getInfo", None)
+        if callable(info_method):
+            info = info_method() or {}
+            crs_from_info = info.get("crs")
+            if isinstance(crs_from_info, str) and crs_from_info:
+                return crs_from_info
+    except Exception:
+        pass
+
+    return None
+
+
+def _maybe_reproject_image(
+    path: Path,
+    *,
+    native_crs: str | None,
+    output_crs: str | None,
+    nodata_value: float = DEFAULT_NODATA_VALUE,
+) -> None:
+    desired_crs = output_crs or native_crs
+    try:
+        with rasterio.open(path) as src:
+            raw_meta = getattr(src, "meta", None)
+            if raw_meta is None:
+                raw_meta = getattr(src, "profile", None)
+            if raw_meta is None and hasattr(src, "profile_dict"):
+                raw_meta = src.profile_dict
+            src_meta = dict(raw_meta or {})
+            profile_defaults = getattr(src, "_profile", None)
+            if profile_defaults is not None:
+                src_meta.setdefault("dtype", getattr(profile_defaults, "dtype", None))
+                src_meta.setdefault("width", getattr(profile_defaults, "width", None))
+                src_meta.setdefault("height", getattr(profile_defaults, "height", None))
+                src_meta.setdefault("count", getattr(profile_defaults, "count", None))
+                src_meta.setdefault("transform", getattr(profile_defaults, "transform", None))
+                src_meta.setdefault("crs", getattr(profile_defaults, "crs", None))
+                src_meta.setdefault("nodata", getattr(profile_defaults, "nodata", None))
+            src_meta.setdefault("dtype", getattr(src_meta.get("dtype"), "name", src_meta.get("dtype")))
+            src_meta.setdefault("width", getattr(src, "width", None))
+            src_meta.setdefault("height", getattr(src, "height", None))
+            src_meta.setdefault("count", getattr(src, "count", None))
+            src_meta.setdefault("transform", getattr(src, "transform", None))
+            src_meta.setdefault("crs", getattr(src, "crs", None))
+            src_meta.setdefault("nodata", getattr(src, "nodata", None))
+            if src_meta.get("dtype") is None:
+                src_meta["dtype"] = np.float32
+            src_crs = src.crs
+            src_nodata = src_meta.get("nodata")
+            src_dtype = np.dtype(src_meta["dtype"])
+
+            dst_crs = None
+            if desired_crs:
+                try:
+                    dst_crs = rasterio.crs.CRS.from_user_input(desired_crs)
+                except Exception:
+                    dst_crs = None
+
+            needs_reproject = bool(dst_crs and src_crs and dst_crs != src_crs)
+            needs_assign_crs = bool(dst_crs and src_crs is None)
+            needs_dtype_update = not np.issubdtype(src_dtype, np.floating)
+            needs_nodata_update = (
+                src_nodata is None
+                or not np.isfinite(src_nodata)
+                or (nodata_value is not None and src_nodata != nodata_value)
+            )
+
+            if not any((needs_reproject, needs_assign_crs, needs_dtype_update, needs_nodata_update)):
+                return
+
+            dst_transform = src.transform
+            dst_width, dst_height = src.width, src.height
+            if needs_reproject and dst_crs:
+                dst_transform, dst_width, dst_height = calculate_default_transform(
+                    src_crs,
+                    dst_crs,
+                    src.width,
+                    src.height,
+                    *src.bounds,
+                )
+
+            target_crs = dst_crs or src_crs
+            target_dtype = "float32" if needs_dtype_update else src_meta["dtype"]
+            target_nodata = nodata_value if nodata_value is not None else src_nodata
+
+            dst_meta = src_meta.copy()
+            dst_meta.update(
+                crs=target_crs,
+                transform=dst_transform,
+                width=dst_width,
+                height=dst_height,
+                nodata=target_nodata,
+                dtype=target_dtype,
+            )
+
+            fd, tmp_name = tempfile.mkstemp(suffix=".tif")
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+            try:
+                resampling = (
+                    Resampling.bilinear if np.issubdtype(src_dtype, np.floating) else Resampling.nearest
+                )
+                with rasterio.open(tmp_path, "w", **dst_meta) as dst:
+                    for band_idx in range(1, src.count + 1):
+                        reproject(
+                            source=rasterio.band(src, band_idx),
+                            destination=rasterio.band(dst, band_idx),
+                            src_transform=src.transform,
+                            src_crs=src_crs or target_crs,
+                            dst_transform=dst_transform,
+                            dst_crs=target_crs,
+                            src_nodata=src_nodata if src_nodata is not None else target_nodata,
+                            dst_nodata=target_nodata,
+                            resampling=resampling,
+                        )
+                tmp_path.replace(path)
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+    except Exception:
+        logger.exception("Failed to post-process downloaded GeoTIFF at %s", path)
+
+
 def _download_image_to_path(
     image: ee.Image,
     geometry: ee.Geometry,
@@ -171,6 +320,8 @@ def _download_image_to_path(
     to_float = getattr(image, "toFloat", None)
     if callable(to_float):
         image = to_float()
+
+    native_crs = _resolve_image_crs(image)
 
     try:
         region_candidate = geometry.geometry() if hasattr(geometry, "geometry") else geometry
@@ -212,9 +363,6 @@ def _download_image_to_path(
         "filePerBand": False,
         "format": "GeoTIFF",
     }
-    if params.crs:
-        download_params["crs"] = params.crs
-    download_params["noData"] = -32768
     url = image.getDownloadURL(download_params)
 
     with urlopen(url) as response:
@@ -232,6 +380,8 @@ def _download_image_to_path(
         else:
             with target.open("wb") as output:
                 shutil.copyfileobj(response, output)
+
+    _maybe_reproject_image(target, native_crs=native_crs, output_crs=params.crs)
     return ImageExportResult(path=target, task=task)
 
 
@@ -739,7 +889,7 @@ def _prepare_selected_period_artifacts(
             ndvi_mean_native,
             geometry,
             ndvi_path,
-            params=_DownloadParams(crs=DEFAULT_EXPORT_CRS, scale=DEFAULT_SCALE),
+            params=_DownloadParams(scale=DEFAULT_SCALE),
         )
         ndvi_path = mean_export.path
 
@@ -748,7 +898,7 @@ def _prepare_selected_period_artifacts(
             classified_image,
             geometry,
             classified_path,
-            params=_DownloadParams(crs=DEFAULT_EXPORT_CRS, scale=DEFAULT_SCALE),
+            params=_DownloadParams(scale=DEFAULT_SCALE),
         )
         classified_path = classified_export.path
 
