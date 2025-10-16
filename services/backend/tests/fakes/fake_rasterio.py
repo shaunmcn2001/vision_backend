@@ -43,11 +43,14 @@ class Dataset:
             )
             shape = (self._profile.count, self._profile.height, self._profile.width)
             self._data = np.zeros(shape, dtype=self._profile.dtype)
+            self._mask = np.full(shape, 255, dtype=np.uint8)
         elif mode == "r":
             payload = np.load(self.path, allow_pickle=True)
             data = payload["data"]
+            mask = payload["mask"] if "mask" in payload.files else np.full_like(data, 255, dtype=np.uint8)
             profile_dict = json.loads(payload["profile"].item())
             self._data = data
+            self._mask = mask
             transform_vals = profile_dict["transform"]
             transform = Affine(*transform_vals) if transform_vals else None
             self._profile = _Profile(
@@ -82,7 +85,7 @@ class Dataset:
                 "nodata": self._profile.nodata,
             }
             with self.path.open("wb") as fh:
-                np.savez(fh, data=self._data, profile=json.dumps(profile_dict))
+                np.savez(fh, data=self._data, mask=self._mask, profile=json.dumps(profile_dict))
         self._closed = True
 
     @property
@@ -125,17 +128,46 @@ class Dataset:
     def profile(self) -> Dict[str, Any]:
         return dict(self.profile_dict)
 
-    def read(self, index: int, masked: bool = False) -> np.ndarray:
-        data = np.array(self._data[index - 1], copy=True)
+    @property
+    def nodatavals(self) -> tuple[Any, ...]:
+        return tuple(self._profile.nodata for _ in range(self._profile.count))
+
+    def _slice_for_window(self, window: Any | None) -> tuple[slice, slice]:
+        if window is None:
+            return slice(None), slice(None)
+        row_off = int(getattr(window, "row_off", 0))
+        col_off = int(getattr(window, "col_off", 0))
+        height = int(getattr(window, "height", self._profile.height))
+        width = int(getattr(window, "width", self._profile.width))
+        return slice(row_off, row_off + height), slice(col_off, col_off + width)
+
+    def block_windows(self, index: int):  # type: ignore[override]
+        yield (0, 0), Window(0, 0, self._profile.width, self._profile.height)
+
+    def read(self, index: int, window: Any | None = None, masked: bool = False) -> np.ndarray:
+        row_slice, col_slice = self._slice_for_window(window)
+        data = np.array(self._data[index - 1, row_slice, col_slice], copy=True)
+        mask = np.array(self._mask[index - 1, row_slice, col_slice], copy=True)
         if masked:
-            mask = np.zeros_like(data, dtype=bool)
+            mask_bool = mask == 0
             if self._profile.nodata is not None:
-                mask |= data == self._profile.nodata
-            return np.ma.array(data, mask=mask)
+                mask_bool |= data == self._profile.nodata
+            return np.ma.array(data, mask=mask_bool)
         return data
 
     def write(self, array: np.ndarray, index: int) -> None:
         self._data[index - 1] = array
+
+    def write_mask(self, mask: np.ndarray) -> None:
+        if mask.ndim == 2:
+            expanded = np.broadcast_to(mask, (self._profile.count, *mask.shape))
+        else:
+            expanded = mask
+        self._mask[:] = expanded
+
+    def read_masks(self, index: int, window: Any | None = None) -> np.ndarray:
+        row_slice, col_slice = self._slice_for_window(window)
+        return np.array(self._mask[index - 1, row_slice, col_slice], copy=True)
 
 
 def open(path: str | Path, mode: str = "r", **kwargs: Any) -> Dataset:
