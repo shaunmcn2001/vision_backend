@@ -11,7 +11,7 @@ Outputs it enables:
 
 Design goals:
 - Light cloud mask (s2cloudless + minimal SCL masking)
-- Work at native S2 10 m during processing; export CRS default EPSG:4326
+- Work at native S2 10 m during processing; export CRS default EPSG:3857
 - Safe reducers (bestEffort + tileScale)
 - Self-contained (depends on `earthengine-api` only)
 """
