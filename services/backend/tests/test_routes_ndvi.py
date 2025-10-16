@@ -142,7 +142,7 @@ def _build_request(**overrides) -> routes.NDVIRequest:
     return routes.NDVIRequest(**payload)
 
 
-def test_generate_ndvi_uses_web_mercator_by_default(monkeypatch):
+def test_generate_ndvi_defaults_to_native_crs(monkeypatch):
     downloads: list[dict] = []
     _setup_fake_environment(monkeypatch, downloads)
 
@@ -150,7 +150,10 @@ def test_generate_ndvi_uses_web_mercator_by_default(monkeypatch):
     response = routes.generate_ndvi(request)
 
     assert response["mean_ndvi"]["url"].startswith("https://example.com/")
-    assert {entry["params"]["crs"] for entry in downloads} == {"EPSG:3857"}
+    assert downloads, "expected downloads to be recorded"
+    for entry in downloads:
+        assert "crs" not in entry["params"], entry
+        assert not entry["reproject_called"], entry
 
 
 def test_generate_ndvi_respects_export_crs_override(monkeypatch):
@@ -176,3 +179,18 @@ def test_generate_ndvi_reprojects_before_download(monkeypatch):
             crs == "EPSG:32632" and scale == pytest.approx(20.0)
             for crs, scale in record["reproject"]
         ), record
+
+
+def test_generate_ndvi_sets_finite_nodata(monkeypatch):
+    downloads: list[dict] = []
+    _setup_fake_environment(monkeypatch, downloads)
+
+    request = _build_request()
+    routes.generate_ndvi(request)
+
+    assert downloads, "expected downloads to be recorded"
+    for record in downloads:
+        options = record["params"].get("formatOptions")
+        assert options and "noData" in options, record
+        nodata = options["noData"]
+        assert nodata is not None and nodata == pytest.approx(-9999.0)
