@@ -2,6 +2,7 @@ import ee
 import pytest
 from shapely.geometry import Polygon, mapping
 
+from app import gee
 from app.services import zones_workflow
 from app.services.zones import _build_mean_ndvi_for_zones, _classify_smooth_and_polygonize
 
@@ -53,7 +54,7 @@ def test_mean_and_classes():
 def test_mean_masks_union_of_partial_months(monkeypatch):
     geom = _geom()
 
-    def _monthly_partial_masks(**kwargs):
+    def _monthly_partial_masks(geometry, month, cloud_prob_max=60, **kwargs):
         base = ee.Image.pixelLonLat()
         mask_left = base.select("longitude").lt(153.005)
         mask_right = base.select("longitude").gte(153.005)
@@ -69,7 +70,9 @@ def test_mean_masks_union_of_partial_months(monkeypatch):
             .updateMask(mask_right)
         )
 
-        return ee.ImageCollection([img_left, img_right])
+        collection = ee.ImageCollection([img_left, img_right])
+        composite = ee.Image.constant([0] * len(list(gee.S2_BANDS))).rename(list(gee.S2_BANDS))
+        return collection, composite
 
     monkeypatch.setattr(
         zones_workflow.gee, "monthly_sentinel2_collection", _monthly_partial_masks
