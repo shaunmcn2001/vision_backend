@@ -24,9 +24,9 @@ class NDVIRequest(BaseModel):
     method: str = "quantile"
     smooth_radius_m: int = 30
     mmu_pixels: int = 50
-    export_crs: str = Field(
-        "EPSG:3857",
-        description="CRS for GeoTIFF exports (default Web Mercator, EPSG:3857)",
+    export_crs: str | None = Field(
+        None,
+        description="CRS for GeoTIFF exports. Defaults to the native Sentinel-2 projection.",
     )
     export_scale: float = 10.0
 
@@ -49,7 +49,10 @@ def _prepare_image_for_download(
         except Exception:
             prepared = ee.Image(prepared)
 
-    return prepared.reproject(req.export_crs, None, req.export_scale)
+    if req.export_crs:
+        return prepared.reproject(req.export_crs, None, req.export_scale)
+
+    return prepared
 
 
 @router.post("/ndvi", summary="Generate NDVI artifacts and return download URLs")
@@ -89,11 +92,13 @@ def generate_ndvi(req: NDVIRequest) -> Dict[str, Any]:
             params = {
                 "name": name,
                 "region": aoi,
-                "crs": req.export_crs,
                 "scale": req.export_scale,
                 "filePerBand": False,
-                "format": "GEO_TIFF"
+                "format": "GEO_TIFF",
+                "formatOptions": {"noData": -9999.0},
             }
+            if req.export_crs:
+                params["crs"] = req.export_crs
             download_img = _prepare_image_for_download(img, req, native_reference=native_ref)
             url = download_img.getDownloadURL(params)
             return {"name": name, "url": url}
