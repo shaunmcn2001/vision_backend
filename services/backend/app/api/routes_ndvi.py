@@ -23,7 +23,10 @@ class NDVIRequest(BaseModel):
     method: str = "quantile"
     smooth_radius_m: int = 30
     mmu_pixels: int = 50
-    export_crs: str = "EPSG:4326"
+    export_crs: str = Field(
+        "EPSG:3857",
+        description="CRS for GeoTIFF exports (default Web Mercator, EPSG:3857)",
+    )
     export_scale: float = 10.0
 
 @router.post("/ndvi", summary="Generate NDVI artifacts and return download URLs")
