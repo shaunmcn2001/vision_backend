@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -40,15 +42,36 @@ def _setup_fake_environment(monkeypatch, downloads):
         def __init__(self, name: str, props: dict | None = None):
             self.name = name
             self.props = props or {}
+            self.reproject_history: list[tuple[str, float]] = []
+            self.reproject_called = False
 
         def get(self, key):
             return self.props.get(key)
 
         def getDownloadURL(self, params):
-            downloads.append(params)
+            downloads.append(
+                {
+                    "name": self.name,
+                    "params": params,
+                    "reproject": list(self.reproject_history),
+                    "reproject_called": self.reproject_called,
+                    "type": type(self).__name__,
+                }
+            )
             return f"https://example.com/{self.name}"
 
         def toInt(self):
+            return self
+
+        def toFloat(self):
+            return self
+
+        def resample(self, _method):
+            return self
+
+        def reproject(self, crs, _transform, scale):
+            self.reproject_history.append((crs, scale))
+            self.reproject_called = True
             return self
 
     class FakeList:
@@ -127,7 +150,7 @@ def test_generate_ndvi_uses_web_mercator_by_default(monkeypatch):
     response = routes.generate_ndvi(request)
 
     assert response["mean_ndvi"]["url"].startswith("https://example.com/")
-    assert {params["crs"] for params in downloads} == {"EPSG:3857"}
+    assert {entry["params"]["crs"] for entry in downloads} == {"EPSG:3857"}
 
 
 def test_generate_ndvi_respects_export_crs_override(monkeypatch):
@@ -137,4 +160,19 @@ def test_generate_ndvi_respects_export_crs_override(monkeypatch):
     request = _build_request(export_crs="EPSG:32632")
     routes.generate_ndvi(request)
 
-    assert {params["crs"] for params in downloads} == {"EPSG:32632"}
+    assert {entry["params"]["crs"] for entry in downloads} == {"EPSG:32632"}
+
+
+def test_generate_ndvi_reprojects_before_download(monkeypatch):
+    downloads: list[dict] = []
+    _setup_fake_environment(monkeypatch, downloads)
+
+    request = _build_request(export_crs="EPSG:32632", export_scale=20)
+    routes.generate_ndvi(request)
+
+    assert downloads, "expected downloads to be recorded"
+    for record in downloads:
+        assert any(
+            crs == "EPSG:32632" and scale == pytest.approx(20.0)
+            for crs, scale in record["reproject"]
+        ), record
