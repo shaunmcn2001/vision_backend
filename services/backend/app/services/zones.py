@@ -386,7 +386,9 @@ def _build_mean_ndvi_for_zones(
         return ndvi.updateMask(mask_1band)
 
     # Keep NDVI masked for stats (avoid unmask(0) before thresholds)
-    ndvi_mean = monthly.map(_ndvi).mean().rename("NDVI_mean").toFloat().clip(geom)
+    ndvi_mean = (
+        mean_from_collection_sum_count(monthly.map(_ndvi)).toFloat().clip(geom)
+    )
 
     # 3) Variation check → warn, don't raise
     try:
