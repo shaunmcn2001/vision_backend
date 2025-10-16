@@ -118,3 +118,82 @@ def test_download_helper_preserves_native_crs_and_nodata(monkeypatch, tmp_path):
         assert src.nodata is not None
         assert np.isfinite(src.nodata)
 
+
+def test_download_helper_rewrites_nonfinite_nodata(monkeypatch, tmp_path):
+    image_context: dict[str, object] = {}
+    image = fake_ee.FakeMeanImage(0.5, image_context)
+    image.toFloat = lambda: image  # type: ignore[attr-defined]
+
+    native_crs = "EPSG:4326"
+
+    class _FakeProjection:
+        def __init__(self, crs: str):
+            self._crs = crs
+
+        def crs(self):
+            return SimpleNamespace(getInfo=lambda: self._crs)
+
+        def getInfo(self):
+            return {"crs": self._crs}
+
+    image.projection = lambda: _FakeProjection(native_crs)  # type: ignore[attr-defined]
+
+    captured_download: dict[str, object] = {}
+
+    def _fake_get_download(params):
+        captured_download.update(params)
+        return "https://example.com/fake"
+
+    image.getDownloadURL = _fake_get_download  # type: ignore[attr-defined]
+
+    class _FakeTask:
+        def start(self):
+            return None
+
+    monkeypatch.setattr(
+        zones.ee,
+        "batch",
+        SimpleNamespace(Export=SimpleNamespace(image=SimpleNamespace(toDrive=lambda **_: _FakeTask()))),
+    )
+    monkeypatch.setattr(
+        zones.ee,
+        "Geometry",
+        type("_DummyGeometry", (), {"Polygon": staticmethod(lambda coords: coords)}),
+    )
+
+    source_path = tmp_path / "source_inf.tif"
+    with rasterio.open(
+        source_path,
+        "w",
+        driver="GTiff",
+        height=1,
+        width=1,
+        count=1,
+        dtype="float32",
+        crs=native_crs,
+        transform=from_origin(0, 1, 1, 1),
+        nodata=float("-inf"),
+    ) as dataset:
+        dataset.write(np.array([[-np.inf]], dtype=np.float32), 1)
+    geotiff_bytes = source_path.read_bytes()
+
+    monkeypatch.setattr(zones, "urlopen", lambda *args, **kwargs: _FakeResponse(geotiff_bytes))
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: _FakeResponse(geotiff_bytes))
+
+    output_path = tmp_path / "download_inf.tif"
+    result = zones._download_image_to_path(image, _FakeGeometry(), output_path)
+
+    assert result.path == output_path
+    assert "crs" not in captured_download
+
+    with rasterio.open(output_path) as src:
+        assert src.crs is not None
+        assert np.isfinite(src.nodata)
+        assert src.nodata == zones.DEFAULT_NODATA_VALUE
+        arr = src.read(1, masked=True)
+        assert np.ma.is_masked(arr)
+        assert bool(arr.mask[0, 0])
+        assert arr.data[0, 0] == zones.DEFAULT_NODATA_VALUE
+        raw = src.read(1, masked=False)
+        assert np.isfinite(raw).all()
+
