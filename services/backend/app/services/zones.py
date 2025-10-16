@@ -567,6 +567,13 @@ def _stream_zonal_stats(classified_path: Path, ndvi_path: Path) -> List[Dict[str
     with rasterio.open(classified_path) as csrc, rasterio.open(ndvi_path) as nsrc:
         assert csrc.width == nsrc.width and csrc.height == nsrc.height
         band = 1
+        nodata_value = None
+        try:
+            nodata_values = getattr(nsrc, "nodatavals", None)
+            if nodata_values:
+                nodata_value = nodata_values[band - 1]
+        except Exception:  # pragma: no cover - defensive; nodatavals can misbehave
+            nodata_value = None
         try:
             windows = list(csrc.block_windows(band))
         except Exception:
@@ -580,8 +587,14 @@ def _stream_zonal_stats(classified_path: Path, ndvi_path: Path) -> List[Dict[str
         pixel_area = abs(csrc.transform.a) * abs(csrc.transform.e)
         for _, window in windows:
             zones = csrc.read(band, window=window)
-            ndvi = nsrc.read(band, window=window, masked=True).filled(np.nan)
-            mask = (zones > 0) & np.isfinite(ndvi)
+            ndvi = nsrc.read(band, window=window).astype(np.float32, copy=False)
+            mask_values = nsrc.read_masks(band, window=window)
+            mask = zones > 0
+            if mask_values is not None:
+                mask &= mask_values.astype(bool)
+            mask &= np.isfinite(ndvi)
+            if nodata_value is not None and not np.isnan(nodata_value):
+                mask &= ndvi != float(nodata_value)
             if not np.any(mask):
                 continue
             zone_values = zones[mask].astype(np.int32, copy=False)
