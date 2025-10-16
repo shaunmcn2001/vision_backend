@@ -1,1 +1,1 @@
-POST /api/zones/ndvi — returns download URLs for monthly NDVI, mean NDVI, classified raster, and vectors.
+POST /api/zones/ndvi — returns download URLs for monthly NDVI, mean NDVI, classified raster, and vectors. GeoTIFF exports now default to Web Mercator (EPSG:3857); set `export_crs` if a different projection is required.
