@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 import csv
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -53,6 +54,8 @@ DEFAULT_NODATA_VALUE = -9999.0
 DEFAULT_MODE = "linear"           # "linear" | "quantile" | "auto"
 DEFAULT_NDVI_MIN = 0.35
 DEFAULT_NDVI_MAX = 0.73
+
+MIN_VALID_PIXEL_RATIO = 0.01
 
 ZONE_PALETTE: Tuple[str, ...] = (
     "#112f1d",
@@ -449,6 +452,67 @@ def _download_image_to_path(
         nodata_value=params.nodata_value,
     )
     return ImageExportResult(path=target, task=task)
+
+
+
+def _ensure_minimum_valid_pixels(
+    path: Path,
+    *,
+    label: str,
+    threshold: float = MIN_VALID_PIXEL_RATIO,
+) -> None:
+    if threshold <= 0:
+        return
+
+    with rasterio.open(path) as src:
+        band = src.read(1, masked=True)
+        data = np.asarray(band)
+        total_pixels = int(band.size)
+
+        if isinstance(band, np.ma.MaskedArray):
+            mask = np.array(band.mask, dtype=bool)
+            if mask.shape == ():
+                mask = np.full(data.shape, bool(mask))
+        else:
+            mask = np.zeros(data.shape, dtype=bool)
+
+        nodata_values: set[float] = set()
+        nodata = getattr(src, "nodata", None)
+        if nodata is not None:
+            try:
+                nodata_float = float(nodata)
+            except (TypeError, ValueError):
+                nodata_float = None
+            if nodata_float is not None and not math.isnan(nodata_float):
+                nodata_values.add(nodata_float)
+        nodatavals = getattr(src, "nodatavals", None)
+        if nodatavals:
+            for candidate in nodatavals:
+                if candidate is None:
+                    continue
+                try:
+                    candidate_float = float(candidate)
+                except (TypeError, ValueError):
+                    continue
+                if math.isnan(candidate_float):
+                    continue
+                nodata_values.add(candidate_float)
+
+        if nodata_values:
+            comparison = np.zeros(data.shape, dtype=bool)
+            for value in nodata_values:
+                comparison |= np.isclose(data, value)
+            mask |= comparison
+
+        invalid_pixels = int(np.count_nonzero(mask)) if total_pixels else total_pixels
+        valid_pixels = total_pixels - invalid_pixels
+        valid_ratio = (valid_pixels / total_pixels) if total_pixels else 0.0
+
+    if valid_ratio < threshold:
+        raise ValueError(
+            f"Downloaded {label} GeoTIFF contains fewer than {threshold:.1%} valid pixels. "
+            "Revisit the mask configuration or selected date range."
+        )
 
 
 
@@ -992,6 +1056,7 @@ def _prepare_selected_period_artifacts(
             ndvi_path,
             params=_DownloadParams(scale=DEFAULT_SCALE, nodata_value=DEFAULT_NODATA_VALUE),
         )
+        _ensure_minimum_valid_pixels(mean_export.path, label="NDVI mean")
         ndvi_path = mean_export.path
 
         classified_path = workdir / "zones.tif"
@@ -1001,6 +1066,7 @@ def _prepare_selected_period_artifacts(
             classified_path,
             params=_DownloadParams(scale=DEFAULT_SCALE, nodata_value=0),
         )
+        _ensure_minimum_valid_pixels(classified_export.path, label="classified zones")
         classified_path = classified_export.path
 
         # --- 6. Identify unique classes ---
