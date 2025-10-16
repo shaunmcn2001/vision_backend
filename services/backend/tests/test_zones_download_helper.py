@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import rasterio
 from rasterio.transform import from_origin
 
@@ -196,4 +197,29 @@ def test_download_helper_rewrites_nonfinite_nodata(monkeypatch, tmp_path):
         assert arr.data[0, 0] == zones.DEFAULT_NODATA_VALUE
         raw = src.read(1, masked=False)
         assert np.isfinite(raw).all()
+
+
+def test_valid_pixel_ratio_guard_raises_for_all_nodata(tmp_path):
+    nodata_value = -9999.0
+    raster_path = tmp_path / "all_nodata.tif"
+
+    with rasterio.open(
+        raster_path,
+        "w",
+        driver="GTiff",
+        height=5,
+        width=5,
+        count=1,
+        dtype="float32",
+        transform=from_origin(0, 0, 10, 10),
+        nodata=nodata_value,
+    ) as dataset:
+        dataset.write(np.full((1, 5, 5), nodata_value, dtype=np.float32), 1)
+
+    with pytest.raises(ValueError) as exc:
+        zones._ensure_minimum_valid_pixels(raster_path, label="NDVI mean")
+
+    message = str(exc.value)
+    assert "fewer than" in message
+    assert "Revisit the mask" in message
 
