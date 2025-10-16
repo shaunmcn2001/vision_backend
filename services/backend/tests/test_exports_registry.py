@@ -104,6 +104,8 @@ def _create_zone_artifacts(workdir: Path) -> zones.ZoneArtifacts:
     workdir.mkdir(parents=True, exist_ok=True)
 
     mean_ndvi_path = workdir / "NDVI_mean.tif"
+    default_crs = zones.DEFAULT_EXPORT_CRS or "EPSG:3857"
+
     with rasterio.open(
         mean_ndvi_path,
         "w",
@@ -112,7 +114,7 @@ def _create_zone_artifacts(workdir: Path) -> zones.ZoneArtifacts:
         width=1,
         count=1,
         dtype="float32",
-        crs=zones.DEFAULT_EXPORT_CRS,
+        crs=default_crs,
         transform=from_origin(0, 10, zones.DEFAULT_SCALE, zones.DEFAULT_SCALE),
         nodata=-9999.0,
     ) as dst:
@@ -127,7 +129,7 @@ def _create_zone_artifacts(workdir: Path) -> zones.ZoneArtifacts:
         width=1,
         count=1,
         dtype="uint8",
-        crs=zones.DEFAULT_EXPORT_CRS,
+        crs=default_crs,
         transform=from_origin(0, 10, zones.DEFAULT_SCALE, zones.DEFAULT_SCALE),
         nodata=0,
     ) as dst:
@@ -560,6 +562,8 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
     def _write_artifacts(workdir: Path) -> zones.ZoneArtifacts:
         workdir.mkdir(parents=True, exist_ok=True)
         mean_ndvi_path = workdir / "NDVI_mean.tif"
+        default_crs = zones.DEFAULT_EXPORT_CRS or "EPSG:3857"
+
         with rasterio.open(
             mean_ndvi_path,
             "w",
@@ -568,7 +572,7 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
             width=1,
             count=1,
             dtype="float32",
-            crs=zones.DEFAULT_EXPORT_CRS,
+            crs=default_crs,
             transform=from_origin(0, 10, zones.DEFAULT_SCALE, zones.DEFAULT_SCALE),
             nodata=-9999.0,
         ) as dst:
@@ -583,7 +587,7 @@ def test_zone_artifacts_use_raw_geojson_for_mmu(tmp_path, monkeypatch):
             width=1,
             count=1,
             dtype="uint8",
-            crs=zones.DEFAULT_EXPORT_CRS,
+            crs=default_crs,
             transform=from_origin(0, 10, zones.DEFAULT_SCALE, zones.DEFAULT_SCALE),
             nodata=0,
         ) as dst:
