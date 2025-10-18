@@ -11,6 +11,7 @@ from app.api.routes import router as api_router
 from app.api.fields import router as fields_router
 from app.api.fields_upload import router as fields_upload_router
 from app.api.tiles import router as tiles_router
+from app.api.ui import router as ui_router
 from app.api.s2_indices import router as s2_indices_router
 from app.api.zones import router as zones_router
 from app.api.products import router as products_router
@@ -1433,3 +1434,8 @@ app.include_router(export_shapefile_router)
 
 # NDVI endpoint (this is the correct include)
 app.include_router(ndvi_router)
+
+# Simple template loader
+import jinja2
+templates_loader = jinja2.FileSystemLoader(str((Path(__file__).parent / "templates").resolve()))
+app.state.templates_env = jinja2.Environment(loader=templates_loader, autoescape=True)
