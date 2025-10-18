@@ -13,6 +13,7 @@ from app.api.fields_upload import router as fields_upload_router
 from app.api.tiles import router as tiles_router
 from app.api.s2_indices import router as s2_indices_router
 from app.api.zones import router as zones_router
+from app.api.products import router as products_router
 
 # NDVI router (keep this import)
 from app.api.routes_ndvi import router as ndvi_router
