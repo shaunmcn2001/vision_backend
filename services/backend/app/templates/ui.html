@@ -1,0 +1,105 @@
+
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Vision Backend – Exports</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 24px; }
+    fieldset { margin-bottom: 16px; }
+    label { display: block; margin: 8px 0 4px; }
+    input[type=text], input[type=date], select, textarea { width: 480px; padding: 6px; }
+    .row { display: flex; gap: 24px; align-items: flex-start; }
+    .col { flex: 1; min-width: 320px; }
+    .status { margin-top: 16px; padding: 12px; background: #f7f7f7; border-radius: 8px; }
+    .small { color: #666; font-size: 12px; }
+    code { background: #eee; padding: 2px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Vision Exports</h1>
+  <form id="exportForm">
+    <fieldset>
+      <legend>Product</legend>
+      <label>Choose:</label>
+      <select name="product" id="product">
+        <option>NDVI Month</option>
+        <option>Imagery</option>
+        <option>Basic NDVI Zones</option>
+      </select>
+    </fieldset>
+
+    <div class="row">
+      <div class="col">
+        <fieldset>
+          <legend>AOI</legend>
+          <label>Paddock Shapefile (.zip):</label>
+          <input type="file" name="shp_zip" accept=".zip"/>
+          <div class="small">Alternatively paste AOI GeoJSON below.</div>
+          <label>AOI GeoJSON (Feature/FeatureCollection/Polygon):</label>
+          <textarea name="aoi_geojson" rows="6" placeholder='{"type":"Polygon","coordinates":[...]}''></textarea>
+          <label>Paddock Name (for Drive folders):</label>
+          <input type="text" name="paddock_name" placeholder="paddock_na_1"/>
+        </fieldset>
+      </div>
+      <div class="col">
+        <fieldset>
+          <legend>Dates</legend>
+          <label>Start</label>
+          <input type="date" name="start" required/>
+          <label>End</label>
+          <input type="date" name="end" required/>
+        </fieldset>
+      </div>
+    </div>
+
+    <button type="submit">Run export</button>
+  </form>
+
+  <div id="result" class="status" style="display:none"></div>
+
+  <script>
+    const form = document.getElementById('exportForm');
+    const result = document.getElementById('result');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      result.style.display = 'block';
+      result.textContent = 'Submitting...';
+
+      const fd = new FormData(form);
+      const resp = await fetch('/ui/run', { method: 'POST', body: fd });
+      const data = await resp.json();
+      result.innerHTML = '<pre>'+JSON.stringify(data, null, 2)+'</pre>';
+
+      // If export tasks present, poll status
+      if (data.export_tasks) {
+        const keys = Object.keys(data.export_tasks);
+        const statuses = {};
+        const render = () => {
+          let html = '<h3>Export Tasks</h3><ul>';
+          for (const k of keys) {
+            const t = statuses[k] || {};
+            html += `<li><b>${k}</b>: ${t.state || 'PENDING'} (${data.export_tasks[k].name})</li>`;
+          }
+          html += '</ul>';
+          result.innerHTML = '<pre>'+JSON.stringify(data, null, 2)+'</pre>' + html;
+        };
+        render();
+        const timer = setInterval(async () => {
+          let allDone = true;
+          for (const k of keys) {
+            const tid = data.export_tasks[k].task_id;
+            const s = await fetch('/api/export_status?task_id='+encodeURIComponent(tid));
+            const sj = await s.json();
+            statuses[k] = sj;
+            if (!['COMPLETED','FAILED','CANCELLED'].includes(sj.state)) allDone = false;
+          }
+          render();
+          if (allDone) clearInterval(timer);
+        }, 5000);
+      }
+    });
+  </script>
+</body>
+</html>
