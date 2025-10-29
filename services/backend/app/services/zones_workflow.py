@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 import ee
 
-from app.services.earth_engine import ensure_ee, to_ee_geometry
+from app.services.earth_engine import ensure_ee, to_geometry
 
 S2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
 CLOUD_CLASSES = [3, 8, 9, 10, 11]
@@ -85,7 +85,7 @@ def _empty_image(geometry: ee.Geometry, band_name: str) -> ee.Image:
 
 
 def monthly_ndvi(aoi: Mapping[str, Any], start: date, end: date) -> ee.ImageCollection:
-    geometry = to_ee_geometry(aoi)
+    geometry = to_geometry(aoi)
     windows = _month_windows(start, end)
     images: List[ee.Image] = []
 
@@ -112,7 +112,7 @@ def monthly_ndvi(aoi: Mapping[str, Any], start: date, end: date) -> ee.ImageColl
 
 
 def mean_ndvi(aoi: Mapping[str, Any], start: date, end: date) -> ee.Image:
-    geometry = to_ee_geometry(aoi)
+    geometry = to_geometry(aoi)
     exclusive_end = end + timedelta(days=1)
     collection = _sentinel2_collection(geometry, start, exclusive_end).map(_ndvi)
     return ee.Image(
@@ -140,7 +140,7 @@ def classify_zones(
     if method == "fixed" and (not fixed_breaks or len(fixed_breaks) != n_classes - 1):
         raise ValueError("fixed_breaks must provide n_classes - 1 thresholds")
 
-    geometry = to_ee_geometry(aoi)
+    geometry = to_geometry(aoi)
     band_image = image.select(band).clip(geometry)
     if smooth_radius_m > 0:
         band_image = band_image.focal_median(smooth_radius_m, "circle", "meters")
@@ -183,7 +183,7 @@ def vectorize_zones(
     simplify_tolerance_m: float = 0,
     eight_connected: bool = True,
 ) -> ee.FeatureCollection:
-    geometry = to_ee_geometry(aoi)
+    geometry = to_geometry(aoi)
     label_image = classes_img.rename("zone").toInt().clip(geometry)
     vectors = label_image.reduceToVectors(
         geometry=geometry,
@@ -252,7 +252,7 @@ def zone_statistics(
     band: str = "NDVI",
     class_values: Sequence[int] = (1, 2, 3, 4, 5),
 ) -> ee.FeatureCollection:
-    geometry = to_ee_geometry(aoi)
+    geometry = to_geometry(aoi)
     zone_band = classes_img.rename("zone").toInt()
 
     reducer = (
@@ -378,4 +378,3 @@ __all__ = [
     "_ndre",
     "_sentinel2_collection",
 ]
-

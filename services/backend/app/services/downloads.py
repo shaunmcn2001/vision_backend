@@ -8,7 +8,7 @@ from typing import Mapping
 import ee
 
 from app.config import get_settings
-from app.services.earth_engine import to_ee_geometry
+from app.services.earth_engine import to_geometry
 
 
 class DownloadTooLargeError(ValueError):
@@ -16,7 +16,7 @@ class DownloadTooLargeError(ValueError):
 
 
 def _prepare_region(aoi: Mapping[str, object], buffer_m: float = 0) -> ee.Geometry:
-    geometry = to_ee_geometry(aoi)
+    geometry = to_geometry(aoi)
     if buffer_m:
         geometry = geometry.buffer(buffer_m)
     return geometry

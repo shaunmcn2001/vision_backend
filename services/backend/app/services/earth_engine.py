@@ -68,9 +68,13 @@ def ensure_ee() -> None:
         _EE_INITIALISED = True
 
 
-def to_geometry(geometry: Mapping[str, Any]) -> ee.Geometry:
+def to_ee_geometry(geometry: Mapping[str, Any]) -> ee.Geometry:
     """Convert GeoJSON-like mapping into an ee.Geometry."""
     try:
         return ee.Geometry(geometry)
     except ee.EEException as exc:  # pragma: no cover - direct EE exception
         raise ValueError("Invalid AOI geometry") from exc
+
+
+# Backwards compatibility for older imports
+to_geometry = to_ee_geometry
