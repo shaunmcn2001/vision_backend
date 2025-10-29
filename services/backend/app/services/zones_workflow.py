@@ -1,300 +1,381 @@
-"""
-zones_workflow.py
------------------
-Drop-in NDVI workflows for your backend:
-
-Outputs it enables:
-  1) Raster NDVI for **each month** in a selected date range
-  2) Raster NDVI **mean** over the whole selected period
-  3) **Classified** NDVI zones raster (default 5 quantile zones)
-  4) **Vector** polygons of the zones
-
-Design goals:
-- Light cloud mask (s2cloudless + minimal SCL masking)
-- Work at native S2 10 m during processing; export CRS default EPSG:3857
-- Safe reducers (bestEffort + tileScale)
-- Self-contained (depends on `earthengine-api` only)
-"""
+"""Core NDVI and zoning workflows built on Earth Engine."""
 
 from __future__ import annotations
 
-from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Sequence
+from datetime import date, timedelta
+from typing import Any, Dict, List, Mapping, Sequence
 
 import ee
 
-from app import gee
-from app.services.ndvi_shared import reproject_native_10m
+from app.services.earth_engine import ensure_ee, to_ee_geometry
 
-# -----------------------------
-# EE Init
-# -----------------------------
-
-def init_ee(project: Optional[str] = None) -> None:
-    if project:
-        ee.Initialize(project=project)
-    else:
-        ee.Initialize()
-
-# -----------------------------
-# Helpers
-# -----------------------------
-
-def to_ndvi(img: ee.Image) -> ee.Image:
-    """Compute NDVI for Sentinel-2 SR."""
-    return img.normalizedDifference(['B8', 'B4']).rename('NDVI')
+S2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
+CLOUD_CLASSES = [3, 8, 9, 10, 11]
+DEFAULT_SCALE = 10
+NDVI_VIS = {
+    "min": 0.0,
+    "max": 1.0,
+    "palette": ["440154", "3b528b", "21918c", "5ec962", "fde725"],
+}
+ZONES_VIS = {
+    "min": 1,
+    "max": 5,
+    "palette": ["440154", "30678d", "35b779", "fde725", "f4f18f"],
+}
 
 
-def _s2cloudless(aoi: ee.Geometry, start: str, end: str) -> ee.ImageCollection:
-    return (ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
-            .filterBounds(aoi)
-            .filterDate(start, end))
+def _mask_sentinel2(image: ee.Image) -> ee.Image:
+    scl = image.select("SCL")
+    mask = ee.Image(1)
+    for cls in CLOUD_CLASSES:
+        mask = mask.And(scl.neq(cls))
+    return image.updateMask(mask).copyProperties(image, ["system:time_start"])
 
 
-def _s2_sr(aoi: ee.Geometry, start: str, end: str) -> ee.ImageCollection:
-    return (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-            .filterBounds(aoi)
-            .filterDate(start, end)
-            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 80)))
-
-
-def _light_cloud_mask(s2: ee.Image, cloudprob: ee.Image,
-                      cloud_prob_max: int = 40,
-                      mask_scl_shadow_snow: bool = True) -> ee.Image:
-    prob = cloudprob.select('probability').lte(cloud_prob_max)
-    scl = s2.select('SCL')
-    if mask_scl_shadow_snow:
-        not_shadow = scl.neq(3)   # Shadow
-        not_snow   = scl.neq(11)  # Snow
-        mask = prob.And(not_shadow).And(not_snow)
-    else:
-        mask = prob
-    qa60 = s2.select('QA60')
-    not_saturated = qa60.bitwiseAnd(1 << 1).eq(0)
-    not_nodata    = qa60.bitwiseAnd(1 << 0).eq(0)
-    return s2.updateMask(mask.And(not_saturated).And(not_nodata))
-
-
-def get_s2_sr_collection(aoi: ee.Geometry, start: str, end: str,
-                         cloud_prob_max: int = 40,
-                         mask_scl_shadow_snow: bool = True) -> ee.ImageCollection:
-    s2 = _s2_sr(aoi, start, end)
-    s2c = _s2cloudless(aoi, start, end)
-
-    # Join by closest time (maxDifference) to ensure a cloudprob match
-    time_join = ee.Filter.maxDifference(
-        difference=1000 * 60 * 60,  # 1 hour
-        leftField='system:time_start',
-        rightField='system:time_start'
+def _sentinel2_collection(
+    geometry: ee.Geometry, start: date, end: date
+) -> ee.ImageCollection:
+    ensure_ee()
+    return (
+        ee.ImageCollection(S2_COLLECTION)
+        .filterDate(start.isoformat(), end.isoformat())
+        .filterBounds(geometry)
+        .map(_mask_sentinel2)
     )
-    save = ee.Join.saveBest('cloudprob', time_join)
-    joined = ee.ImageCollection(save.apply(s2, s2c))
-
-    def attach_and_mask(img):
-        cp = ee.Image(img.get('cloudprob'))
-        return to_ndvi(_light_cloud_mask(img, cp, cloud_prob_max, mask_scl_shadow_snow))
-
-    return joined.map(attach_and_mask)
 
 
-def monthly_ndvi_mean(collection: ee.ImageCollection) -> ee.ImageCollection:
-    """Monthly mean NDVI composites from an NDVI-bearing collection."""
-    def with_tags(img):
-        date = ee.Date(img.get('system:time_start'))
-        return img.set({'year': date.get('year'), 'month': date.get('month')})
-
-    tagged = collection.map(with_tags)
-    years = ee.List(ee.Dictionary(tagged.aggregate_histogram('year')).keys().sort())
-    months = ee.List.sequence(1, 12)
-
-    def ym_to_img(y):
-        y = ee.Number(y)
-        def m_to_img(m):
-            m = ee.Number(m)
-            subset = tagged.filter(ee.Filter.And(ee.Filter.eq('year', y), ee.Filter.eq('month', m)))
-            comp = subset.select('NDVI').mean().rename('NDVI')
-            date = ee.Date.fromYMD(y, m, 1)
-            return comp.set({'year': y, 'month': m, 'system:time_start': date.millis()})
-        return ee.ImageCollection(months.map(m_to_img))
-
-    return ee.ImageCollection(years.map(ym_to_img)).flatten()
+def _ndvi(image: ee.Image) -> ee.Image:
+    red = image.select("B4").multiply(0.0001)
+    nir = image.select("B8").multiply(0.0001)
+    ndvi = nir.subtract(red).divide(nir.add(red)).rename("NDVI")
+    return ndvi.copyProperties(image, ["system:time_start"])
 
 
-def long_term_mean_ndvi(
-    aoi: ee.Geometry,
-    start: date | datetime | str,
-    end: date | datetime | str,
+def _osavi(image: ee.Image) -> ee.Image:
+    red = image.select("B4").multiply(0.0001)
+    nir = image.select("B8").multiply(0.0001)
+    osavi = nir.subtract(red).divide(nir.add(red).add(0.16)).rename("OSAVI")
+    return osavi.copyProperties(image, ["system:time_start"])
+
+
+def _ndre(image: ee.Image) -> ee.Image:
+    red_edge = image.select("B5").multiply(0.0001)
+    nir = image.select("B8").multiply(0.0001)
+    ndre = nir.subtract(red_edge).divide(nir.add(red_edge)).rename("NDRE")
+    return ndre.copyProperties(image, ["system:time_start"])
+
+
+def _month_windows(start: date, end: date) -> List[tuple[date, date]]:
+    windows: List[tuple[date, date]] = []
+    cursor = start.replace(day=1)
+    last = end.replace(day=1)
+    while cursor <= last:
+        next_month_year = cursor.year + (1 if cursor.month == 12 else 0)
+        next_month_month = 1 if cursor.month == 12 else cursor.month + 1
+        next_month = date(next_month_year, next_month_month, 1)
+        window_start = cursor if cursor >= start else start
+        window_end = min(next_month, end + timedelta(days=1))
+        windows.append((window_start, window_end))
+        cursor = next_month
+    return windows
+
+
+def _empty_image(geometry: ee.Geometry, band_name: str) -> ee.Image:
+    return ee.Image.constant(0).rename(band_name).clip(geometry)
+
+
+def monthly_ndvi(aoi: Mapping[str, Any], start: date, end: date) -> ee.ImageCollection:
+    geometry = to_ee_geometry(aoi)
+    windows = _month_windows(start, end)
+    images: List[ee.Image] = []
+
+    for window_start, window_end in windows:
+        collection = _sentinel2_collection(geometry, window_start, window_end).map(_ndvi)
+        month_image = ee.Image(
+            ee.Algorithms.If(
+                collection.size().eq(0),
+                _empty_image(geometry, "NDVI"),
+                collection.mean().rename("NDVI").clip(geometry),
+            )
+        )
+        first_day = window_start
+        month_image = ee.Image(month_image).set(
+            {
+                "year": first_day.year,
+                "month": first_day.month,
+                "label": f"ndvi_{first_day.strftime('%Y-%m')}",
+            }
+        )
+        images.append(ee.Image(month_image))
+
+    return ee.ImageCollection(images)
+
+
+def mean_ndvi(aoi: Mapping[str, Any], start: date, end: date) -> ee.Image:
+    geometry = to_ee_geometry(aoi)
+    exclusive_end = end + timedelta(days=1)
+    collection = _sentinel2_collection(geometry, start, exclusive_end).map(_ndvi)
+    return ee.Image(
+        ee.Algorithms.If(
+            collection.size().eq(0),
+            _empty_image(geometry, "NDVI"),
+            collection.mean().rename("NDVI").clip(geometry),
+        )
+    )
+
+
+def classify_zones(
+    image: ee.Image,
+    aoi: Mapping[str, Any],
     *,
-    months: Sequence[str] | None = None,
-    cloud_prob_max: int = 40,
-) -> ee.Image:
-    """Compute the long-term mean NDVI at native 10 m resolution."""
+    method: str = "quantile",
+    fixed_breaks: Sequence[float] | None = None,
+    smooth_radius_m: float = 0,
+    mmu_pixels: int = 0,
+    band: str = "NDVI",
+    n_classes: int = 5,
+) -> Dict[str, Any]:
+    if method not in ("quantile", "fixed"):
+        raise ValueError("method must be 'quantile' or 'fixed'")
+    if method == "fixed" and (not fixed_breaks or len(fixed_breaks) != n_classes - 1):
+        raise ValueError("fixed_breaks must provide n_classes - 1 thresholds")
 
-    def _iso(value: date | datetime | str) -> str:
-        if isinstance(value, datetime):
-            return value.date().isoformat()
-        if isinstance(value, date):
-            return value.isoformat()
-        return str(value)
+    geometry = to_ee_geometry(aoi)
+    band_image = image.select(band).clip(geometry)
+    if smooth_radius_m > 0:
+        band_image = band_image.focal_median(smooth_radius_m, "circle", "meters")
 
-    start_iso = _iso(start)
-    end_iso = _iso(end)
-
-    monthly = gee.monthly_sentinel2_collection(
-        aoi=aoi,
-        start=start_iso,
-        end=end_iso,
-        months=months,
-        cloud_prob_max=cloud_prob_max,
-    )
-
-    try:
-        count = int(ee.Number(monthly.size()).getInfo() or 0)
-    except Exception:
-        count = 0
-    if count == 0:
-        raise ValueError("No Sentinel-2 imagery found for the requested period.")
-
-    def _ndvi(image: ee.Image) -> ee.Image:
-        img = ee.Image(image)
-        band_names = ee.List(img.bandNames())
-        has_precomputed = ee.Number(band_names.indexOf("NDVI_mean")).gte(0)
-        precomputed = ee.Image(
-            ee.Algorithms.If(
-                has_precomputed,
-                img.select("NDVI_mean").rename("NDVI"),
-                ee.Image(0).updateMask(ee.Image(0)).rename("NDVI"),
-            )
+    scale = DEFAULT_SCALE
+    if method == "quantile":
+        percentiles = [int(i * 100 / n_classes) for i in range(1, n_classes)]
+        output_names = [f"p{p}" for p in percentiles]
+        reducer = ee.Reducer.percentile(percentiles, outputNames=output_names)
+        stats = band_image.reduceRegion(
+            reducer=reducer,
+            geometry=geometry,
+            scale=scale,
+            bestEffort=True,
+            maxPixels=1e13,
         )
-        has_b4 = ee.Number(band_names.indexOf("B4")).gte(0)
-        has_b8 = ee.Number(band_names.indexOf("B8")).gte(0)
-        both = ee.Number(has_b4).multiply(ee.Number(has_b8)).eq(1)
-
-        empty = ee.Image(0).updateMask(ee.Image(0)).rename("NDVI")
-        ndvi = ee.Image(
-            ee.Algorithms.If(
-                has_precomputed,
-                precomputed,
-                ee.Algorithms.If(
-                    both,
-                    img.toFloat().normalizedDifference(["B8", "B4"]).rename("NDVI"),
-                    empty,
-                ),
-            )
-        )
-
-        mask = img.select("B8").mask().multiply(img.select("B4").mask()).gt(0)
-        return ndvi.updateMask(mask)
-
-    ndvi_collection = monthly.map(_ndvi)
-    ndvi_mean = ee.Image(ndvi_collection.mean()).rename("NDVI").toFloat()
-    ndvi_mean = ndvi_mean.set({
-        "period_start": start_iso,
-        "period_end": end_iso,
-    })
-
-    try:
-        std_dict = ee.Dictionary(
-            ndvi_mean.reduceRegion(
-                reducer=ee.Reducer.stdDev(),
-                geometry=aoi,
-                scale=10,
-                bestEffort=True,
-                maxPixels=1e9,
-            )
-        )
-        std_val = ee.Number(
-            ee.Algorithms.If(
-                std_dict.size(),
-                std_dict.values().get(0),
-                0,
-            )
-        ).getInfo()
-    except Exception:
-        std_val = 0.0
-
-    if std_val is None:
-        std_val = 0.0
-
-    low_variation = float(std_val) < 1e-3
-    ndvi_mean = ndvi_mean.set({
-        "ndvi_stdDev": float(std_val),
-        "ndvi_low_variation": low_variation,
-    })
-
-    first_image = ee.Image(monthly.first())
-    ndvi_native = ee.Algorithms.If(
-        first_image,
-        reproject_native_10m(ndvi_mean, first_image, ref_band="B8", scale=10),
-        ndvi_mean,
-    )
-
-    props = ee.Dictionary(ndvi_mean.toDictionary())
-    return ee.Image(ndvi_native).rename("NDVI").toFloat().clip(aoi).set(props)
-
-
-def classify_zones(ndvi_img: ee.Image,
-                   aoi: ee.Geometry,
-                   n_zones: int = 5,
-                   method: str = 'quantile',
-                   smooth_radius_m: int = 30,
-                   mmu_pixels: int = 50) -> Dict[str, Any]:
-    nd = ndvi_img.select('NDVI').clip(aoi)
-    if method.lower() == 'quantile':
-        pct = [100 * i / n_zones for i in range(1, n_zones)]  # e.g., [20,40,60,80]
-        stats = nd.reduceRegion(
-            reducer=ee.Reducer.percentile(pct),
-            geometry=aoi, scale=10, maxPixels=1e13, bestEffort=True, tileScale=4
-        )
-        breaks = ee.List([stats.get(f'NDVI_p{int(p)}') for p in pct])
+        thresholds = [ee.Number(stats.get(name)) for name in output_names]
     else:
-        mnmx = nd.reduceRegion(ee.Reducer.minMax(), aoi, 10, maxPixels=1e13, bestEffort=True, tileScale=4)
-        mn = ee.Number(mnmx.get('NDVI_min'))
-        mx = ee.Number(mnmx.get('NDVI_max'))
-        step = mx.subtract(mn).divide(n_zones)
-        breaks = ee.List([mn.add(step.multiply(i)) for i in range(1, n_zones)])
+        thresholds = [ee.Number(v) for v in fixed_breaks or []]
 
-    def bin_classify(img, brks):
-        b0 = ee.Number(brks.get(0))
-        b1 = ee.Number(brks.get(1))
-        b2 = ee.Number(brks.get(2))
-        b3 = ee.Number(brks.get(3)) if n_zones >= 5 else ee.Number(1e9)
-        z1 = img.lt(b0)
-        z2 = img.gte(b0).And(img.lt(b1))
-        z3 = img.gte(b1).And(img.lt(b2))
-        z4 = img.gte(b2).And(img.lt(b3))
-        z5 = img.gte(b3)
-        return (z1.multiply(1)  # 1..5
-                .add(z2.multiply(2))
-                .add(z3.multiply(3))
-                .add(z4.multiply(4))
-                .add(z5.multiply(5))).rename('ZONE')
+    if len(thresholds) != n_classes - 1:
+        raise ValueError("Unable to compute thresholds for classification.")
 
-    classified = bin_classify(nd, breaks)
+    classes = ee.Image.constant(1)
+    for idx, threshold in enumerate(thresholds, start=2):
+        classes = classes.where(band_image.gte(threshold), idx)
 
-    # Smooth + MMU
-    if smooth_radius_m and smooth_radius_m > 0:
-        radius_px = ee.Number(smooth_radius_m).divide(10.0)
-        kernel = ee.Kernel.circle(radius_px, 'pixels', True)
-        classified = classified.focal_mode(kernel=kernel, iterations=1)
+    classes = classes.rename("zone").toInt().clip(geometry)
+    if mmu_pixels > 0:
+        connected = classes.connectedPixelCount(8, True)
+        classes = classes.updateMask(connected.gte(mmu_pixels))
 
-    if mmu_pixels and mmu_pixels > 0:
-        # GEE limit: maxSize<=1024
-        cpc = classified.connectedPixelCount(maxSize=1024, eightConnected=True)
-        classified = classified.updateMask(cpc.gte(mmu_pixels))
-
-    return {'classified': classified, 'breaks': breaks}
+    return {"classes": classes, "thresholds": thresholds, "method": method}
 
 
-def vectorize_zones(classified: ee.Image,
-                    aoi: ee.Geometry,
-                    simplify_tolerance_m: float = 0.0) -> ee.FeatureCollection:
-    zones = (classified.rename('ZONE')
-             .clip(aoi)
-             .reduceToVectors(geometry=aoi, scale=10, geometryType='polygon',
-                              labelProperty='ZONE', maxPixels=1e13,
-                              eightConnected=True, tileScale=4))
-    fc = ee.FeatureCollection(zones)
-    if simplify_tolerance_m and simplify_tolerance_m > 0:
-        fc = fc.map(lambda f: f.setGeometry(f.geometry().simplify(simplify_tolerance_m)))
-    return fc
+def vectorize_zones(
+    classes_img: ee.Image,
+    aoi: Mapping[str, Any],
+    *,
+    simplify_tolerance_m: float = 0,
+    eight_connected: bool = True,
+) -> ee.FeatureCollection:
+    geometry = to_ee_geometry(aoi)
+    label_image = classes_img.rename("zone").toInt().clip(geometry)
+    vectors = label_image.reduceToVectors(
+        geometry=geometry,
+        scale=DEFAULT_SCALE,
+        maxPixels=1e13,
+        geometryType="polygon",
+        labelProperty="zone",
+        eightConnected=eight_connected,
+    )
+
+    def _post_process(feature: ee.Feature) -> ee.Feature:
+        zone = ee.Number(feature.get("zone")).toInt()
+        geom = feature.geometry()
+        if simplify_tolerance_m > 0:
+            geom = geom.simplify(simplify_tolerance_m)
+        area_ha = geom.area(maxError=1).divide(10_000)
+        return (
+            ee.Feature(geom)
+            .set("zone", zone)
+            .set("areaHa", area_ha)
+            .copyProperties(feature, exclude=["system:index"])
+        )
+
+    return ee.FeatureCollection(vectors.map(_post_process))
+
+
+def dissolve_by_class(
+    feature_collection: ee.FeatureCollection, property_name: str = "zone"
+) -> ee.FeatureCollection:
+    classes = ee.Dictionary(
+        feature_collection.aggregate_histogram(property_name)
+    ).keys()
+
+    def _dissolve(value: Any) -> ee.Feature:
+        zone_value = ee.Number.parse(value)
+        geom = (
+            feature_collection.filter(
+                ee.Filter.eq(property_name, zone_value)
+            ).geometry(maxError=1)
+        ).dissolve()
+        area_ha = geom.area(maxError=1).divide(10_000)
+        return ee.Feature(geom).set(property_name, zone_value).set("areaHa", area_ha)
+
+    return ee.FeatureCollection(ee.List(classes).map(_dissolve))
+
+
+def _band_stat_keys(band: str) -> Dict[str, str]:
+    return {
+        "mean": f"{band}_mean",
+        "median": f"{band}_median",
+        "min": f"{band}_min",
+        "max": f"{band}_max",
+        "stdDev": f"{band}_stdDev",
+        "p10": f"{band}_percentile_10",
+        "p25": f"{band}_percentile_25",
+        "p75": f"{band}_percentile_75",
+        "p90": f"{band}_percentile_90",
+    }
+
+
+def zone_statistics(
+    image: ee.Image,
+    classes_img: ee.Image,
+    aoi: Mapping[str, Any],
+    *,
+    band: str = "NDVI",
+    class_values: Sequence[int] = (1, 2, 3, 4, 5),
+) -> ee.FeatureCollection:
+    geometry = to_ee_geometry(aoi)
+    zone_band = classes_img.rename("zone").toInt()
+
+    reducer = (
+        ee.Reducer.mean()
+        .combine(ee.Reducer.median(), sharedInputs=True)
+        .combine(ee.Reducer.min(), sharedInputs=True)
+        .combine(ee.Reducer.max(), sharedInputs=True)
+        .combine(ee.Reducer.stdDev(), sharedInputs=True)
+        .combine(ee.Reducer.percentile([10, 25, 75, 90]), sharedInputs=True)
+    )
+    mapping = _band_stat_keys(band)
+
+    def _zone_feature(value: Any) -> ee.Feature:
+        zone_value = ee.Number(value)
+        mask = zone_band.eq(zone_value).rename("mask")
+        masked = image.select(band).updateMask(mask)
+
+        stats = masked.reduceRegion(
+            reducer=reducer,
+            geometry=geometry,
+            scale=DEFAULT_SCALE,
+            bestEffort=True,
+            maxPixels=1e13,
+        )
+        pixel_count = mask.reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=geometry,
+            scale=DEFAULT_SCALE,
+            bestEffort=True,
+            maxPixels=1e13,
+        ).get("mask")
+        area = (
+            ee.Image.pixelArea()
+            .updateMask(mask)
+            .reduceRegion(
+                reducer=ee.Reducer.sum(),
+                geometry=geometry,
+                scale=DEFAULT_SCALE,
+                bestEffort=True,
+                maxPixels=1e13,
+            )
+            .get("area")
+        )
+
+        properties = {
+            "zone": zone_value,
+            "pixelCount": ee.Number(pixel_count).toInt(),
+            "areaHa": ee.Number(area).divide(10_000),
+        }
+        for prop, key in mapping.items():
+            properties[prop] = stats.get(key)
+        return ee.Feature(None, properties)
+
+    features = ee.FeatureCollection(
+        ee.List(list(class_values)).map(_zone_feature)
+    ).filter(ee.Filter.gt("pixelCount", 0))
+    return features
+
+
+def dissolved_zone_statistics(
+    image: ee.Image,
+    classes_img: ee.Image,
+    dissolved_fc: ee.FeatureCollection,
+    *,
+    band: str = "NDVI",
+    class_property: str = "zone",
+) -> ee.FeatureCollection:
+    mapping = _band_stat_keys(band)
+
+    def _stats(feature: ee.Feature) -> ee.Feature:
+        zone_value = ee.Number(feature.get(class_property))
+        geom = feature.geometry()
+        mask = classes_img.eq(zone_value).rename("mask")
+        masked = image.select(band).updateMask(mask)
+        stats = masked.reduceRegion(
+            reducer=(
+                ee.Reducer.mean()
+                .combine(ee.Reducer.median(), sharedInputs=True)
+                .combine(ee.Reducer.min(), sharedInputs=True)
+                .combine(ee.Reducer.max(), sharedInputs=True)
+                .combine(ee.Reducer.stdDev(), sharedInputs=True)
+                .combine(ee.Reducer.percentile([10, 25, 75, 90]), sharedInputs=True)
+            ),
+            geometry=geom,
+            scale=DEFAULT_SCALE,
+            bestEffort=True,
+            maxPixels=1e13,
+        )
+        pixel_count = mask.reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=geom,
+            scale=DEFAULT_SCALE,
+            bestEffort=True,
+            maxPixels=1e13,
+        ).get("mask")
+        area_ha = geom.area(maxError=1).divide(10_000)
+        properties = {
+            class_property: zone_value,
+            "pixelCount": ee.Number(pixel_count).toInt(),
+            "areaHa": area_ha,
+        }
+        for prop, key in mapping.items():
+            properties[prop] = stats.get(key)
+        return feature.set(properties)
+
+    return ee.FeatureCollection(dissolved_fc.map(_stats)).filter(
+        ee.Filter.gt("pixelCount", 0)
+    )
+
+
+__all__ = [
+    "monthly_ndvi",
+    "mean_ndvi",
+    "classify_zones",
+    "vectorize_zones",
+    "dissolve_by_class",
+    "zone_statistics",
+    "dissolved_zone_statistics",
+    "NDVI_VIS",
+    "ZONES_VIS",
+    "_ndvi",
+    "_osavi",
+    "_ndre",
+    "_sentinel2_collection",
+]
+

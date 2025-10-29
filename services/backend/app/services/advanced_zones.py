@@ -1,94 +1,149 @@
-
 from __future__ import annotations
-from typing import Any, Dict, List, Tuple
+
+from dataclasses import dataclass
+from datetime import date, timedelta
+from typing import List, Optional, Sequence, Tuple
+
 import ee
 
-def _mask_s2(img: ee.Image) -> ee.Image:
-    scl = img.select('SCL')
-    good = scl.neq(3).And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10)).And(scl.neq(11))
-    return img.updateMask(good)
+from .earth_engine import ensure_ee
+from .zones_workflow import classify_zones, vectorize_zones
 
-def _add_indices(img: ee.Image) -> ee.Image:
-    ndvi = img.normalizedDifference(['B8','B4']).rename('NDVI')
-    ndre = img.normalizedDifference(['B8','B5']).rename('NDRE')
-    osavi = img.expression('((N-R)/(N+R+0.16))*1.16', {'N': img.select('B8'), 'R': img.select('B4')}).rename('OSAVI')
-    return img.addBands([ndvi, ndre, osavi])
+S2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
+DEFAULT_SCALE = 10
+_CLOUD_CLASSES = (3, 8, 9, 10, 11)
+_STAGE_WEIGHTS = {"early": 0.25, "production": 0.5, "late": 0.25}
 
-def _s2(geom, start, end):
-    return (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-            .filterBounds(geom).filterDate(start, end)
-            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 50))
-            .map(_mask_s2).map(_add_indices))
 
-def _gauss(img: ee.Image, sigma_m: int = 20) -> ee.Image:
-    if sigma_m is None or sigma_m <= 0:
-        return img
-    k = ee.Kernel.gaussian(radius=sigma_m*3, sigma=sigma_m, units='meters', normalize=True)
-    return img.convolve(k)
+@dataclass(frozen=True)
+class SeasonDefinition:
+    sowing_date: date
+    harvest_date: date
 
-def _robust_z(img: ee.Image, geom, band: str) -> ee.Image:
-    b = img.select(band)
-    p = b.reduceRegion(ee.Reducer.percentile([25,50,75]), geom, 10, maxPixels=1e13, bestEffort=True)
-    med = ee.Number(p.get(band + "_p50"))
-    p25 = ee.Number(p.get(band + "_p25"))
-    p75 = ee.Number(p.get(band + "_p75"))
-    iqr = p75.subtract(p25)
-    sd = iqr.divide(1.349)
-    med_img = ee.Image.constant(ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(med, None), 0, med)))
-    sd_img = ee.Image.constant(ee.Number(ee.Algorithms.If(ee.Algorithms.IsEqual(sd, None), 0.1, ee.Algorithms.If(sd.abs().gt(1e-6), sd, 0.1))))
-    return b.subtract(med_img).divide(sd_img).rename('z')
 
-def _stage_mean(geom, start, end, band: str, blur_m: int = 20) -> ee.Image:
-    mean = _s2(geom, start, end).select(band).mean().clip(geom)
-    return _gauss(mean, blur_m).rename(band)
+@dataclass(frozen=True)
+class AdvancedZonesResult:
+    composite: ee.Image
+    zones_raster: ee.Image
+    raw_zones: ee.FeatureCollection
+    dissolved_zones: ee.FeatureCollection
 
-def compute_advanced_layers(aoi_geom: ee.Geometry, seasons: List[Dict[str, Any]], breaks: List[float]):
-    # Build per-season composites
-    season_imgs = []
-    for row in seasons:
-        crop = (row.get('crop') or '').lower()
-        sow = row.get('sowing_date')
-        har = row.get('harvest_date')
-        # Safe dates
-        if not sow or not har:
+
+def _mask_clouds(image: ee.Image) -> ee.Image:
+    scl = image.select("SCL")
+    mask = ee.Image(1)
+    for cls in _CLOUD_CLASSES:
+        mask = mask.And(scl.neq(cls))
+    return image.updateMask(mask)
+
+
+def _collection(aoi: ee.Geometry, start: date, end: date) -> ee.ImageCollection:
+    ensure_ee()
+    return (
+        ee.ImageCollection(S2_COLLECTION)
+        .filterBounds(aoi)
+        .filterDate(start.isoformat(), (end + timedelta(days=1)).isoformat())
+        .map(_mask_clouds)
+    )
+
+
+def _index_image(image: ee.Image, index: str) -> ee.Image:
+    if index == "OSAVI":
+        expr = "(nir - red) / (nir + red + 0.16)"
+        return image.expression(expr, {"nir": image.select("B8"), "red": image.select("B4")}).rename("index")
+    if index == "NDVI":
+        return image.normalizedDifference(["B8", "B4"]).rename("index")
+    if index == "NDRE":
+        return image.normalizedDifference(["B8", "B5"]).rename("index")
+    raise ValueError(f"Unsupported index: {index}")
+
+
+def _mean_index(aoi: ee.Geometry, start: date, end: date, index: str) -> Optional[ee.Image]:
+    if end <= start:
+        end = start + timedelta(days=1)
+    collection = _collection(aoi, start, end)
+    if collection.size().getInfo() == 0:
+        return None
+    return collection.map(lambda img: _index_image(img, index)).mean().clip(aoi).rename("index")
+
+
+def _robust_zscore(image: ee.Image, aoi: ee.Geometry) -> Optional[ee.Image]:
+    reducer = ee.Reducer.median().combine(ee.Reducer.percentile([25, 75]), sharedInputs=True)
+    stats = image.reduceRegion(
+        reducer=reducer,
+        geometry=aoi,
+        scale=DEFAULT_SCALE,
+        bestEffort=True,
+        maxPixels=1e13,
+        tileScale=4,
+    )
+    median = stats.get("index_median")
+    p25 = stats.get("index_p25")
+    p75 = stats.get("index_p75")
+    if any(v is None for v in (median, p25, p75)):
+        return None
+    median_val = ee.Number(median)
+    sigma = ee.Number(p75).subtract(ee.Number(p25)).divide(1.349).max(1e-6)
+    return image.subtract(median_val).divide(sigma)
+
+
+def _season_stages(season: SeasonDefinition) -> List[Tuple[str, date, date, str]]:
+    sow = season.sowing_date
+    harvest = season.harvest_date
+    early_end = sow + timedelta(days=40)
+    late_start = harvest - timedelta(days=30)
+    return [
+        ("early", sow, early_end, "OSAVI"),
+        ("production", max(early_end, sow), min(late_start, harvest), "NDVI"),
+        ("late", late_start, harvest, "NDRE"),
+    ]
+
+
+def _season_score(aoi: ee.Geometry, season: SeasonDefinition) -> Optional[ee.Image]:
+    layers: List[Tuple[ee.Image, float]] = []
+    for stage, start, end, index in _season_stages(season):
+        image = _mean_index(aoi, start, end, index)
+        if image is None:
             continue
-        sow_d = ee.Date.parse('YYYY-MM-dd', sow) if '-' in sow else ee.Date.parse('dd/MM/yyyy', sow)
-        har_d = ee.Date.parse('YYYY-MM-dd', har) if '-' in har else ee.Date.parse('dd/MM/yyyy', har)
-        # Windows (defaults)
-        E = 40; L = 30
-        earlyStart = sow_d; earlyEnd = sow_d.advance(E, 'day')
-        lateEnd = har_d; lateStart = har_d.advance(-L, 'day')
-        prodStart = earlyEnd; prodEnd = lateStart
-        # Sanity order
-        prodEnd = ee.Date(ee.Algorithms.If(prodEnd.millis().lt(prodStart.millis()), prodStart, prodEnd))
-        lateStart = ee.Date(ee.Algorithms.If(lateStart.millis().lt(prodEnd.millis()), prodEnd, lateStart))
-        # Means
-        mE = _stage_mean(aoi_geom, earlyStart, earlyEnd, 'OSAVI')
-        mP = _stage_mean(aoi_geom, prodStart,  prodEnd,  'NDVI')
-        mL = _stage_mean(aoi_geom, lateStart,  lateEnd,  'NDRE')
-        # z
-        zE = _robust_z(mE, aoi_geom, 'OSAVI')
-        zP = _robust_z(mP, aoi_geom, 'NDVI')
-        zL = _robust_z(mL, aoi_geom, 'NDRE')
-        # weights (simple default)
-        comp = zE.multiply(ee.Image.constant(0.25)).add(zP.multiply(ee.Image.constant(0.5))).add(zL.multiply(ee.Image.constant(0.25)))
-        season_imgs.append(comp.rename('c'))
-    if not season_imgs:
-        raise ee.EEException("No valid season rows.")
-    coll = ee.ImageCollection(season_imgs)
-    lt_comp = coll.median().rename('c').clip(aoi_geom)
+        blurred = image.focal_gaussian(20, units="meters")
+        zscore = _robust_zscore(blurred, aoi)
+        if zscore is None:
+            continue
+        layers.append((zscore.rename("score"), _STAGE_WEIGHTS[stage]))
+    if not layers:
+        return None
+    total_weight = sum(weight for _, weight in layers)
+    weighted = layers[0][0].multiply(layers[0][1])
+    for image, weight in layers[1:]:
+        weighted = weighted.add(image.multiply(weight))
+    return weighted.divide(total_weight).rename("score").clip(aoi)
 
-    # classify with fixed breaks -> 5 classes
-    b1, b2, b3, b4 = [ee.Number(x) for x in breaks]
-    c = lt_comp.select('c')
-    zones = (c.where(c.lte(b1), 1)
-               .where(c.gt(b1).And(c.lte(b2)), 2)
-               .where(c.gt(b2).And(c.lte(b3)), 3)
-               .where(c.gt(b3).And(c.lte(b4)), 4)
-               .where(c.gt(b4), 5)
-               .rename('zone').toInt())
 
-    vectors = (zones.rename('ZONE')
-               .reduceToVectors(geometry=aoi_geom, scale=10, geometryType='polygon',
-                                labelProperty='ZONE', maxPixels=1e13, eightConnected=True, tileScale=4))
-    return lt_comp, zones, ee.FeatureCollection(vectors)
+def compute_advanced_layers(
+    aoi: ee.Geometry,
+    seasons: Sequence[SeasonDefinition],
+    breaks: Sequence[float],
+) -> AdvancedZonesResult:
+    if len(breaks) != 4:
+        raise ValueError("Advanced zones require exactly four break thresholds")
+    season_scores = [score for season in seasons if (score := _season_score(aoi, season)) is not None]
+    if not season_scores:
+        raise ValueError("No advanced zone layers could be generated for the supplied seasons.")
+    long_term = ee.ImageCollection(season_scores).median().rename("score")
+    zones_raster = classify_zones(long_term, aoi, method="fixed", fixed_breaks=list(breaks), band="score")
+    raw_vectors = vectorize_zones(zones_raster, aoi, connectivity=8)
+    classes = ee.List(raw_vectors.aggregate_array("zone").distinct())
+
+    def _dissolve(zone_value):
+        subset = raw_vectors.filter(ee.Filter.eq("zone", zone_value))
+        geom = subset.geometry()
+        area = geom.area(1.0).divide(10_000)
+        return ee.Feature(geom, {"zone": zone_value, "areaHa": area})
+
+    dissolved = ee.FeatureCollection(classes.map(_dissolve))
+    return AdvancedZonesResult(
+        composite=long_term,
+        zones_raster=zones_raster,
+        raw_zones=raw_vectors,
+        dissolved_zones=dissolved,
+    )

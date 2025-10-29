@@ -1,246 +1,98 @@
-# Vision Backend (Template)
+# Vision
 
-A Cloud Run–ready FastAPI backend template for NDVI/indices via Google Earth Engine.
+Vision delivers Earth Engine–powered NDVI products through a FastAPI backend and a modern Vite + React dashboard. The service focuses on browser-first delivery: every export is exposed via direct Earth Engine download URLs (GeoTIFF, SHP, CSV) with no Google Drive or Cloud Storage staging.
 
-## Dependencies
+## Project layout
 
-Install the backend requirements to pull in third-party services, including the real ``rasterio`` distribution used by
-the zone-classification pipeline::
-
-    pip install -r services/backend/requirements.txt
-
-## NDVI monthly endpoint
-
-The `/api/ndvi/monthly` route computes monthly NDVI statistics for a supplied GeoJSON geometry
-and date range. When the `collection` field is omitted it now defaults to the harmonized Sentinel-2
-surface reflectance dataset `COPERNICUS/S2_SR_HARMONIZED`, aligning with the rest of the
-application.
-
-Example request payload:
-
-```json
-{
-  "geometry": {"type": "Point", "coordinates": [0, 0]},
-  "start": "2023-01-01",
-  "end": "2023-12-31"
-}
+```
+services/backend/    FastAPI application (Python 3.11)
+frontend/            Vite + React + Tailwind + shadcn/ui interface
 ```
 
-This payload succeeds without specifying `collection` or `scale`, relying on the defaults.
+## Environment & configuration
 
+Set the following environment variables before running the backend:
 
-## Sentinel-2 index exports
-
-The backend exposes an asynchronous workflow for exporting Sentinel-2 monthly
-composites and derived indices as GeoTIFFs. Exports are initiated with a POST
-request to `/export/s2/indices` with the following JSON payload:
-
-```json
-{
-  "aoi_geojson": {"type": "Polygon", "coordinates": [[[149.7, -28.8], [149.8, -28.8], [149.8, -28.7], [149.7, -28.7], [149.7, -28.8]]]},
-  "months": ["2024-06", "2024-07"],
-  "indices": ["NDVI", "NDRE", "NDMI"],
-  "export_target": "zip",
-  "aoi_name": "Lot1_RP12345",
-  "scale_m": 10,
-  "cloud_prob_max": 40
-}
+```
+GCP_PROJECT=baradine-farm
+GCP_REGION=australia-southeast1
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/ee-service-account.json
+CORS_ORIGINS=https://your-frontend.example.com
 ```
 
-Supplying a `production_zones` object enables the optional zone export pipeline.
-When any zone options are provided the feature is automatically activated, so the
-following payload will compute five production classes using the supplied
-minimum mapping unit:
+The service account must be enabled for Google Earth Engine. All exports are streamed via Earth Engine `getDownloadURL` calls and are capped by `MAX_PIXELS_FOR_DIRECT` (default `3e7`).
 
-```json
-{
-  "production_zones": {
-    "n_classes": 5,
-    "mmu_ha": 3
-  }
-}
-```
-
-Explicitly set `"enabled": false` within the object to opt out while still
-including option overrides.
-
-Supported `export_target` values:
-
-* `zip`: downloads are retrieved from `GET /export/s2/indices/{job_id}/download`
-  as a single ZIP archive.
-* `gcs`: results are written to the bucket defined by `GEE_GCS_BUCKET`
-  (fallback: `GCS_BUCKET`). Each item contains a signed URL when the task
-  completes.
-* `drive`: assets are exported to Google Drive. The status endpoint returns the
-  Drive URLs reported by Earth Engine once the tasks complete.
-
-The export workflow returns a job identifier immediately:
+## Backend setup
 
 ```bash
-curl -X POST http://localhost:8000/export/s2/indices \
-  -H "Content-Type: application/json" \
-  -d @payload.json
+python -m venv .venv
+source .venv/bin/activate
+pip install -r services/backend/requirements.txt
+cd services/backend
+uvicorn app.main:app --reload
 ```
 
-Responses:
+### Key endpoints
 
-* `POST /export/s2/indices` → `{ "job_id": "...", "state": "running" }`
-* `GET  /export/s2/indices/{job_id}/status` → JSON with per-file progress,
-  destination URIs and signed URLs when available.
-* `GET  /export/s2/indices/{job_id}/download` → ZIP stream when
-  `export_target=zip`, or the same JSON status document for Drive/GCS jobs.
+- `POST /api/ndvi-month` – monthly NDVI composites and a mean preview tile.
+- `POST /api/imagery/daily` – daily Sentinel-2 RGB mosaics with `cloudPct` analytics.
+- `POST /api/zones/basic` – five-class NDVI quantile zones with GeoTIFF/SHP/CSV downloads.
+- `POST /api/zones/advanced` – stage-aware long-term zones with raster/vector/stat CSVs.
+- `POST /api/tiles/session` + `GET /api/tiles/{token}/{z}/{x}/{y}` – tile session utilities used by the UI.
 
-### `/zones/production` – production zone exports
-
-Use `POST /zones/production` to build NDVI-based production zones for a period
-of months. The endpoint accepts either an explicit `months[]` array or a
-`start_month`/`end_month` range which is expanded server-side:
-
-*Explicit month selection*
+Example NDVI Month request:
 
 ```bash
-curl -X POST http://localhost:8000/api/zones/production \
+curl -X POST http://localhost:8000/api/ndvi-month \
   -H "Content-Type: application/json" \
   -d '{
-        "aoi_geojson": {"type": "Polygon", "coordinates": [[[149.7, -28.8], [149.8, -28.8], [149.8, -28.7], [149.7, -28.7], [149.7, -28.8]]]},
-        "aoi_name": "Lot1_RP12345",
-        "months": ["2024-03", "2024-04", "2024-05"],
-        "n_classes": 5,
-        "cv_mask_threshold": 0.25,
-        "mmu_ha": 3,
-        "smooth_radius_m": 15,
-        "open_radius_m": 10,
-        "close_radius_m": 10,
-        "simplify_tol_m": 5,
-        "simplify_buffer_m": 0,
-        "export_target": "zip"
+        "aoi": {"type": "Polygon", "coordinates": [[[149.5,-31.1],[149.6,-31.1],[149.6,-31.0],[149.5,-31.0],[149.5,-31.1]]]},
+        "start": "2024-05-01",
+        "end": "2024-08-31",
+        "clamp": [0,1]
       }'
 ```
 
-*Month range expansion*
+Each product response returns tile tokens for map previews and direct download URLs for rasters, vectors, and CSV summaries when applicable. Oversized AOIs trigger HTTP 400 with guidance to reduce the extent/date range.
+
+## Frontend setup
 
 ```bash
-curl -X POST http://localhost:8000/api/zones/production \
-  -H "Content-Type: application/json" \
-  -d '{
-        "aoi_geojson": {"type": "Polygon", "coordinates": [[[149.7, -28.8], [149.8, -28.8], [149.8, -28.7], [149.7, -28.7], [149.7, -28.8]]]},
-        "aoi_name": "Lot1_RP12345",
-        "start_month": "2024-01",
-        "end_month": "2024-04",
-        "smooth_radius_m": 15,
-        "open_radius_m": 10,
-        "close_radius_m": 10,
-        "simplify_tol_m": 5,
-        "simplify_buffer_m": 0,
-        "export_target": "gcs",
-        "gcs_bucket": "zones-bucket",
-        "gcs_prefix": "clients/demo"
-      }'
+cd frontend
+npm install
+VITE_API_BASE_URL=http://localhost:8000 npm run dev
 ```
 
-When targeting Google Cloud Storage or Drive the endpoint requires the
-destination details (`gcs_bucket` for `gcs`, an optional `gcs_prefix`, and Drive
-will reuse the configured `GEE_DRIVE_FOLDER`).
+Set `VITE_API_BASE_URL` to the backend origin for local development. The UI provides:
 
-The response summarises the generated artefacts and stability analysis:
+- Product cards for NDVI Month, Daily Imagery, Basic NDVI Zones, and Advanced Zones.
+- AOI input via shapefile ZIP upload or GeoJSON paste.
+- Date range selection, clamp controls, bands selection, and season CSV ingestion.
+- MapLibre map with AOI outlines and tile overlays.
+- Results panel with per-day imagery summaries and download link listings.
 
-```json
-{
-  "ok": true,
-  "ym_start": "2024-03",
-  "ym_end": "2024-05",
-  "paths": {
-    "raster": "zones/PROD_202403_202405_Lot1_RP12345_zones.tif",
-    "vectors": "zones/PROD_202403_202405_Lot1_RP12345_zones.shp",
-    "vector_components": {
-      "shp": "zones/PROD_202403_202405_Lot1_RP12345_zones.shp",
-      "shx": "zones/PROD_202403_202405_Lot1_RP12345_zones.shx",
-      "dbf": "zones/PROD_202403_202405_Lot1_RP12345_zones.dbf",
-      "cpg": "zones/PROD_202403_202405_Lot1_RP12345_zones.cpg",
-      "prj": "zones/PROD_202403_202405_Lot1_RP12345_zones.prj"
-    },
-    "zonal_stats": "zones/PROD_202403_202405_Lot1_RP12345_zones_zonal_stats.csv"
-  },
-  "tasks": {
-    "raster": {"id": "task_r", "state": "READY", "destination_uri": "gs://zones/demo.tif"},
-    "vectors": {"id": "task_v", "state": "READY", "destination_uri": "gs://zones/demo.shp"}
-  },
-  "metadata": {
-    "used_months": ["2024-03", "2024-04", "2024-05"],
-    "skipped_months": ["2024-04"],
-    "stability": {
-      "initial_threshold": 0.25,
-      "final_threshold": 0.6,
-      "survival_ratio": 0.34,
-      "surviving_pixels": 14250,
-      "total_pixels": 42000,
-      "low_confidence": false
-    }
-  },
-  "debug": {
-    "requested_months": ["2024-03", "2024-04", "2024-05"],
-    "used_months": ["2024-03", "2024-05"],
-    "skipped_months": ["2024-04"],
-    "retry_thresholds": [0.25, 0.5, 0.6],
-    "stability": {
-      "thresholds_tested": [0.25, 0.5, 0.6, 0.8],
-      "survival_ratios": [0.12, 0.22, 0.34, 0.38],
-      "target_ratio": 0.2,
-      "low_confidence": false
-    }
-  },
-  "bucket": "zones-bucket",
-  "prefix": "clients/demo/zones/PROD_202403_202405_Lot1_RP12345_zones"
-}
+## Testing
+
+Backend tests:
+
+```bash
+cd services/backend
+pytest
 ```
 
-The `debug` block mirrors the metadata exposed by the service and includes the
-stability-mask retry thresholds and per-iteration survival ratios. When the
-system has to relax the stability threshold to satisfy the minimum survival
-ratio (`target_ratio`) the `low_confidence` flag is set; operators should treat
-those exports as less reliable and consider collecting additional observations
-for the period.
+Frontend tests:
 
-### Export package layout
-
-All exports are staged under `OUTPUT_DIR/<job_id>` locally before being zipped
-or uploaded. Production zone jobs create a `zones/` directory with the raster,
-vector, and statistics artefacts. A representative archive looks like:
-
-```
-OUTPUT_DIR/
-└── job-12345/
-    ├── metadata.json
-    ├── zones/
-    │   ├── PROD_202403_202405_Lot1_RP12345_zones.tif
-    │   ├── PROD_202403_202405_Lot1_RP12345_zones.shp
-    │   ├── PROD_202403_202405_Lot1_RP12345_zones.shx
-    │   ├── PROD_202403_202405_Lot1_RP12345_zones.dbf
-    │   ├── PROD_202403_202405_Lot1_RP12345_zones.cpg
-    │   ├── PROD_202403_202405_Lot1_RP12345_zones.prj
-    │   └── PROD_202403_202405_Lot1_RP12345_zones_zonal_stats.csv  # present when include_zonal_stats=true
-    └── zones_metadata.json
+```bash
+cd frontend
+npm test
 ```
 
-The PRJ file declares EPSG:4326 for compatibility with desktop GIS clients, and
-the CSV contains optional zonal statistics (one row per zone with temporal NDVI
-metrics). When `export_target=zip` the ZIP root will mirror this folder tree;
-cloud targets write the same files to the destination bucket or Drive folder
-using the `prefix` from the API response.
+## Deployment notes
 
-### Environment variables
+- **Backend (Render/Cloud Run):** Supply the Earth Engine service account JSON via secret volume or environment file and expose HTTP on port `8000`.
+- **Frontend (Render static site / Netlify / Vercel):** Build with `npm run build` and serve `/dist`. Configure `VITE_API_BASE` or rely on same origin with a reverse proxy.
+- Ensure public endpoints are protected (API keys, gateway) before exposing beyond trusted clients.
 
-* `GEE_SERVICE_ACCOUNT_JSON` – **required**. Either the raw JSON credentials,
-  a base64-encoded JSON string, or a path to a JSON file for the Google Earth
-  Engine service account. When unset the application falls back to
-  `GOOGLE_APPLICATION_CREDENTIALS`.
-* `GEE_GCS_BUCKET` – optional bucket name for Cloud Storage exports. Falls back
-  to `GCS_BUCKET` when present.
-* `GEE_DRIVE_FOLDER` – optional Google Drive folder name for Drive exports. The
-  default folder is `Sentinel2_Indices`.
+## Direct download behaviour
 
-Earth Engine is initialised on application startup using the credentials from
-`GEE_SERVICE_ACCOUNT_JSON`. Missing or invalid credentials will be logged but do
-not prevent the API from starting, which is useful for local development.
-
- 
+All exports rely on Earth Engine direct download URLs (`Image.getDownloadURL`, `FeatureCollection.getDownloadURL`). Downloads are initiated in the browser and never staged in Google Drive or GCS. Large AOIs beyond the configured pixel guard are rejected early with an actionable error.
