@@ -10,6 +10,8 @@ from uuid import uuid4
 import ee
 import requests
 
+from fastapi import HTTPException
+
 from app.config import get_settings
 from app.services.earth_engine import ensure_ee
 
@@ -97,3 +99,15 @@ def fetch_tile_png(session: TileSession, z: int, x: int, y: int) -> bytes:
     response.raise_for_status()
     return response.content
 
+
+def fetch_tile_bytes(token: str, z: int, x: int, y: int) -> tuple[bytes, str]:
+    """Resolve a session and fetch tile bytes for proxying."""
+    session = resolve_session(token)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Tile session not found or expired.")
+    try:
+        data = fetch_tile_png(session, z, x, y)
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 502
+        raise HTTPException(status_code=status, detail=f"Earth Engine tile fetch failed: {exc}") from exc
+    return data, "image/png"

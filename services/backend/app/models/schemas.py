@@ -22,7 +22,7 @@ class TileResponse(CamelModel):
     url_template: str = Field(alias="urlTemplate")
     min_zoom: int = Field(alias="minZoom")
     max_zoom: int = Field(alias="maxZoom")
-    expires_at: str = Field(alias="expiresAt")
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")
 
 
 class NDVIMonthRequest(CamelModel):
@@ -153,10 +153,33 @@ class AdvancedDownloads(CamelModel):
 
 
 class AdvancedPreview(CamelModel):
-    composite: TileResponse
-    zones: TileResponse
+    composite: TileWrapper
+    zones: TileWrapper
 
 
 class AdvancedZonesResponse(CamelModel):
     preview: AdvancedPreview
     downloads: AdvancedDownloads
+
+
+class TileSessionRequest(CamelModel):
+    image: str
+    vis_params: Optional[Dict[str, Any]] = Field(default=None, alias="visParams")
+    min_zoom: int = Field(default=6, alias="minZoom")
+    max_zoom: int = Field(default=18, alias="maxZoom")
+
+    @field_validator("max_zoom")
+    @classmethod
+    def _max_not_less_than_min(cls, value: int, info: Dict[str, Any]) -> int:
+        min_zoom = info.data.get("min_zoom")
+        if min_zoom is not None and value < min_zoom:
+            raise ValueError("max_zoom must be greater than or equal to min_zoom")
+        return value
+
+
+class TileSessionResponse(CamelModel):
+    token: str
+    url_template: str = Field(alias="urlTemplate")
+    min_zoom: int = Field(alias="minZoom")
+    max_zoom: int = Field(alias="maxZoom")
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")

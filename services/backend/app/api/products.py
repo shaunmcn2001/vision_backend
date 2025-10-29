@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Mapping
 
 import ee
 from fastapi import APIRouter, HTTPException
@@ -46,9 +46,58 @@ from app.services.zones_workflow import (
     zone_statistics,
 )
 
-router = APIRouter()
+router = APIRouter(prefix="/api", tags=["products"])
 
 RGB_BANDS = ["B4", "B3", "B2"]
+to_geometry = to_ee_geometry  # Backwards compatibility for older imports
+_NOOP_REDUCER: object = object()
+
+
+def _mean_reducer() -> object:
+    try:
+        return ee.Reducer.mean()
+    except Exception:  # pragma: no cover - EE not initialised in tests
+        return _NOOP_REDUCER
+
+
+def _class_stats_fc(
+    mean_image,
+    classes_img,
+    aoi,
+    *,
+    class_values,
+) -> object:
+    return zone_statistics(
+        mean_image,
+        classes_img,
+        aoi,
+        class_values=class_values,
+    )
+
+
+def _attach_stats(
+    composite_img,
+    zones_img,
+    aoi,
+    *,
+    dissolved_vectors,
+    band: str,
+    class_values,
+) -> dict[str, object]:
+    raw_stats = zone_statistics(
+        composite_img,
+        zones_img,
+        aoi,
+        band=band,
+        class_values=class_values,
+    )
+    dissolved_stats = dissolved_zone_statistics(
+        composite_img,
+        zones_img,
+        dissolved_vectors,
+        band=band,
+    )
+    return {"raw": raw_stats, "dissolved": dissolved_stats}
 
 
 def _month_sequence(start: date, end: date) -> List[date]:
@@ -67,6 +116,7 @@ def _tile_response(tile: Dict[str, object]) -> TileResponse:
     return TileResponse.parse_obj(tile)
 
 
+@router.post("/ndvi/month", response_model=NDVIMonthResponse)
 @router.post("/products/ndvi-month", response_model=NDVIMonthResponse)
 def ndvi_month(request: NDVIMonthRequest) -> NDVIMonthResponse:
     if request.end < request.start:
@@ -107,6 +157,7 @@ def _iterate_days(start: date, end: date) -> Iterable[date]:
         cursor += timedelta(days=1)
 
 
+@router.post("/imagery/daily", response_model=ImageryDailyResponse)
 @router.post("/products/imagery/daily", response_model=ImageryDailyResponse)
 def imagery_daily(request: ImageryDailyRequest) -> ImageryDailyResponse:
     if request.end < request.start:
@@ -114,16 +165,14 @@ def imagery_daily(request: ImageryDailyRequest) -> ImageryDailyResponse:
 
     ensure_ee()
     bands = request.bands or RGB_BANDS
-    geometry = to_ee_geometry(request.aoi)
+    geometry = to_geometry(request.aoi)
     days: List[ImageryDayItem] = []
     cloud_values: List[float] = []
 
     for day in _iterate_days(request.start, request.end):
-        day_start = ee.Date(day.isoformat())
-        day_end = ee.Date((day + timedelta(days=1)).isoformat())
         collection = (
             ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-            .filterDate(day_start, day_end)
+            .filterDate(day.isoformat(), (day + timedelta(days=1)).isoformat())
             .filterBounds(geometry)
         )
         size = collection.size().getInfo()
@@ -146,7 +195,7 @@ def imagery_daily(request: ImageryDailyRequest) -> ImageryDailyResponse:
                 .Or(scl.eq(11))
             )
             cloud_mean = cloud_mask.reduceRegion(
-                reducer=ee.Reducer.mean(),
+                reducer=_mean_reducer(),
                 geometry=geometry,
                 scale=20,
                 bestEffort=True,
@@ -173,6 +222,7 @@ def _class_values(n_classes: int) -> List[int]:
     return list(range(1, n_classes + 1))
 
 
+@router.post("/zones/basic", response_model=BasicZonesResponse)
 @router.post("/products/zones/basic", response_model=BasicZonesResponse)
 def zones_basic(request: BasicZonesRequest) -> BasicZonesResponse:
     if request.n_classes != 5:
@@ -182,10 +232,15 @@ def zones_basic(request: BasicZonesRequest) -> BasicZonesResponse:
 
     mean_image = mean_ndvi(request.aoi, request.start, request.end)
     classification = classify_zones(mean_image, request.aoi, method="quantile")
-    classes_img = classification["classes"]
+    if isinstance(classification, Mapping):
+        classes_img = classification.get("classes")
+    else:
+        classes_img = classification
+    if classes_img is None:
+        raise HTTPException(status_code=500, detail="Zone classification did not return classes image.")
     class_values = _class_values(request.n_classes)
     vectors = vectorize_zones(classes_img, request.aoi)
-    stats_fc = zone_statistics(
+    stats_fc = _class_stats_fc(
         mean_image,
         classes_img,
         request.aoi,
@@ -220,6 +275,7 @@ def zones_basic(request: BasicZonesRequest) -> BasicZonesResponse:
     )
 
 
+@router.post("/zones/advanced", response_model=AdvancedZonesResponse)
 @router.post("/products/zones/advanced", response_model=AdvancedZonesResponse)
 def zones_advanced(request: AdvancedZonesRequest) -> AdvancedZonesResponse:
     if len(request.breaks) != 4:
@@ -235,24 +291,38 @@ def zones_advanced(request: AdvancedZonesRequest) -> AdvancedZonesResponse:
         for season in request.seasons
     ]
 
-    composite_img, zones_img, vectors = compute_advanced_layers(
-        request.aoi, season_defs, request.breaks
-    )
-    dissolved_vectors = dissolve_by_class(vectors)
+    layers = compute_advanced_layers(request.aoi, season_defs, request.breaks)
+    composite_img = zones_img = vectors = dissolved_vectors = None
+    if isinstance(layers, tuple):
+        if len(layers) != 3:
+            raise HTTPException(status_code=500, detail="Unexpected layers response.")
+        composite_img, zones_img, vectors = layers
+    else:
+        composite_img = getattr(layers, "composite", None)
+        zones_img = getattr(layers, "zones_raster", None) or getattr(layers, "zones", None)
+        vectors = getattr(layers, "raw_zones", None) or getattr(layers, "vectors", None)
+        dissolved_vectors = getattr(layers, "dissolved_zones", None)
+    if composite_img is None or zones_img is None or vectors is None:
+        raise HTTPException(status_code=500, detail="Advanced layers response missing required data.")
+    if dissolved_vectors is None:
+        dissolved_vectors = dissolve_by_class(vectors)
     class_values = _class_values(5)
-    stats_raw = zone_statistics(
+    stats_data = _attach_stats(
         composite_img,
         zones_img,
         request.aoi,
+        dissolved_vectors=dissolved_vectors,
         band="Score",
         class_values=class_values,
     )
-    stats_dissolved = dissolved_zone_statistics(
-        composite_img,
-        zones_img,
-        dissolved_vectors,
-        band="Score",
-    )
+    if isinstance(stats_data, tuple):
+        stats_raw, stats_dissolved = stats_data
+    elif isinstance(stats_data, dict):
+        stats_raw = stats_data.get("raw")
+        stats_dissolved = stats_data.get("dissolved")
+    else:
+        stats_raw = stats_data
+        stats_dissolved = stats_data
 
     try:
         raster_url = image_geotiff_url(
@@ -284,8 +354,8 @@ def zones_advanced(request: AdvancedZonesRequest) -> AdvancedZonesResponse:
 
     return AdvancedZonesResponse(
         preview=AdvancedPreview(
-            composite=_tile_response(composite_tile),
-            zones=_tile_response(zones_tile),
+            composite={"tile": _tile_response(composite_tile)},
+            zones={"tile": _tile_response(zones_tile)},
         ),
         downloads=AdvancedDownloads(
             zones_geotiff=raster_url,
