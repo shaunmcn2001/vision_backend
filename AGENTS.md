@@ -1,5 +1,7 @@
 # Vision Backend contributor guide
 
+> **Agent protocol:** Every agent who modifies the repository **must** append an entry to the “Agent activity log” at the bottom of this file before finishing their work. Summaries should include the date, author, and a short description of the changes that landed. Do not leave this file out of sync with your contribution.
+
 ## Overview
 This repository hosts a Cloud Run–ready FastAPI service that wraps a suite of
 Google Earth Engine (GEE) workflows for agriculture analytics. The backend now
@@ -165,3 +167,9 @@ be exercised end-to-end via the bundled UI or HTTP clients.
 - CI expectations mirror the above `pytest` run; add new tests under
   `services/backend/tests/` alongside the existing fakes when expanding
   functionality.
+
+## Agent activity log
+
+| Date (UTC) | Agent | Summary |
+|------------|-------|---------|
+| 2025-11-01 | Codex Agent | Tidied repository, added frontend/backend READMEs, root gitignore, and documented the agent update protocol. |
