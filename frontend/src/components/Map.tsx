@@ -6,7 +6,14 @@ import "maplibre-gl/dist/maplibre-gl.css";
 
 export type MapProps = {
   aoi: GeometryInput | null;
-  tile: TileResponse | null;
+  layers: MapLayerConfig[];
+};
+
+export type MapLayerConfig = {
+  id: string;
+  tile: TileResponse;
+  visible: boolean;
+  name?: string;
 };
 
 function extractGeometry(geometry: GeometryInput | null) {
@@ -44,7 +51,7 @@ function computeBounds(geometry: GeometryInput | null) {
   return [minLng, minLat, maxLng, maxLat] as const;
 }
 
-export function Map({ aoi, tile }: MapProps) {
+export function Map({ aoi, layers }: MapProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const mapInstance = useRef<MapLibreMap | null>(null);
 
@@ -110,29 +117,58 @@ export function Map({ aoi, tile }: MapProps) {
   useEffect(() => {
     const map = mapInstance.current;
     if (!map) return;
-    const sourceId = "product-tile";
-    const layerId = "product-tile-layer";
-    if (map.getLayer(layerId)) {
-      map.removeLayer(layerId);
+    const layerPrefix = "product-layer-";
+    const sourcePrefix = "product-source-";
+    const visibleLayers = layers.filter((layer) => layer.visible);
+    const visibleLayerIds = new Set(visibleLayers.map((layer) => `${layerPrefix}${layer.id}`));
+
+    const style = map.getStyle();
+    if (style?.layers) {
+      style.layers
+        .filter((layer) => layer.id.startsWith(layerPrefix))
+        .forEach((layer) => {
+          if (!visibleLayerIds.has(layer.id)) {
+            map.removeLayer(layer.id);
+          }
+        });
     }
-    if (map.getSource(sourceId)) {
-      map.removeSource(sourceId);
+    if (style?.sources) {
+      Object.keys(style.sources)
+        .filter((sourceId) => sourceId.startsWith(sourcePrefix))
+        .forEach((sourceId) => {
+          const layerId = sourceId.replace(sourcePrefix, layerPrefix);
+          if (!visibleLayerIds.has(layerId)) {
+            map.removeSource(sourceId);
+          }
+        });
     }
-    if (!tile) return;
-    map.addSource(sourceId, {
-      type: "raster",
-      tiles: [window.location.origin + tile.urlTemplate],
-      tileSize: 256
-    });
-    map.addLayer({
-      id: layerId,
-      type: "raster",
-      source: sourceId,
-      paint: {
-        "raster-opacity": 0.85
+
+    visibleLayers.forEach((layer) => {
+      const sourceId = `${sourcePrefix}${layer.id}`;
+      const layerId = `${layerPrefix}${layer.id}`;
+      const tileUrl = layer.tile.urlTemplate.startsWith("http")
+        ? layer.tile.urlTemplate
+        : `${window.location.origin}${layer.tile.urlTemplate}`;
+
+      if (!map.getSource(sourceId)) {
+        map.addSource(sourceId, {
+          type: "raster",
+          tiles: [tileUrl],
+          tileSize: 256
+        });
+      }
+      if (!map.getLayer(layerId)) {
+        map.addLayer({
+          id: layerId,
+          type: "raster",
+          source: sourceId,
+          paint: {
+            "raster-opacity": 0.85
+          }
+        });
       }
     });
-  }, [tile]);
+  }, [layers]);
 
-  return <div ref={mapRef} className="h-full w-full rounded-lg border border-slate-200" />;
+  return <div ref={mapRef} className="h-full w-full" />;
 }
