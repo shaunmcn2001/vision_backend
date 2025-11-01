@@ -24,15 +24,29 @@ pip install -r requirements.txt
 ```
 
 ### Environment
-Set the following environment variables before running the API:
+Copy `.env.example` to `.env` (or inject variables via your deployment platform) before running the API:
+
+```
+cp services/backend/.env.example services/backend/.env
+```
+
+Set or override the following variables as needed:
 
 | Variable | Description |
 |----------|-------------|
-| `GEE_SERVICE_ACCOUNT_JSON` | JSON key (raw, base64, or path) used for Earth Engine. |
-| `GEE_GCS_BUCKET` / `GCS_BUCKET` | Bucket for exports and NDVI cache (optional). |
-| `GEE_DRIVE_FOLDER` | Drive folder name for export tasks (optional). |
-| `MIN_FIELD_HA` | Minimum field area in hectares (default from config). |
 | `API_KEY` | Required header value for protected routes. |
+| `BACKFILL_START` | Earliest date for NDVI backfill jobs. |
+| `CLOUD_SQL_INSTANCE` | Cloud SQL instance connection string. |
+| `CLOUD_TASKS_QUEUE` | Cloud Tasks queue name for background jobs. |
+| `CORS_ORIGINS` | Allowed origins for CORS (comma separated or `*`). |
+| `DB_NAME` / `DB_USER` / `DB_PASS` | Database credentials for the Cloud SQL instance. |
+| `DEBUG` | Enable verbose logging when `true`. |
+| `GCP_PROJECT` / `GCP_REGION` | GCP project metadata used for jobs and storage. |
+| `GCS_BUCKET` | Bucket for exports and NDVI cache. |
+| `GEE_SERVICE_ACCOUNT_JSON` | Raw JSON, base64 string, or path to the Earth Engine key. |
+| `GEE_DRIVE_FOLDER` | Drive folder name for export tasks (optional). |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to the credential file when mounted on disk. |
+| `MIN_FIELD_HA` | Minimum field area in hectares (default from config). |
 
 ### Run Locally
 ```bash

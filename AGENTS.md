@@ -173,3 +173,4 @@ be exercised end-to-end via the bundled UI or HTTP clients.
 | Date (UTC) | Agent | Summary |
 |------------|-------|---------|
 | 2025-11-01 | Codex Agent | Tidied repository, added frontend/backend READMEs, root gitignore, and documented the agent update protocol. |
+| 2025-11-01 | Codex Agent | Added backend .env template, documented configuration variables, and recorded required GCP/SQL settings. |
