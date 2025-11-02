@@ -174,3 +174,5 @@ be exercised end-to-end via the bundled UI or HTTP clients.
 |------------|-------|---------|
 | 2025-11-01 | Codex Agent | Tidied repository, added frontend/backend READMEs, root gitignore, and documented the agent update protocol. |
 | 2025-11-01 | Codex Agent | Added backend .env template, documented configuration variables, and recorded required GCP/SQL settings. |
+| 2025-11-02 | Codex Agent | Updated backend Docker image to include Google Cloud CLI and noted the change in deployment docs. |
+| 2025-11-02 | Codex Agent | Expanded the root README with backend/frontend run instructions and Docker usage. |

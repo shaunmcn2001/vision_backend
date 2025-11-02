@@ -22,15 +22,43 @@ CORS_ORIGINS=https://your-frontend.example.com
 
 The service account must be enabled for Google Earth Engine. All exports are streamed via Earth Engine `getDownloadURL` calls and are capped by `MAX_PIXELS_FOR_DIRECT` (default `3e7`).
 
-## Backend setup
+## Running the app
 
+### Backend (local Python environment)
+1. Create and activate a virtual environment:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   ```
+2. Install dependencies and launch the server:
+   ```bash
+   pip install -r services/backend/requirements.txt
+   cd services/backend
+   uvicorn app.main:app --reload
+   ```
+   The API listens on `http://127.0.0.1:8000` by default. Provide required environment variables before starting Uvicorn (see above).
+
+### Backend (Docker image with gcloud)
+1. Build the container using the bundled Dockerfile (includes the Google Cloud CLI for Earth Engine authentication):
+   ```bash
+   docker build -t vision-backend -f services/backend/Docker services/backend
+   ```
+2. Run the container, passing any credentials or configuration:
+   ```bash
+   docker run --rm -p 8080:8080 \
+     -e PORT=8080 \
+     -e GEE_SERVICE_ACCOUNT_JSON="$(cat /path/to/ee.json)" \
+     vision-backend
+   ```
+   After the container starts you can open an interactive shell and run `gcloud auth application-default login` if you need user credentials instead of a service account.
+
+### Frontend (Vite dev server)
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r services/backend/requirements.txt
-cd services/backend
-uvicorn app.main:app --reload
+cd frontend
+npm install
+VITE_API_BASE_URL=http://localhost:8000 npm run dev
 ```
+The UI provides AOI uploads, date range selection, clamp controls, map previews, and download link listings for the available analytics flows.
 
 ### Key endpoints
 
@@ -54,22 +82,6 @@ curl -X POST http://localhost:8000/api/ndvi-month \
 ```
 
 Each product response returns tile tokens for map previews and direct download URLs for rasters, vectors, and CSV summaries when applicable. Oversized AOIs trigger HTTP 400 with guidance to reduce the extent/date range.
-
-## Frontend setup
-
-```bash
-cd frontend
-npm install
-VITE_API_BASE_URL=http://localhost:8000 npm run dev
-```
-
-Set `VITE_API_BASE_URL` to the backend origin for local development. The UI provides:
-
-- Product cards for NDVI Month, Daily Imagery, Basic NDVI Zones, and Advanced Zones.
-- AOI input via shapefile ZIP upload or GeoJSON paste.
-- Date range selection, clamp controls, bands selection, and season CSV ingestion.
-- MapLibre map with AOI outlines and tile overlays.
-- Results panel with per-day imagery summaries and download link listings.
 
 ## Testing
 
