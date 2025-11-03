@@ -17,7 +17,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    gcp_project: str = Field(default="baradine-farm", env="GCP_PROJECT")
+    gcp_project: str = Field(default="videre-477011", env="GCP_PROJECT")
     gcp_region: str = Field(default="australia-southeast1", env="GCP_REGION")
     google_credentials_path: str | None = Field(
         default=None, env="GOOGLE_APPLICATION_CREDENTIALS"

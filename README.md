@@ -14,7 +14,7 @@ frontend/            Vite + React + Tailwind + shadcn/ui interface
 Set the following environment variables before running the backend:
 
 ```
-GCP_PROJECT=baradine-farm
+GCP_PROJECT=videre-477011
 GCP_REGION=australia-southeast1
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/ee-service-account.json
 CORS_ORIGINS=https://your-frontend.example.com

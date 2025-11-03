@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import ee
 from google.oauth2 import service_account
@@ -70,9 +70,21 @@ def ensure_ee() -> None:
 
 def to_ee_geometry(geometry: Mapping[str, Any]) -> ee.Geometry:
     """Convert GeoJSON-like mapping into an ee.Geometry."""
+    ensure_ee()
     try:
+        geo_type = geometry.get("type")
+        if geo_type == "FeatureCollection":
+            features = geometry.get("features")
+            if not isinstance(features, Sequence) or not features:
+                raise ValueError("FeatureCollection must contain features")
+            return ee.FeatureCollection(geometry).geometry()
+        if geo_type == "Feature":
+            inner = geometry.get("geometry")
+            if not isinstance(inner, Mapping):
+                raise ValueError("Feature is missing geometry")
+            return ee.Geometry(inner)
         return ee.Geometry(geometry)
-    except ee.EEException as exc:  # pragma: no cover - direct EE exception
+    except (ee.EEException, TypeError, ValueError, KeyError) as exc:  # pragma: no cover - direct EE exception
         raise ValueError("Invalid AOI geometry") from exc
 
 

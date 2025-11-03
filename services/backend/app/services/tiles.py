@@ -7,7 +7,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict
 from uuid import uuid4
 
+import certifi
 import ee
+import logging
 import requests
 
 from fastapi import HTTPException
@@ -31,6 +33,7 @@ class TileSession:
 
 
 _SESSIONS: Dict[str, TileSession] = {}
+logger = logging.getLogger(__name__)
 
 
 def _ttl() -> timedelta:
@@ -54,8 +57,8 @@ def create_tile_session(
     image: ee.Image,
     *,
     vis_params: dict | None = None,
-    min_zoom: int = 6,
-    max_zoom: int = 18,
+    min_zoom: int = 0,
+    max_zoom: int = 22,
 ) -> dict:
     """Create a managed tile session for the supplied image."""
     ensure_ee()
@@ -95,7 +98,7 @@ def resolve_session(token: str) -> TileSession | None:
 def fetch_tile_png(session: TileSession, z: int, x: int, y: int) -> bytes:
     """Fetch a tile image from Earth Engine for the given session."""
     url = ee.data.getTileUrl({"mapid": session.map_id, "token": session.ee_token}, x, y, z)
-    response = requests.get(url, timeout=20)
+    response = requests.get(url, timeout=20, verify=certifi.where())
     response.raise_for_status()
     return response.content
 
@@ -110,4 +113,7 @@ def fetch_tile_bytes(token: str, z: int, x: int, y: int) -> tuple[bytes, str]:
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else 502
         raise HTTPException(status_code=status, detail=f"Earth Engine tile fetch failed: {exc}") from exc
+    except requests.RequestException as exc:
+        logger.exception("Tile fetch request error for token=%s z=%s x=%s y=%s", token, z, x, y)
+        raise HTTPException(status_code=502, detail=f"Tile request failed: {exc}") from exc
     return data, "image/png"

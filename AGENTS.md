@@ -176,3 +176,8 @@ be exercised end-to-end via the bundled UI or HTTP clients.
 | 2025-11-01 | Codex Agent | Added backend .env template, documented configuration variables, and recorded required GCP/SQL settings. |
 | 2025-11-02 | Codex Agent | Updated backend Docker image to include Google Cloud CLI and noted the change in deployment docs. |
 | 2025-11-02 | Codex Agent | Expanded the root README with backend/frontend run instructions and Docker usage. |
+| 2025-11-03 | Codex Agent | Loaded the .env file during FastAPI startup to expose credential environment variables. |
+| 2025-11-03 | Codex Agent | Updated GCP project settings to use videre-477011 across configuration examples. |
+| 2025-11-03 | Codex Agent | Normalised AOI geometry parsing to accept FeatureCollection inputs for Earth Engine requests. |
+| 2025-11-03 | Codex Agent | Forced tile proxy requests to use certifi CA bundle to avoid SSL errors. |
+| 2025-11-03 | Codex Agent | Expanded tile session zoom range to 0–22 and improved tile proxy TLS handling/logging. |

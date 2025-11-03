@@ -23,7 +23,7 @@ npm install
 ### Development
 ```bash
 npm run dev
-```
+``` 
 The dev server runs on `http://localhost:5173`. Use `--host` flags in `.env` if you need LAN access.
 
 ### Build
