@@ -13,9 +13,20 @@ S2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
 CLOUD_CLASSES = [3, 8, 9, 10, 11]
 DEFAULT_SCALE = 10
 NDVI_VIS = {
-    "min": 0.0,
-    "max": 1.0,
-    "palette": ["440154", "3b528b", "21918c", "5ec962", "fde725"],
+    "min": -0.2,
+    "max": 0.8,
+    "palette": [
+        "a50026",
+        "d73027",
+        "f46d43",
+        "fdae61",
+        "fee08b",
+        "d9ef8b",
+        "a6d96a",
+        "66bd63",
+        "1a9850",
+        "006837",
+    ],
 }
 ZONES_VIS = {
     "min": 1,

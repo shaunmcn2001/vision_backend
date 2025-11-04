@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { ChangeEvent, FormEvent, useState } from "react";
 
 import type {
   AdvancedZonesResult,
@@ -14,10 +14,10 @@ import {
   requestImageryDaily,
   requestNdviMonth
 } from "./lib/api";
-import { validateDateRange } from "./lib/validators";
+import { parseSeasonCsv, validateDateRange } from "./lib/validators";
 import { AOIInput } from "./components/AOIInput";
 import { Map, type MapLayerConfig } from "./components/Map";
-import { ProductForm, type ProductKind } from "./components/ProductForm";
+import type { ProductKind } from "./components/ProductForm";
 
 import "./index.css";
 
@@ -33,10 +33,9 @@ type LayerEntry = MapLayerConfig & {
 };
 
 const NAV_ITEMS = [
-  { label: "Cadastre" },
-  { label: "Property Reports" },
-  { label: "Grazing Maps", active: true },
-  { label: "SmartMaps" }
+  { label: "NDVI MONTH", active: true },
+  { label: "IMAGERY" },
+  { label: "ZONES" }
 ];
 
 const PRODUCT_OPTIONS: { id: ProductKind; name: string; description: string }[] = [
@@ -82,10 +81,14 @@ function formatDateLabel(value: string): string {
 }
 
 function formatDownloadLabel(key: string): string {
-  return key
+  const label = key
     .replace(/([A-Z])/g, " $1")
     .replace(/_/g, " ")
     .replace(/^\w/, (char) => char.toUpperCase());
+  return label
+    .replace(/\bNdvi\b/g, "NDVI")
+    .replace(/\bColour\b/g, "Colour")
+    .replace(/\bGeotiff\b/g, "GeoTIFF");
 }
 
 export default function App() {
@@ -101,6 +104,7 @@ export default function App() {
   const [downloads, setDownloads] = useState<Record<string, string>>({});
   const [result, setResult] = useState<ProductResult | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
+  const [loadingKey, setLoadingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const downloadEntries = Object.entries(downloads);
@@ -110,6 +114,8 @@ export default function App() {
     setDownloads({});
     setResult(null);
     setError(null);
+    setLoading(false);
+    setLoadingKey(null);
   }
 
   function handleSelectProduct(next: ProductKind) {
@@ -155,7 +161,7 @@ export default function App() {
       }))
     ];
     setLayers(layerEntries);
-    setDownloads({});
+    setDownloads({ ...response.downloads });
     setResult({ type: "ndvi-month", data: response });
   }
 
@@ -243,27 +249,93 @@ export default function App() {
     setResult({ type: "zones-advanced", data: response });
   }
 
-  async function handleSubmit() {
+  function isLoading(key: string) {
+    return loading && loadingKey === key;
+  }
+
+  function updateClamp(index: number, value: string) {
+    if (!value) {
+      setClamp(undefined);
+      return;
+    }
+    const parsed = parseFloat(value);
+    if (Number.isNaN(parsed)) return;
+    const next: [number, number] = clamp ? [...clamp] as [number, number] : [0, 1];
+    next[index] = parsed;
+    setClamp(next);
+  }
+
+  async function handleSeasonCsv(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const parsed = await parseSeasonCsv(file);
+      setSeasons(parsed);
+      setError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to parse seasons CSV.";
+      setError(message);
+    }
+  }
+
+  async function submitWorkflow(
+    event: FormEvent,
+    key: string,
+    runner: () => Promise<void>,
+    needsDate = true
+  ) {
+    event.preventDefault();
     if (!aoi) {
       setError("AOI is required");
       return;
     }
-    if (!validateDateRange(startDate, endDate) && product !== "zones-advanced") {
+    if (needsDate && !validateDateRange(startDate, endDate)) {
       setError("Choose a valid date range");
       return;
     }
     setLoading(true);
+    setLoadingKey(key);
     setError(null);
     try {
-      if (product === "ndvi-month") await runNdviMonth();
-      if (product === "imagery") await runImagery();
-      if (product === "zones-basic") await runBasicZones();
-      if (product === "zones-advanced") await runAdvancedZones();
+      await runner();
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Request failed";
+      const message = err instanceof Error ? err.message : "Failed to run workflow.";
       setError(message);
     } finally {
       setLoading(false);
+      setLoadingKey(null);
+    }
+  }
+
+  async function submitAdvancedZones(event: FormEvent) {
+    event.preventDefault();
+    if (!aoi) {
+      setError("AOI is required");
+      return;
+    }
+    const breaks = breaksText
+      .split(",")
+      .map((value) => parseFloat(value.trim()))
+      .filter((value) => !Number.isNaN(value));
+    if (breaks.length !== 4) {
+      setError("Advanced zones require four break values.");
+      return;
+    }
+    if (!seasons.length) {
+      setError("Upload at least one season row.");
+      return;
+    }
+    setLoading(true);
+    setLoadingKey("zones-advanced");
+    setError(null);
+    try {
+      await runAdvancedZones();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to run workflow.";
+      setError(message);
+    } finally {
+      setLoading(false);
+      setLoadingKey(null);
     }
   }
 
@@ -302,18 +374,196 @@ export default function App() {
     return null;
   }
 
+  function renderDateFields(disabled: boolean) {
+    return (
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <label className="text-xs text-slate-600">Start Date</label>
+          <input
+            type="date"
+            value={startDate}
+            onChange={(event) => setStartDate(event.target.value)}
+            className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
+            required
+            disabled={disabled}
+          />
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-slate-600">End Date</label>
+          <input
+            type="date"
+            value={endDate}
+            onChange={(event) => setEndDate(event.target.value)}
+            className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
+            required
+            disabled={disabled}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  function renderNdviInputs() {
+    return (
+      <form
+        className="space-y-4"
+        onSubmit={(event) => submitWorkflow(event, "ndvi-month", runNdviMonth)}
+      >
+        {renderDateFields(isLoading("ndvi-month"))}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="text-xs text-slate-600">Clamp Min</label>
+            <input
+              type="number"
+              step="0.01"
+              value={clamp?.[0] ?? ""}
+              onChange={(event) => updateClamp(0, event.target.value)}
+              className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
+              placeholder="0"
+              disabled={isLoading("ndvi-month")}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-slate-600">Clamp Max</label>
+            <input
+              type="number"
+              step="0.01"
+              value={clamp?.[1] ?? ""}
+              onChange={(event) => updateClamp(1, event.target.value)}
+              className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
+              placeholder="1"
+              disabled={isLoading("ndvi-month")}
+            />
+          </div>
+        </div>
+        <button
+          type="submit"
+          disabled={isLoading("ndvi-month") || !aoi}
+          className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+        >
+          {isLoading("ndvi-month") ? "Working…" : "Run NDVI Month"}
+        </button>
+      </form>
+    );
+  }
+
+  function renderImageryInputs() {
+    return (
+      <form
+        className="space-y-4"
+        onSubmit={(event) => submitWorkflow(event, "imagery", runImagery)}
+      >
+        {renderDateFields(isLoading("imagery"))}
+        <div className="space-y-1">
+          <label className="text-xs text-slate-600">Bands (comma separated)</label>
+          <input
+            type="text"
+            value={imageryBands.join(",")}
+            onChange={(event) =>
+              setImageryBands(
+                event.target.value
+                  .split(",")
+                  .map((band) => band.trim())
+                  .filter(Boolean)
+              )
+            }
+            className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
+            placeholder="B4,B3,B2"
+            disabled={isLoading("imagery")}
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={isLoading("imagery") || !aoi}
+          className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+        >
+          {isLoading("imagery") ? "Working…" : "Run Daily Imagery"}
+        </button>
+      </form>
+    );
+  }
+
+  function renderZonesInputs() {
+    return (
+      <div className="space-y-6">
+        <form
+          className={`space-y-4 rounded-xl border ${
+            product === "zones-basic" ? "border-slate-900" : "border-slate-200"
+          } bg-white p-4`}
+          onSubmit={(event) => submitWorkflow(event, "zones-basic", runBasicZones)}
+        >
+          <div className="space-y-1">
+            <h3 className="text-sm font-semibold text-slate-800">Basic Zones</h3>
+            <p className="text-xs text-slate-500">
+              Quantile NDVI zoning with GeoTIFF, shapefile, and CSV exports.
+            </p>
+          </div>
+          {renderDateFields(isLoading("zones-basic"))}
+          <button
+            type="submit"
+            disabled={isLoading("zones-basic") || !aoi}
+            className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+          >
+            {isLoading("zones-basic") ? "Working…" : "Run Basic Zones"}
+          </button>
+        </form>
+        <form
+          className={`space-y-4 rounded-xl border ${
+            product === "zones-advanced" ? "border-slate-900" : "border-slate-200"
+          } bg-white p-4`}
+          onSubmit={submitAdvancedZones}
+        >
+          <div className="space-y-1">
+            <h3 className="text-sm font-semibold text-slate-800">Advanced Zones</h3>
+            <p className="text-xs text-slate-500">
+              Upload seasons and fixed NDVI breaks for agronomic zone insights.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-slate-600">Fixed Breaks</label>
+            <input
+              type="text"
+              value={breaksText}
+              onChange={(event) => setBreaksText(event.target.value)}
+              className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
+              placeholder="-1.0,-0.3,0.3,1.0"
+              disabled={isLoading("zones-advanced")}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-slate-600">Seasons CSV</label>
+            <input
+              type="file"
+              accept=".csv"
+              onChange={handleSeasonCsv}
+              className="w-full text-sm"
+              disabled={isLoading("zones-advanced")}
+            />
+            <p className="text-xs text-slate-500">Loaded seasons: {seasons.length}</p>
+          </div>
+          <button
+            type="submit"
+            disabled={isLoading("zones-advanced") || !aoi}
+            className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+          >
+            {isLoading("zones-advanced") ? "Working…" : "Run Advanced Zones"}
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  function renderSidebarForms() {
+    if (product === "ndvi-month") return renderNdviInputs();
+    if (product === "imagery") return renderImageryInputs();
+    return renderZonesInputs();
+  }
+
   return (
     <div className="flex min-h-screen flex-col bg-slate-100">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100 text-lg font-semibold text-emerald-600">
-              V
-            </div>
-            <div>
-              <p className="text-lg font-semibold text-slate-900">Praedia</p>
-              <p className="text-xs text-slate-500">Vision NDVI Builder</p>
-            </div>
           </div>
           <nav className="hidden rounded-full border border-slate-200 bg-slate-50 p-1 text-sm font-semibold text-slate-500 shadow-sm md:flex">
             {NAV_ITEMS.map((item) => {
@@ -333,9 +583,6 @@ export default function App() {
               );
             })}
           </nav>
-          <div className="hidden text-xs font-semibold uppercase tracking-[0.2em] text-slate-400 md:block">
-            NSW • QLD • SA • VIC
-          </div>
         </div>
       </header>
       <main className="flex flex-1 flex-col lg:flex-row">
@@ -379,24 +626,7 @@ export default function App() {
                   </div>
                   <div className="space-y-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                     <AOIInput value={aoi} onChange={handleAoiChange} />
-                    <ProductForm
-                      product={product}
-                      startDate={startDate}
-                      endDate={endDate}
-                      clamp={clamp}
-                      onClampChange={setClamp}
-                      onStartDateChange={setStartDate}
-                      onEndDateChange={setEndDate}
-                      imageryBands={imageryBands}
-                      onImageryBandsChange={setImageryBands}
-                      breaksText={breaksText}
-                      onBreaksChange={setBreaksText}
-                      seasons={seasons}
-                      onSeasonsChange={setSeasons}
-                      onSubmit={handleSubmit}
-                      disabled={loading}
-                      hasAoi={Boolean(aoi)}
-                    />
+                    {renderSidebarForms()}
                     {error ? <p className="text-xs text-rose-600">{error}</p> : null}
                   </div>
                 </div>
@@ -474,8 +704,8 @@ export default function App() {
                     </ul>
                   ) : (
                     <p className="text-xs text-slate-500">
-                      Generate Basic or Advanced zones to surface download links for GeoTIFF,
-                      shapefile, and CSV outputs.
+                      Run NDVI Month or Zones workflows to surface download links for raw and coloured
+                      GeoTIFFs, shapefiles, and CSV outputs.
                     </p>
                   )}
                 </div>

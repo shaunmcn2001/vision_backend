@@ -132,12 +132,30 @@ def ndvi_month(request: NDVIMonthRequest) -> NDVIMonthResponse:
         vis_params["max"] = float(request.clamp[1])
 
     items: List[NDVIMonthItem] = []
+    downloads: Dict[str, str] = {}
     for idx, month_start in enumerate(months):
         if idx >= collection_size:
             break
         image = ee.Image(image_list.get(idx))
         label = f"ndvi_{month_start.strftime('%Y-%m')}"
         tile_info = create_tile_session(image, vis_params=vis_params)
+        file_stub = label.replace("-", "_")
+        try:
+            downloads[f"{label}_raw_geotiff"] = image_geotiff_url(
+                image,
+                request.aoi,
+                name=f"{file_stub}_raw_ndvi",
+                scale=10,
+            )
+            colour_image = image.visualize(**vis_params)
+            downloads[f"{label}_colour_geotiff"] = image_geotiff_url(
+                colour_image,
+                request.aoi,
+                name=f"{file_stub}_colour_ndvi",
+                scale=10,
+            )
+        except DownloadTooLargeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         items.append(
             NDVIMonthItem(
                 name=label,
@@ -147,7 +165,23 @@ def ndvi_month(request: NDVIMonthRequest) -> NDVIMonthResponse:
 
     mean_image = mean_ndvi(request.aoi, request.start, request.end)
     mean_tile = create_tile_session(mean_image, vis_params=vis_params)
-    return NDVIMonthResponse(items=items, mean=_tile_response(mean_tile))
+    try:
+        downloads["ndvi_mean_raw_geotiff"] = image_geotiff_url(
+            mean_image,
+            request.aoi,
+            name="ndvi_mean_raw",
+            scale=10,
+        )
+        colour_mean = mean_image.visualize(**vis_params)
+        downloads["ndvi_mean_colour_geotiff"] = image_geotiff_url(
+            colour_mean,
+            request.aoi,
+            name="ndvi_mean_colour",
+            scale=10,
+        )
+    except DownloadTooLargeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return NDVIMonthResponse(items=items, mean=_tile_response(mean_tile), downloads=downloads)
 
 
 def _iterate_days(start: date, end: date) -> Iterable[date]:

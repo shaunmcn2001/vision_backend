@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict
+from typing import Any, Dict, Mapping
 from uuid import uuid4
 
 import certifi
@@ -21,8 +21,7 @@ from app.services.earth_engine import ensure_ee
 @dataclass
 class TileSession:
     token: str
-    map_id: str
-    ee_token: str
+    map_info: Mapping[str, Any]
     min_zoom: int
     max_zoom: int
     expires_at: datetime
@@ -30,6 +29,10 @@ class TileSession:
     @property
     def url_template(self) -> str:
         return f"/api/tiles/{self.token}" + "/{z}/{x}/{y}"
+
+    @property
+    def map_id(self) -> str:
+        return str(self.map_info.get("mapid"))
 
 
 _SESSIONS: Dict[str, TileSession] = {}
@@ -69,8 +72,7 @@ def create_tile_session(
     ttl = _ttl()
     session = TileSession(
         token=session_token,
-        map_id=map_info["mapid"],
-        ee_token=map_info["token"],
+        map_info=map_info,
         min_zoom=min_zoom,
         max_zoom=max_zoom,
         expires_at=_now() + ttl,
@@ -97,7 +99,7 @@ def resolve_session(token: str) -> TileSession | None:
 
 def fetch_tile_png(session: TileSession, z: int, x: int, y: int) -> bytes:
     """Fetch a tile image from Earth Engine for the given session."""
-    url = ee.data.getTileUrl({"mapid": session.map_id, "token": session.ee_token}, x, y, z)
+    url = ee.data.getTileUrl(session.map_info, x, y, z)
     response = requests.get(url, timeout=20, verify=certifi.where())
     response.raise_for_status()
     return response.content

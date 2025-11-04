@@ -181,3 +181,7 @@ be exercised end-to-end via the bundled UI or HTTP clients.
 | 2025-11-03 | Codex Agent | Normalised AOI geometry parsing to accept FeatureCollection inputs for Earth Engine requests. |
 | 2025-11-03 | Codex Agent | Forced tile proxy requests to use certifi CA bundle to avoid SSL errors. |
 | 2025-11-03 | Codex Agent | Expanded tile session zoom range to 0–22 and improved tile proxy TLS handling/logging. |
+| 2025-11-03 | Codex Agent | Stored Earth Engine tile fetchers in sessions so tile proxy requests stop failing with 500 errors. |
+| 2025-11-03 | Codex Agent | Updated default NDVI colour ramp to match the classic Earth Engine greens/yellows and widened the value range. |
+| 2025-11-03 | Codex Agent | Added raw and coloured NDVI GeoTIFF exports with UI download links and regression tests. |
+| 2025-11-03 | Codex Agent | Reworked workflow sidebar to show per-product forms (NDVI, imagery, basic & advanced zones) with integrated inputs and shared layout. |

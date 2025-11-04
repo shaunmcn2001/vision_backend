@@ -16,6 +16,7 @@ export type NdviMonthItem = {
 export type NdviMonthResult = {
   items: NdviMonthItem[];
   mean: TileResponse;
+  downloads: DownloadsMap;
 };
 
 export type ImageryDay = {

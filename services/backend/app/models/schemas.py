@@ -55,6 +55,7 @@ class NDVIMonthItem(CamelModel):
 class NDVIMonthResponse(CamelModel):
     items: List[NDVIMonthItem]
     mean: TileResponse
+    downloads: Dict[str, str] = Field(default_factory=dict)
 
 
 class ImageryDailyRequest(CamelModel):
