@@ -74,3 +74,4 @@ Tests rely on bundled fakes and do not hit live Earth Engine.
 - The base image ships with the Google Cloud CLI (`gcloud`) to support Earth Engine authentication and GCP workflows.
 - The top-level `Procfile` mirrors the production Uvicorn command.
 - Ensure credentials are supplied via environment variables or mounted volumes when deploying.
+fvvff
