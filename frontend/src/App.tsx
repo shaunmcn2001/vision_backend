@@ -61,6 +61,22 @@ const PRODUCT_OPTIONS: { id: ProductKind; name: string; description: string }[] 
   }
 ];
 
+const NDVI_PALETTE = ["#f9f5d7", "#f6cf75", "#ee964b", "#4f9d69", "#226f54", "#193b48"];
+const ZONE_PALETTE_BASE = ["#f5e6b3", "#d1ce7a", "#7fb285", "#4f8f8c", "#3a6b82", "#325272", "#273b5b", "#1e2a44", "#151c31"];
+
+function zonePalette(count: number): string[] {
+  if (count <= ZONE_PALETTE_BASE.length) {
+    return ZONE_PALETTE_BASE.slice(0, count);
+  }
+  return Array.from({ length: count }, (_, index) => {
+    const position = (index / Math.max(count - 1, 1)) * (ZONE_PALETTE_BASE.length - 1);
+    const lower = Math.floor(position);
+    const upper = Math.min(ZONE_PALETTE_BASE.length - 1, Math.ceil(position));
+    if (lower === upper) return ZONE_PALETTE_BASE[lower];
+    return ZONE_PALETTE_BASE[lower];
+  });
+}
+
 function formatMonthLabel(name: string): string {
   const stripped = name.replace("ndvi_", "");
   const [year, month] = stripped.split("-");
@@ -106,8 +122,37 @@ export default function App() {
   const [loading, setLoading] = useState<boolean>(false);
   const [loadingKey, setLoadingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [basicZoneCount, setBasicZoneCount] = useState<number>(5);
+  const [zoneClassCount, setZoneClassCount] = useState<number>(5);
 
   const downloadEntries = Object.entries(downloads);
+
+  const legend = (() => {
+    if (!layers.length) return null;
+    if (product === "ndvi-month") {
+      const minClamp = clamp ? clamp[0] : -0.2;
+      const maxClamp = clamp ? clamp[1] : 0.8;
+      return {
+        type: "gradient" as const,
+        title: "NDVI",
+        min: Math.round(minClamp * 100) / 100,
+        max: Math.round(maxClamp * 100) / 100,
+        colors: NDVI_PALETTE
+      };
+    }
+    if (product === "zones-basic" || product === "zones-advanced") {
+      const palette = zonePalette(zoneClassCount);
+      return {
+        type: "discrete" as const,
+        title: "NDVI Zones",
+        entries: palette.map((color, index) => ({
+          label: `Zone ${index + 1}${index === 0 ? " (Lowest)" : index === palette.length - 1 ? " (Highest)" : ""}`,
+          color
+        }))
+      };
+    }
+    return null;
+  })();
 
   function clearOutputs() {
     setLayers([]);
@@ -116,6 +161,7 @@ export default function App() {
     setError(null);
     setLoading(false);
     setLoadingKey(null);
+    setZoneClassCount(5);
   }
 
   function handleSelectProduct(next: ProductKind) {
@@ -149,6 +195,7 @@ export default function App() {
         id: "ndvi-mean",
         label: "NDVI Mean",
         description: "Average NDVI for the selected period.",
+        type: "raster",
         tile: response.mean,
         visible: true
       },
@@ -156,6 +203,7 @@ export default function App() {
         id: `ndvi-${item.name}`,
         label: formatMonthLabel(item.name),
         description: "Monthly NDVI composite.",
+        type: "raster",
         tile: item.tile,
         visible: false
       }))
@@ -179,6 +227,7 @@ export default function App() {
         id: `imagery-${day.date}`,
         label: formatDateLabel(day.date),
         description: `Cloud cover ${Math.round(day.cloudPct)}%`,
+        type: "raster",
         tile: day.tile!,
         visible: index === 0
       }));
@@ -195,20 +244,32 @@ export default function App() {
     const response = await requestBasicZones({
       aoi,
       start: startDate,
-      end: endDate
+      end: endDate,
+      nClasses: basicZoneCount
     });
     const layerEntries: LayerEntry[] = [
       {
         id: "zones-basic-preview",
         label: "Zones Preview",
         description: "Quantile NDVI zones before download.",
+        type: "raster",
         tile: response.preview.tile,
         visible: true
+      },
+      {
+        id: "zones-basic-polygons",
+        label: "Zones Polygons",
+        description: "Vector polygons grouped by NDVI zone.",
+        type: "vector",
+        geoJson: response.vectorsGeojson,
+        palette: zonePalette(response.classCount),
+        visible: false
       }
     ];
     setLayers(layerEntries);
     setDownloads({ ...response.downloads });
     setResult({ type: "zones-basic", data: response });
+    setZoneClassCount(response.classCount);
   }
 
   async function runAdvancedZones() {
@@ -233,6 +294,7 @@ export default function App() {
         id: "zones-advanced",
         label: "Zones Preview",
         description: "Season-aware NDVI classes.",
+        type: "raster",
         tile: response.preview.zones,
         visible: true
       },
@@ -240,13 +302,24 @@ export default function App() {
         id: "zones-advanced-composite",
         label: "Composite Preview",
         description: "Median NDVI composite for the configured seasons.",
+        type: "raster",
         tile: response.preview.composite,
+        visible: false
+      },
+      {
+        id: "zones-advanced-polygons",
+        label: "Zones Polygons",
+        description: "Vector polygons grouped by NDVI zone.",
+        type: "vector",
+        geoJson: response.vectorsGeojson,
+        palette: zonePalette(response.classCount),
         visible: false
       }
     ];
     setLayers(layerEntries);
     setDownloads({ ...response.downloads });
     setResult({ type: "zones-advanced", data: response });
+    setZoneClassCount(response.classCount);
   }
 
   function isLoading(key: string) {
@@ -497,13 +570,33 @@ export default function App() {
             <p className="text-xs text-slate-500">
               Quantile NDVI zoning with GeoTIFF, shapefile, and CSV exports.
             </p>
-          </div>
-          {renderDateFields(isLoading("zones-basic"))}
-          <button
-            type="submit"
-            disabled={isLoading("zones-basic") || !aoi}
-            className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
-          >
+        </div>
+        {renderDateFields(isLoading("zones-basic"))}
+        <div className="space-y-1">
+          <label className="text-xs text-slate-600">Number of Zones</label>
+          <input
+            type="number"
+            min={3}
+            max={9}
+            value={basicZoneCount}
+            onChange={(event) => {
+              const next = Number(event.target.value);
+              if (Number.isNaN(next)) {
+                setBasicZoneCount(5);
+                return;
+              }
+              setBasicZoneCount(Math.min(9, Math.max(3, Math.round(next))));
+            }}
+            className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
+            disabled={isLoading("zones-basic")}
+          />
+          <p className="text-xs text-slate-500">Choose between 3 and 9 quantile classes.</p>
+        </div>
+        <button
+          type="submit"
+          disabled={isLoading("zones-basic") || !aoi}
+          className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+        >
             {isLoading("zones-basic") ? "Working…" : "Run Basic Zones"}
           </button>
         </form>
@@ -588,7 +681,7 @@ export default function App() {
       <main className="flex flex-1 flex-col lg:flex-row">
         <section className="flex-1 bg-slate-200/40">
           <div className="h-[420px] w-full border-b border-slate-200 lg:h-full lg:border-none">
-            <Map aoi={aoi} layers={layers} />
+            <Map aoi={aoi} layers={layers} legend={legend} />
           </div>
         </section>
         <aside className="w-full border-t border-slate-200 bg-white lg:max-w-md lg:border-l lg:border-t-0">

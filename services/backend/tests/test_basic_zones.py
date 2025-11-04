@@ -16,7 +16,11 @@ def test_basic_zones_downloads(monkeypatch):
     monkeypatch.setattr(products, "to_geometry", lambda aoi: aoi)
     monkeypatch.setattr(products, "mean_ndvi", lambda *_args, **_kwargs: "mean-image")
     monkeypatch.setattr(products, "classify_zones", lambda *_args, **_kwargs: "zones-image")
-    monkeypatch.setattr(products, "vectorize_zones", lambda *_args, **_kwargs: "vector-fc")
+    class FakeFeatureCollection:
+        def getInfo(self):
+            return {"type": "FeatureCollection", "features": []}
+
+    monkeypatch.setattr(products, "vectorize_zones", lambda *_args, **_kwargs: FakeFeatureCollection())
     monkeypatch.setattr(products, "_class_stats_fc", lambda *_args, **_kwargs: "stats-fc")
     monkeypatch.setattr(
         products,
@@ -36,6 +40,7 @@ def test_basic_zones_downloads(monkeypatch):
         "aoi": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]},
         "start": date(2024, 5, 1).isoformat(),
         "end": date(2024, 6, 1).isoformat(),
+        "nClasses": 5,
     }
     response = client.post("/api/zones/basic", json=payload)
     assert response.status_code == 200
@@ -44,3 +49,5 @@ def test_basic_zones_downloads(monkeypatch):
     assert body["downloads"]["rasterGeotiff"].endswith("zones.tif")
     assert body["downloads"]["vectorShp"].endswith("zones.zip")
     assert body["downloads"]["statsCsv"].endswith("zones.csv")
+    assert body["vectorsGeojson"]["type"] == "FeatureCollection"
+    assert body["classCount"] == 5

@@ -13,11 +13,15 @@ def test_advanced_zones_downloads(monkeypatch):
     client = TestClient(app)
     from app.api import products
 
+    class FakeFeatureCollection:
+        def getInfo(self):
+            return {"type": "FeatureCollection", "features": []}
+
     fake_result = SimpleNamespace(
         composite="composite-image",
         zones_raster="zones-image",
-        raw_zones="raw-fc",
-        dissolved_zones="dissolved-fc",
+        raw_zones=FakeFeatureCollection(),
+        dissolved_zones=FakeFeatureCollection(),
     )
 
     monkeypatch.setattr(products, "ensure_ee", lambda: None)
@@ -55,3 +59,5 @@ def test_advanced_zones_downloads(monkeypatch):
     assert body["preview"]["zones"]["tile"]["token"] == "tok"
     assert body["downloads"]["zonesGeotiff"].endswith("zones.tif")
     assert len(body["downloads"]) == 5
+    assert body["vectorsGeojson"]["type"] == "FeatureCollection"
+    assert body["classCount"] == 5

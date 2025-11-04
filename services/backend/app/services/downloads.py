@@ -63,11 +63,14 @@ def table_shp_url(
     name: str,
 ) -> str:
     """Return a direct download URL for a zipped shapefile."""
-    params = {
-        "format": "SHP",
-        "filename": name,
-    }
-    return feature_collection.getDownloadURL(params)
+    try:
+        return feature_collection.getDownloadURL(filetype="SHP", filename=name)
+    except TypeError:
+        params = {
+            "format": "SHP",
+            "filename": name,
+        }
+        return feature_collection.getDownloadURL(params)
 
 
 def table_csv_url(
@@ -76,8 +79,11 @@ def table_csv_url(
     name: str,
 ) -> str:
     """Return a direct download URL for a CSV export."""
-    params = {
-        "format": "CSV",
-        "filename": name,
-    }
-    return feature_collection.getDownloadURL(params)
+    try:
+        return feature_collection.getDownloadURL(filetype="CSV", filename=name)
+    except TypeError:
+        params = {
+            "format": "CSV",
+            "filename": name,
+        }
+        return feature_collection.getDownloadURL(params)

@@ -185,3 +185,7 @@ be exercised end-to-end via the bundled UI or HTTP clients.
 | 2025-11-03 | Codex Agent | Updated default NDVI colour ramp to match the classic Earth Engine greens/yellows and widened the value range. |
 | 2025-11-03 | Codex Agent | Added raw and coloured NDVI GeoTIFF exports with UI download links and regression tests. |
 | 2025-11-03 | Codex Agent | Reworked workflow sidebar to show per-product forms (NDVI, imagery, basic & advanced zones) with integrated inputs and shared layout. |
+| 2025-11-03 | Codex Agent | Guarded zones percentile lookup to fall back to band-prefixed keys and return 400 when Earth Engine masks out data. |
+| 2025-11-03 | Codex Agent | Updated shapefile/CSV download helpers to use Earth Engine's newer getDownloadURL signature (with TypeError fallback). |
+| 2025-11-03 | Codex Agent | Normalised zone statistics to recognise new percentile key names so table exports stop failing. |
+| 2025-11-03 | Codex Agent | Added smoothed zone vectors, configurable class counts, synced colour palettes, and map legends with vector overlays. |

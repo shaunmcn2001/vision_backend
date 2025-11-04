@@ -1,18 +1,37 @@
 import { useEffect, useRef } from "react";
 import maplibregl, { Map as MapLibreMap } from "maplibre-gl";
+import type { FeatureCollection } from "geojson";
 
 import type { GeometryInput, TileResponse } from "../lib/api";
 import "maplibre-gl/dist/maplibre-gl.css";
 
+export type LegendConfig =
+  | {
+      type: "gradient";
+      title: string;
+      min: number;
+      max: number;
+      colors: string[];
+    }
+  | {
+      type: "discrete";
+      title: string;
+      entries: { label: string; color: string }[];
+    };
+
 export type MapProps = {
   aoi: GeometryInput | null;
   layers: MapLayerConfig[];
+  legend?: LegendConfig | null;
 };
 
 export type MapLayerConfig = {
   id: string;
-  tile: TileResponse;
+  type: "raster" | "vector";
   visible: boolean;
+  tile?: TileResponse;
+  geoJson?: FeatureCollection;
+  palette?: string[];
   name?: string;
 };
 
@@ -51,7 +70,7 @@ function computeBounds(geometry: GeometryInput | null) {
   return [minLng, minLat, maxLng, maxLat] as const;
 }
 
-export function Map({ aoi, layers }: MapProps) {
+export function Map({ aoi, layers, legend }: MapProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const mapInstance = useRef<MapLibreMap | null>(null);
 
@@ -119,56 +138,114 @@ export function Map({ aoi, layers }: MapProps) {
     if (!map) return;
     const layerPrefix = "product-layer-";
     const sourcePrefix = "product-source-";
-    const visibleLayers = layers.filter((layer) => layer.visible);
-    const visibleLayerIds = new Set(visibleLayers.map((layer) => `${layerPrefix}${layer.id}`));
 
     const style = map.getStyle();
     if (style?.layers) {
       style.layers
         .filter((layer) => layer.id.startsWith(layerPrefix))
-        .forEach((layer) => {
-          if (!visibleLayerIds.has(layer.id)) {
-            map.removeLayer(layer.id);
-          }
-        });
+        .forEach((layer) => map.removeLayer(layer.id));
     }
     if (style?.sources) {
       Object.keys(style.sources)
         .filter((sourceId) => sourceId.startsWith(sourcePrefix))
-        .forEach((sourceId) => {
-          const layerId = sourceId.replace(sourcePrefix, layerPrefix);
-          if (!visibleLayerIds.has(layerId)) {
-            map.removeSource(sourceId);
-          }
-        });
+        .forEach((sourceId) => map.removeSource(sourceId));
     }
 
-    visibleLayers.forEach((layer) => {
+    layers.forEach((layer) => {
+      if (!layer.visible) return;
       const sourceId = `${sourcePrefix}${layer.id}`;
-      const layerId = `${layerPrefix}${layer.id}`;
-      const tileUrl = layer.tile.urlTemplate.startsWith("http")
-        ? layer.tile.urlTemplate
-        : `${window.location.origin}${layer.tile.urlTemplate}`;
-
-      if (!map.getSource(sourceId)) {
+      if (layer.type === "raster" && layer.tile) {
+        const tileUrl = layer.tile.urlTemplate.startsWith("http")
+          ? layer.tile.urlTemplate
+          : `${window.location.origin}${layer.tile.urlTemplate}`;
         map.addSource(sourceId, {
           type: "raster",
           tiles: [tileUrl],
           tileSize: 256
         });
-      }
-      if (!map.getLayer(layerId)) {
         map.addLayer({
-          id: layerId,
+          id: `${layerPrefix}${layer.id}`,
           type: "raster",
           source: sourceId,
           paint: {
             "raster-opacity": 0.85
           }
         });
+      } else if (layer.type === "vector" && layer.geoJson) {
+        map.addSource(sourceId, {
+          type: "geojson",
+          data: layer.geoJson
+        });
+        const palette = (layer.palette ?? ["#440154", "#30678d", "#35b779", "#fde725", "#f4f18f"]).map((color) =>
+          color.startsWith("#") ? color : `#${color}`
+        );
+        const colorExpression: maplibregl.ExpressionSpecification = ["match", ["get", "zone"]];
+        palette.forEach((color, index) => {
+          colorExpression.push(index + 1, color);
+        });
+        colorExpression.push("#6b7280");
+        map.addLayer({
+          id: `${layerPrefix}${layer.id}-fill`,
+          type: "fill",
+          source: sourceId,
+          paint: {
+            "fill-color": colorExpression,
+            "fill-opacity": 0.4
+          }
+        });
+        map.addLayer({
+          id: `${layerPrefix}${layer.id}-outline`,
+          type: "line",
+          source: sourceId,
+          paint: {
+            "line-color": "#1f2937",
+            "line-width": 1
+          }
+        });
       }
     });
   }, [layers]);
 
-  return <div ref={mapRef} className="h-full w-full" />;
+  return (
+    <div className="relative h-full w-full">
+      <div ref={mapRef} className="h-full w-full" />
+      {legend ? <LegendOverlay legend={legend} /> : null}
+    </div>
+  );
+}
+
+function LegendOverlay({ legend }: { legend: LegendConfig }) {
+  if (!legend) return null;
+  if (legend.type === "gradient") {
+    const gradient = `linear-gradient(to right, ${legend.colors
+      .map((color) => (color.startsWith("#") ? color : `#${color}`))
+      .join(", ")})`;
+    return (
+      <div className="pointer-events-none absolute bottom-4 left-4 rounded-md bg-white/90 p-3 text-xs text-slate-700 shadow">
+        <p className="mb-2 font-semibold uppercase tracking-wide text-slate-500">{legend.title}</p>
+        <div className="flex items-center gap-2">
+          <span>{legend.min}</span>
+          <div className="h-2 w-32 rounded-sm" style={{ background: gradient }} />
+          <span>{legend.max}</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="pointer-events-none absolute bottom-4 left-4 rounded-md bg-white/90 p-3 text-xs text-slate-700 shadow">
+      <p className="mb-2 font-semibold uppercase tracking-wide text-slate-500">{legend.title}</p>
+      <ul className="space-y-1">
+        {legend.entries.map((entry) => (
+          <li key={entry.label} className="flex items-center gap-2">
+            <span
+              className="inline-block h-3 w-3 rounded-sm"
+              style={{ background: entry.color.startsWith("#") ? entry.color : `#${entry.color}` }}
+            />
+            <span>{entry.label}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }

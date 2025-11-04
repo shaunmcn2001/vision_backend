@@ -130,8 +130,27 @@ def compute_advanced_layers(
     if not season_scores:
         raise ValueError("No advanced zone layers could be generated for the supplied seasons.")
     long_term = ee.ImageCollection(season_scores).median().rename("score")
-    zones_raster = classify_zones(long_term, aoi, method="fixed", fixed_breaks=list(breaks), band="score")
-    raw_vectors = vectorize_zones(zones_raster, aoi, connectivity=8)
+    zones_raster = classify_zones(
+        long_term,
+        aoi,
+        method="fixed",
+        fixed_breaks=list(breaks),
+        band="score",
+        n_classes=len(breaks) + 1,
+        gaussian_radius_m=25,
+        mode_radius_m=40,
+        opening_radius_m=20,
+        closing_radius_m=20,
+        mmu_hectares=1.0,
+    )
+    raw_vectors = vectorize_zones(
+        zones_raster,
+        aoi,
+        simplify_tolerance_m=25,
+        eight_connected=False,
+        smooth_buffer_m=15,
+        min_area_hectares=1.0,
+    )
     classes = ee.List(raw_vectors.aggregate_array("zone").distinct())
 
     def _dissolve(zone_value):

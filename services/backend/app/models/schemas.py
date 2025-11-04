@@ -117,6 +117,8 @@ class TileWrapper(CamelModel):
 class BasicZonesResponse(CamelModel):
     preview: TileWrapper
     downloads: BasicDownloads
+    vectors_geojson: Dict[str, Any] = Field(alias="vectorsGeojson")
+    class_count: int = Field(alias="classCount")
 
 
 class SeasonInput(CamelModel):
@@ -161,6 +163,8 @@ class AdvancedPreview(CamelModel):
 class AdvancedZonesResponse(CamelModel):
     preview: AdvancedPreview
     downloads: AdvancedDownloads
+    vectors_geojson: Dict[str, Any] = Field(alias="vectorsGeojson")
+    class_count: int = Field(alias="classCount")
 
 
 class TileSessionRequest(CamelModel):

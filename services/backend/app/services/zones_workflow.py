@@ -16,23 +16,38 @@ NDVI_VIS = {
     "min": -0.2,
     "max": 0.8,
     "palette": [
-        "a50026",
-        "d73027",
-        "f46d43",
-        "fdae61",
-        "fee08b",
-        "d9ef8b",
-        "a6d96a",
-        "66bd63",
-        "1a9850",
-        "006837",
+        "f9f5d7",
+        "f6cf75",
+        "ee964b",
+        "4f9d69",
+        "226f54",
+        "193b48",
     ],
 }
+ZONE_BASE_PALETTE = [
+    "f5e6b3",
+    "d1ce7a",
+    "7fb285",
+    "4f8f8c",
+    "3a6b82",
+    "325272",
+    "273b5b",
+    "1e2a44",
+    "151c31",
+]
 ZONES_VIS = {
     "min": 1,
-    "max": 5,
-    "palette": ["440154", "30678d", "35b779", "fde725", "f4f18f"],
+    "max": 9,
+    "palette": ZONE_BASE_PALETTE,
 }
+
+
+def zone_palette(n_classes: int) -> list[str]:
+    """Return a palette sized for the requested number of classes."""
+    n_classes = max(1, min(n_classes, len(ZONE_BASE_PALETTE)))
+    if n_classes <= len(ZONE_BASE_PALETTE):
+        return ZONE_BASE_PALETTE[:n_classes]
+    return ZONE_BASE_PALETTE
 
 
 def _mask_sentinel2(image: ee.Image) -> ee.Image:
@@ -141,8 +156,11 @@ def classify_zones(
     *,
     method: str = "quantile",
     fixed_breaks: Sequence[float] | None = None,
-    smooth_radius_m: float = 0,
-    mmu_pixels: int = 0,
+    gaussian_radius_m: float = 0,
+    mode_radius_m: float = 0,
+    opening_radius_m: float = 0,
+    closing_radius_m: float = 0,
+    mmu_hectares: float = 0,
     band: str = "NDVI",
     n_classes: int = 5,
 ) -> Dict[str, Any]:
@@ -153,8 +171,10 @@ def classify_zones(
 
     geometry = to_geometry(aoi)
     band_image = image.select(band).clip(geometry)
-    if smooth_radius_m > 0:
-        band_image = band_image.focal_median(smooth_radius_m, "circle", "meters")
+    if gaussian_radius_m > 0:
+        sigma = max(gaussian_radius_m / 3, 1)
+        kernel = ee.Kernel.gaussian(radius=gaussian_radius_m, sigma=sigma, units="meters")
+        band_image = band_image.convolve(kernel)
 
     scale = DEFAULT_SCALE
     if method == "quantile":
@@ -168,7 +188,29 @@ def classify_zones(
             bestEffort=True,
             maxPixels=1e13,
         )
-        thresholds = [ee.Number(stats.get(name)) for name in output_names]
+        try:
+            stats_info = stats.getInfo()
+        except ee.EEException as exc:
+            raise ValueError("Unable to compute thresholds for classification.") from exc
+        if not isinstance(stats_info, dict) or not stats_info:
+            raise ValueError("Insufficient data to compute zone percentiles; try a different date range or AOI.")
+        band_names = []
+        try:
+            band_names = band_image.bandNames().getInfo() or []
+        except ee.EEException:
+            band_names = []
+        values: list[float] = []
+        for name in output_names:
+            value = stats_info.get(name)
+            if value is None:
+                for band in band_names:
+                    value = stats_info.get(f"{band}_{name}")
+                    if value is not None:
+                        break
+            if value is None:
+                raise ValueError("Insufficient data to compute zone percentiles; try a different date range or AOI.")
+            values.append(float(value))
+        thresholds = [ee.Number(v) for v in values]
     else:
         thresholds = [ee.Number(v) for v in fixed_breaks or []]
 
@@ -180,11 +222,43 @@ def classify_zones(
         classes = classes.where(band_image.gte(threshold), idx)
 
     classes = classes.rename("zone").toInt().clip(geometry)
-    if mmu_pixels > 0:
-        connected = classes.connectedPixelCount(8, True)
-        classes = classes.updateMask(connected.gte(mmu_pixels))
+    if mode_radius_m > 0:
+        classes = (
+            classes.focal_mode(mode_radius_m, "circle", "meters")
+            .reproject(crs=classes.projection(), scale=DEFAULT_SCALE)
+            .toInt()
+        )
+    if opening_radius_m > 0:
+        classes = (
+            classes.focal_min(opening_radius_m, "circle", "meters")
+            .focal_max(opening_radius_m, "circle", "meters")
+            .reproject(crs=classes.projection(), scale=DEFAULT_SCALE)
+            .toInt()
+        )
+    if closing_radius_m > 0:
+        classes = (
+            classes.focal_max(closing_radius_m, "circle", "meters")
+            .focal_min(closing_radius_m, "circle", "meters")
+            .reproject(crs=classes.projection(), scale=DEFAULT_SCALE)
+            .toInt()
+        )
 
-    return {"classes": classes, "thresholds": thresholds, "method": method}
+    if mmu_hectares > 0:
+        min_pixels = ee.Number(mmu_hectares).multiply(10000.0 / (DEFAULT_SCALE ** 2))
+        connected = (
+            classes.connectedPixelCount(8, True)
+            .reproject(crs=classes.projection(), scale=DEFAULT_SCALE)
+        )
+        mask = connected.gte(min_pixels)
+        fallback_radius = mode_radius_m or 30
+        fallback = (
+            classes.focal_mode(fallback_radius, "circle", "meters")
+            .reproject(crs=classes.projection(), scale=DEFAULT_SCALE)
+            .toInt()
+        )
+        classes = classes.updateMask(mask).unmask(fallback).toInt()
+
+    return {"classes": classes.clip(geometry).toInt(), "thresholds": thresholds, "method": method}
 
 
 def vectorize_zones(
@@ -193,6 +267,8 @@ def vectorize_zones(
     *,
     simplify_tolerance_m: float = 0,
     eight_connected: bool = True,
+    smooth_buffer_m: float = 0,
+    min_area_hectares: float = 0,
 ) -> ee.FeatureCollection:
     geometry = to_geometry(aoi)
     label_image = classes_img.rename("zone").toInt().clip(geometry)
@@ -208,6 +284,8 @@ def vectorize_zones(
     def _post_process(feature: ee.Feature) -> ee.Feature:
         zone = ee.Number(feature.get("zone")).toInt()
         geom = feature.geometry()
+        if smooth_buffer_m > 0:
+            geom = geom.buffer(smooth_buffer_m).buffer(-smooth_buffer_m)
         if simplify_tolerance_m > 0:
             geom = geom.simplify(simplify_tolerance_m)
         area_ha = geom.area(maxError=1).divide(10_000)
@@ -218,7 +296,10 @@ def vectorize_zones(
             .copyProperties(feature, exclude=["system:index"])
         )
 
-    return ee.FeatureCollection(vectors.map(_post_process))
+    collection = ee.FeatureCollection(vectors.map(_post_process))
+    if min_area_hectares > 0:
+        collection = collection.filter(ee.Filter.gte("areaHa", min_area_hectares))
+    return collection
 
 
 def dissolve_by_class(
@@ -241,18 +322,25 @@ def dissolve_by_class(
     return ee.FeatureCollection(ee.List(classes).map(_dissolve))
 
 
-def _band_stat_keys(band: str) -> Dict[str, str]:
+def _band_stat_keys(band: str) -> Dict[str, Sequence[str]]:
     return {
-        "mean": f"{band}_mean",
-        "median": f"{band}_median",
-        "min": f"{band}_min",
-        "max": f"{band}_max",
-        "stdDev": f"{band}_stdDev",
-        "p10": f"{band}_percentile_10",
-        "p25": f"{band}_percentile_25",
-        "p75": f"{band}_percentile_75",
-        "p90": f"{band}_percentile_90",
+        "mean": [f"{band}_mean"],
+        "median": [f"{band}_median"],
+        "min": [f"{band}_min"],
+        "max": [f"{band}_max"],
+        "stdDev": [f"{band}_stdDev"],
+        "p10": [f"{band}_percentile_10", f"{band}_p10"],
+        "p25": [f"{band}_percentile_25", f"{band}_p25"],
+        "p75": [f"{band}_percentile_75", f"{band}_p75"],
+        "p90": [f"{band}_percentile_90", f"{band}_p90"],
     }
+
+
+def _first_present_stat(stats: ee.Dictionary, keys: Sequence[str]) -> ee.Number:
+    value: ee.ComputedObject = ee.Number(0)
+    for key in keys:
+        value = ee.Number(ee.Algorithms.If(stats.contains(key), stats.get(key), value))
+    return ee.Number(value)
 
 
 def zone_statistics(
@@ -313,8 +401,9 @@ def zone_statistics(
             "pixelCount": ee.Number(pixel_count).toInt(),
             "areaHa": ee.Number(area).divide(10_000),
         }
-        for prop, key in mapping.items():
-            properties[prop] = stats.get(key)
+        stats_dict = ee.Dictionary(stats)
+        for prop, keys in mapping.items():
+            properties[prop] = _first_present_stat(stats_dict, keys)
         return ee.Feature(None, properties)
 
     features = ee.FeatureCollection(
@@ -365,8 +454,9 @@ def dissolved_zone_statistics(
             "pixelCount": ee.Number(pixel_count).toInt(),
             "areaHa": area_ha,
         }
-        for prop, key in mapping.items():
-            properties[prop] = stats.get(key)
+        stats_dict = ee.Dictionary(stats)
+        for prop, keys in mapping.items():
+            properties[prop] = _first_present_stat(stats_dict, keys)
         return feature.set(properties)
 
     return ee.FeatureCollection(dissolved_fc.map(_stats)).filter(
@@ -382,6 +472,7 @@ __all__ = [
     "dissolve_by_class",
     "zone_statistics",
     "dissolved_zone_statistics",
+    "zone_palette",
     "NDVI_VIS",
     "ZONES_VIS",
     "_ndvi",

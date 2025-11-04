@@ -44,6 +44,7 @@ export type BasicZonesResult = {
     vectorShp: string;
     statsCsv: string;
   };
+  vectorsGeojson: FeatureCollection;
 };
 
 export type AdvancedZonesResult = {
@@ -58,6 +59,7 @@ export type AdvancedZonesResult = {
     statsCsv: string;
     statsDissolvedCsv: string;
   };
+  vectorsGeojson: FeatureCollection;
 };
 
 export type SeasonInput = {
@@ -112,6 +114,7 @@ export function requestBasicZones(payload: {
   aoi: GeometryInput;
   start: string;
   end: string;
+  nClasses: number;
 }): Promise<BasicZonesResult> {
   return fetchJson<BasicZonesResult>("/api/products/zones/basic", payload);
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 from typing import Dict, Iterable, List, Mapping
 
@@ -42,11 +43,14 @@ from app.services.zones_workflow import (
     dissolved_zone_statistics,
     mean_ndvi,
     monthly_ndvi,
+    zone_palette,
     vectorize_zones,
     zone_statistics,
 )
 
 router = APIRouter(prefix="/api", tags=["products"])
+
+logger = logging.getLogger(__name__)
 
 RGB_BANDS = ["B4", "B3", "B2"]
 to_geometry = to_ee_geometry  # Backwards compatibility for older imports
@@ -259,13 +263,26 @@ def _class_values(n_classes: int) -> List[int]:
 @router.post("/zones/basic", response_model=BasicZonesResponse)
 @router.post("/products/zones/basic", response_model=BasicZonesResponse)
 def zones_basic(request: BasicZonesRequest) -> BasicZonesResponse:
-    if request.n_classes != 5:
-        raise HTTPException(status_code=400, detail="Only 5-class zones are supported.")
+    if request.n_classes < 3 or request.n_classes > 9:
+        raise HTTPException(status_code=400, detail="nClasses must be between 3 and 9.")
     if request.end < request.start:
         raise HTTPException(status_code=400, detail="end must be on or after start")
 
     mean_image = mean_ndvi(request.aoi, request.start, request.end)
-    classification = classify_zones(mean_image, request.aoi, method="quantile")
+    try:
+        classification = classify_zones(
+            mean_image,
+            request.aoi,
+            method="quantile",
+            n_classes=request.n_classes,
+            gaussian_radius_m=25,
+            mode_radius_m=40,
+            opening_radius_m=20,
+            closing_radius_m=20,
+            mmu_hectares=1.0,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if isinstance(classification, Mapping):
         classes_img = classification.get("classes")
     else:
@@ -273,7 +290,14 @@ def zones_basic(request: BasicZonesRequest) -> BasicZonesResponse:
     if classes_img is None:
         raise HTTPException(status_code=500, detail="Zone classification did not return classes image.")
     class_values = _class_values(request.n_classes)
-    vectors = vectorize_zones(classes_img, request.aoi)
+    vectors = vectorize_zones(
+        classes_img,
+        request.aoi,
+        simplify_tolerance_m=25,
+        eight_connected=False,
+        smooth_buffer_m=15,
+        min_area_hectares=1.0,
+    )
     stats_fc = _class_stats_fc(
         mean_image,
         classes_img,
@@ -290,14 +314,22 @@ def zones_basic(request: BasicZonesRequest) -> BasicZonesResponse:
     except DownloadTooLargeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    palette = zone_palette(request.n_classes)
+
     tile_info = create_tile_session(
         classes_img,
         vis_params={
             "min": ZONES_VIS["min"],
-            "max": ZONES_VIS["max"],
-            "palette": ZONES_VIS["palette"],
+            "max": request.n_classes,
+            "palette": palette,
         },
     )
+
+    try:
+        vectors_geojson = vectors.getInfo()
+    except Exception as exc:  # pragma: no cover - EE errors vary at runtime
+        logger.exception("Failed to fetch basic zones vector overlay")
+        raise HTTPException(status_code=502, detail="Failed to generate zones vector overlay.") from exc
 
     return BasicZonesResponse(
         preview={"tile": _tile_response(tile_info)},
@@ -306,6 +338,8 @@ def zones_basic(request: BasicZonesRequest) -> BasicZonesResponse:
             vector_shp=vector_url,
             stats_csv=stats_url,
         ),
+        vectors_geojson=vectors_geojson,
+        class_count=request.n_classes,
     )
 
 
@@ -340,7 +374,8 @@ def zones_advanced(request: AdvancedZonesRequest) -> AdvancedZonesResponse:
         raise HTTPException(status_code=500, detail="Advanced layers response missing required data.")
     if dissolved_vectors is None:
         dissolved_vectors = dissolve_by_class(vectors)
-    class_values = _class_values(5)
+    n_classes = len(request.breaks) + 1
+    class_values = _class_values(n_classes)
     stats_data = _attach_stats(
         composite_img,
         zones_img,
@@ -373,6 +408,8 @@ def zones_advanced(request: AdvancedZonesRequest) -> AdvancedZonesResponse:
     except DownloadTooLargeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    palette = zone_palette(n_classes)
+
     composite_tile = create_tile_session(
         composite_img,
         vis_params={"min": -2, "max": 2, "palette": ["440154", "21908d", "fde725"]},
@@ -381,10 +418,16 @@ def zones_advanced(request: AdvancedZonesRequest) -> AdvancedZonesResponse:
         zones_img,
         vis_params={
             "min": ZONES_VIS["min"],
-            "max": ZONES_VIS["max"],
-            "palette": ZONES_VIS["palette"],
+            "max": n_classes,
+            "palette": palette,
         },
     )
+
+    try:
+        vectors_geojson = vectors.getInfo()
+    except Exception as exc:  # pragma: no cover - EE errors vary at runtime
+        logger.exception("Failed to fetch advanced zones vector overlay")
+        raise HTTPException(status_code=502, detail="Failed to generate zones vector overlay.") from exc
 
     return AdvancedZonesResponse(
         preview=AdvancedPreview(
@@ -398,4 +441,6 @@ def zones_advanced(request: AdvancedZonesRequest) -> AdvancedZonesResponse:
             stats_csv=stats_url,
             stats_dissolved_csv=stats_dissolved_url,
         ),
+        vectors_geojson=vectors_geojson,
+        class_count=n_classes,
     )
