@@ -653,7 +653,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-100">
+    <div className="flex min-h-screen flex-col bg-slate-100 lg:h-screen lg:overflow-hidden">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
@@ -678,14 +678,14 @@ export default function App() {
           </nav>
         </div>
       </header>
-      <main className="flex flex-1 flex-col lg:flex-row">
-        <section className="flex-1 bg-slate-200/40">
-          <div className="h-[420px] w-full border-b border-slate-200 lg:h-full lg:border-none">
+      <main className="flex flex-1 min-h-0 flex-col lg:flex-row lg:overflow-hidden">
+        <section className="flex-1 min-h-0 bg-slate-200/40">
+          <div className="h-[420px] min-h-0 w-full border-b border-slate-200 lg:h-full lg:border-none">
             <Map aoi={aoi} layers={layers} legend={legend} />
           </div>
         </section>
-        <aside className="w-full border-t border-slate-200 bg-white lg:max-w-md lg:border-l lg:border-t-0">
-          <div className="h-full overflow-y-auto p-6">
+        <aside className="w-full border-t border-slate-200 bg-white lg:max-w-md lg:border-l lg:border-t-0 lg:flex lg:min-h-0 lg:flex-col lg:overflow-y-auto">
+          <div className="space-y-8 p-6">
             <div className="space-y-8">
               <section className="space-y-4">
                 <div>

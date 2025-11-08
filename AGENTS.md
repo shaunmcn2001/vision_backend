@@ -189,3 +189,5 @@ be exercised end-to-end via the bundled UI or HTTP clients.
 | 2025-11-03 | Codex Agent | Updated shapefile/CSV download helpers to use Earth Engine's newer getDownloadURL signature (with TypeError fallback). |
 | 2025-11-03 | Codex Agent | Normalised zone statistics to recognise new percentile key names so table exports stop failing. |
 | 2025-11-03 | Codex Agent | Added smoothed zone vectors, configurable class counts, synced colour palettes, and map legends with vector overlays. |
+| 2025-11-08 | Codex Agent | Locked the desktop layout so the map stays full height and the right-hand workflow sidebar scrolls independently, keeping the NDVI legend visible. |
+| 2025-11-08 | Codex Agent | Moved the NDVI legend overlay to the top-left of the map for consistent visibility. |

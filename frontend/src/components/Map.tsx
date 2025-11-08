@@ -221,7 +221,7 @@ function LegendOverlay({ legend }: { legend: LegendConfig }) {
       .map((color) => (color.startsWith("#") ? color : `#${color}`))
       .join(", ")})`;
     return (
-      <div className="pointer-events-none absolute bottom-4 left-4 rounded-md bg-white/90 p-3 text-xs text-slate-700 shadow">
+      <div className="pointer-events-none absolute left-4 top-4 rounded-md bg-white/90 p-3 text-xs text-slate-700 shadow">
         <p className="mb-2 font-semibold uppercase tracking-wide text-slate-500">{legend.title}</p>
         <div className="flex items-center gap-2">
           <span>{legend.min}</span>
@@ -233,7 +233,7 @@ function LegendOverlay({ legend }: { legend: LegendConfig }) {
   }
 
   return (
-    <div className="pointer-events-none absolute bottom-4 left-4 rounded-md bg-white/90 p-3 text-xs text-slate-700 shadow">
+    <div className="pointer-events-none absolute left-4 top-4 rounded-md bg-white/90 p-3 text-xs text-slate-700 shadow">
       <p className="mb-2 font-semibold uppercase tracking-wide text-slate-500">{legend.title}</p>
       <ul className="space-y-1">
         {legend.entries.map((entry) => (
