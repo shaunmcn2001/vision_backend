@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.products import router as products_router
 from app.api.tiles import router as tiles_router
+from app.api.weather import router as weather_router
 from app.services.earth_engine import ensure_ee
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ app.add_middleware(
 
 app.include_router(products_router)
 app.include_router(tiles_router)
+app.include_router(weather_router)
 
 
 @app.get("/")

@@ -7,6 +7,7 @@ FastAPI service that wraps Google Earth Engine (GEE) workflows for Sentinel-2 ex
 - **Field ingestion & storage** – validate shapefile/KML uploads and persist metadata to GCS.
 - **NDVI analytics** – compute and cache statistics with CSV downloads.
 - **Tile services** – deliver map tiles for composites and zone previews.
+- **Weather intelligence** – fetch Open-Meteo forecasts, suggest spray windows, and expose RainViewer radar tiles.
 
 ## Getting Started
 
@@ -74,4 +75,3 @@ Tests rely on bundled fakes and do not hit live Earth Engine.
 - The base image ships with the Google Cloud CLI (`gcloud`) to support Earth Engine authentication and GCP workflows.
 - The top-level `Procfile` mirrors the production Uvicorn command.
 - Ensure credentials are supplied via environment variables or mounted volumes when deploying.
-fvvff

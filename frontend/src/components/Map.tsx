@@ -3,6 +3,7 @@ import maplibregl, { Map as MapLibreMap } from "maplibre-gl";
 import type { FeatureCollection } from "geojson";
 
 import type { GeometryInput, TileResponse } from "../lib/api";
+import { categoryMeta, type FieldNote } from "../lib/notes";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 export type LegendConfig =
@@ -23,6 +24,12 @@ export type MapProps = {
   aoi: GeometryInput | null;
   layers: MapLayerConfig[];
   legend?: LegendConfig | null;
+  noteMode?: boolean;
+  notes?: FieldNote[];
+  showNotes?: boolean;
+  selectedNoteId?: string | null;
+  onMapClickForNote?: (lngLat: { lat: number; lon: number }) => void;
+  onSelectNote?: (noteId: string) => void;
 };
 
 export type MapLayerConfig = {
@@ -33,6 +40,7 @@ export type MapLayerConfig = {
   geoJson?: FeatureCollection;
   palette?: string[];
   name?: string;
+  opacity?: number;
 };
 
 function extractGeometry(geometry: GeometryInput | null) {
@@ -70,9 +78,20 @@ function computeBounds(geometry: GeometryInput | null) {
   return [minLng, minLat, maxLng, maxLat] as const;
 }
 
-export function Map({ aoi, layers, legend }: MapProps) {
+export function Map({
+  aoi,
+  layers,
+  legend,
+  noteMode = false,
+  notes = [],
+  showNotes = true,
+  selectedNoteId,
+  onMapClickForNote,
+  onSelectNote
+}: MapProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const mapInstance = useRef<MapLibreMap | null>(null);
+  const noteMarkers = useRef<Map<string, { marker: maplibregl.Marker; popup: maplibregl.Popup }>>(new Map());
 
   useEffect(() => {
     if (!mapRef.current || mapInstance.current) return;
@@ -168,7 +187,7 @@ export function Map({ aoi, layers, legend }: MapProps) {
           type: "raster",
           source: sourceId,
           paint: {
-            "raster-opacity": 0.85
+            "raster-opacity": layer.opacity ?? 0.85
           }
         });
       } else if (layer.type === "vector" && layer.geoJson) {
@@ -205,6 +224,107 @@ export function Map({ aoi, layers, legend }: MapProps) {
       }
     });
   }, [layers]);
+
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map) return;
+    const handler = (event: maplibregl.MapMouseEvent & maplibregl.EventData) => {
+      if (!noteMode || !onMapClickForNote) return;
+      onMapClickForNote({ lat: event.lngLat.lat, lon: event.lngLat.lng });
+    };
+    if (noteMode && onMapClickForNote) {
+      map.getCanvas().style.cursor = "crosshair";
+      map.on("click", handler);
+    } else {
+      map.getCanvas().style.cursor = "";
+    }
+    return () => {
+      map.off("click", handler);
+      if (!noteMode) {
+        map.getCanvas().style.cursor = "";
+      }
+    };
+  }, [noteMode, onMapClickForNote]);
+
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map) return;
+    noteMarkers.current.forEach(({ marker, popup }) => {
+      popup.remove();
+      marker.remove();
+    });
+    noteMarkers.current.clear();
+    if (!showNotes || !notes.length) return;
+    notes.forEach((note) => {
+      const iconMeta = categoryMeta(note.category);
+      const el = document.createElement("div");
+      el.style.width = "30px";
+      el.style.height = "30px";
+      el.style.borderRadius = "50%";
+      el.style.display = "flex";
+      el.style.alignItems = "center";
+      el.style.justifyContent = "center";
+      el.style.fontSize = "18px";
+      el.style.color = "#fff";
+      el.style.border = "2px solid #fff";
+      el.style.boxShadow = "0 4px 12px rgba(15,23,42,0.3)";
+      el.style.backgroundColor = iconMeta.color;
+      el.textContent = iconMeta.icon;
+
+      const popupContent = document.createElement("div");
+      popupContent.style.maxWidth = "240px";
+      popupContent.style.fontFamily = "Inter, system-ui, sans-serif";
+
+      const title = document.createElement("div");
+      title.style.fontWeight = "600";
+      title.style.marginBottom = "4px";
+      title.textContent = `${iconMeta.icon} ${iconMeta.label}`;
+      popupContent.appendChild(title);
+
+      const body = document.createElement("div");
+      body.style.fontSize = "13px";
+      body.style.color = "#1f2937";
+      body.style.marginBottom = "6px";
+      body.style.whiteSpace = "pre-line";
+      body.textContent = note.text;
+      popupContent.appendChild(body);
+
+      const timestamp = document.createElement("div");
+      timestamp.style.fontSize = "11px";
+      timestamp.style.color = "#64748b";
+      timestamp.textContent = new Date(note.createdAt).toLocaleString();
+      popupContent.appendChild(timestamp);
+      if (note.photo) {
+        const img = document.createElement("img");
+        img.src = note.photo;
+        img.alt = "Note";
+        img.style.width = "100%";
+        img.style.borderRadius = "8px";
+        img.style.marginTop = "6px";
+        popupContent.appendChild(img);
+      }
+      const popup = new maplibregl.Popup({ closeButton: true, offset: 16 }).setDOMContent(popupContent);
+      const marker = new maplibregl.Marker({ element: el })
+        .setLngLat([note.lon, note.lat])
+        .setPopup(popup)
+        .addTo(map);
+      el.addEventListener("click", () => {
+        popup.addTo(map);
+        onSelectNote?.(note.id);
+      });
+      noteMarkers.current.set(note.id, { marker, popup });
+    });
+  }, [notes, showNotes, onSelectNote]);
+
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map || !selectedNoteId || !showNotes) return;
+    const entry = noteMarkers.current.get(selectedNoteId);
+    if (!entry) return;
+    const lngLat = entry.marker.getLngLat();
+    entry.popup.setLngLat(lngLat).addTo(map);
+    map.flyTo({ center: lngLat, zoom: Math.max(map.getZoom(), 15), essential: true });
+  }, [selectedNoteId, showNotes]);
 
   return (
     <div className="relative h-full w-full">

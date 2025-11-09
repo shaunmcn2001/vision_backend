@@ -191,3 +191,7 @@ be exercised end-to-end via the bundled UI or HTTP clients.
 | 2025-11-03 | Codex Agent | Added smoothed zone vectors, configurable class counts, synced colour palettes, and map legends with vector overlays. |
 | 2025-11-08 | Codex Agent | Locked the desktop layout so the map stays full height and the right-hand workflow sidebar scrolls independently, keeping the NDVI legend visible. |
 | 2025-11-08 | Codex Agent | Moved the NDVI legend overlay to the top-left of the map for consistent visibility. |
+| 2025-11-08 | Codex Agent | Added NDVI per-month stats plus a OneSoil-style frontend with a sidebar workflow, map layer toggles, and a trend chart. |
+| 2025-11-08 | Codex Agent | Integrated weather forecasts, GDD charts, and precipitation overlays with backend APIs and a OneSoil-style weather panel. |
+| 2025-11-08 | Codex Agent | Added VRA mapping workflows, prescription management, and field scouting notes with map annotations and exports. |
+| 2025-11-08 | Codex Agent | Swapped weather data to Open-Meteo and kept RainViewer overlays so forecasts no longer require API keys. |

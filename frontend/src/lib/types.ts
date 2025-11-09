@@ -19,6 +19,7 @@ export interface TilePreview {
 export interface NdviMonthItem {
   name: string;
   tile: TileResponse;
+  meanNdvi?: number | null;
 }
 
 export interface NdviMonthResult {

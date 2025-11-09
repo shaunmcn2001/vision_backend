@@ -120,12 +120,39 @@ def _tile_response(tile: Dict[str, object]) -> TileResponse:
     return TileResponse.parse_obj(tile)
 
 
+def _mean_ndvi_value(image: ee.Image, geometry: ee.Geometry) -> float | None:
+    reducer = _mean_reducer()
+    if reducer is _NOOP_REDUCER:
+        return None
+    try:
+        stats = image.reduceRegion(
+            reducer=reducer,
+            geometry=geometry,
+            scale=10,
+            bestEffort=True,
+            maxPixels=1e13,
+        )
+        stats_info = stats.getInfo() if hasattr(stats, "getInfo") else stats
+    except Exception:  # pragma: no cover - EE errors bubble up in production
+        return None
+    if not isinstance(stats_info, Mapping):
+        return None
+    value = stats_info.get("NDVI") or stats_info.get("ndvi")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @router.post("/ndvi/month", response_model=NDVIMonthResponse)
 @router.post("/products/ndvi-month", response_model=NDVIMonthResponse)
 def ndvi_month(request: NDVIMonthRequest) -> NDVIMonthResponse:
     if request.end < request.start:
         raise HTTPException(status_code=400, detail="end must be on or after start")
 
+    geometry = to_geometry(request.aoi)
     months = _month_sequence(request.start, request.end)
     collection = monthly_ndvi(request.aoi, request.start, request.end)
     collection_size = int(collection.size().getInfo())
@@ -160,10 +187,12 @@ def ndvi_month(request: NDVIMonthRequest) -> NDVIMonthResponse:
             )
         except DownloadTooLargeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        mean_value = _mean_ndvi_value(image, geometry)
         items.append(
             NDVIMonthItem(
                 name=label,
                 tile=_tile_response(tile_info),
+                mean_ndvi=mean_value,
             )
         )
 

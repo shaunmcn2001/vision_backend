@@ -11,12 +11,49 @@ export type TileResponse = {
 export type NdviMonthItem = {
   name: string;
   tile: TileResponse;
+  meanNdvi?: number | null;
 };
 
 export type NdviMonthResult = {
   items: NdviMonthItem[];
   mean: TileResponse;
   downloads: DownloadsMap;
+};
+
+export type WeatherForecastDay = {
+  date: string;
+  tempMinC: number;
+  tempMaxC: number;
+  precipitationMm: number;
+  windAvgKmh: number;
+  windMaxKmh: number;
+  description: string;
+  icon?: string | null;
+  gdd: number;
+  sprayOk: boolean;
+};
+
+export type WeatherSeriesPoint = {
+  date: string;
+  value: number;
+  cumulative: number;
+};
+
+export type SprayRecommendation = {
+  bestDays: string[];
+  hasWindow: boolean;
+};
+
+export type WeatherForecastResponse = {
+  location: { lat: number; lon: number };
+  forecast: WeatherForecastDay[];
+  gddBaseC: number;
+  chart: {
+    gdd: WeatherSeriesPoint[];
+    precipitation: WeatherSeriesPoint[];
+  };
+  sprayRecommendation: SprayRecommendation;
+  precipitationTile?: TileResponse | null;
 };
 
 export type ImageryDay = {
@@ -45,6 +82,7 @@ export type BasicZonesResult = {
     statsCsv: string;
   };
   vectorsGeojson: FeatureCollection;
+  classCount: number;
 };
 
 export type AdvancedZonesResult = {
@@ -60,6 +98,7 @@ export type AdvancedZonesResult = {
     statsDissolvedCsv: string;
   };
   vectorsGeojson: FeatureCollection;
+  classCount: number;
 };
 
 export type SeasonInput = {
@@ -125,4 +164,11 @@ export function requestAdvancedZones(payload: {
   seasons: SeasonInput[];
 }): Promise<AdvancedZonesResult> {
   return fetchJson<AdvancedZonesResult>("/api/products/zones/advanced", payload);
+}
+
+export function requestWeatherForecast(payload: {
+  aoi: GeometryInput;
+  baseTempC?: number;
+}): Promise<WeatherForecastResponse> {
+  return fetchJson<WeatherForecastResponse>("/api/weather/forecast", payload);
 }

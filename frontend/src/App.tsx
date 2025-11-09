@@ -1,80 +1,57 @@
-import { ChangeEvent, FormEvent, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
 import type {
   AdvancedZonesResult,
   BasicZonesResult,
   GeometryInput,
-  ImageryResult,
   NdviMonthResult,
-  SeasonInput
+  SeasonInput,
+  WeatherForecastResponse
 } from "./lib/api";
 import {
   requestAdvancedZones,
   requestBasicZones,
-  requestImageryDaily,
-  requestNdviMonth
+  requestNdviMonth,
+  requestWeatherForecast
 } from "./lib/api";
-import { parseSeasonCsv, validateDateRange } from "./lib/validators";
+import { validateDateRange } from "./lib/validators";
 import { AOIInput } from "./components/AOIInput";
-import { Map, type MapLayerConfig } from "./components/Map";
-import type { ProductKind } from "./components/ProductForm";
+import { Map, type MapLayerConfig, type LegendConfig } from "./components/Map";
+import { NdviTrendChart } from "./components/NdviTrendChart";
+import { WeatherForecast } from "./components/WeatherForecast";
+import { WeatherCharts } from "./components/WeatherCharts";
+import { WeatherService } from "./lib/weather";
+import { NoteModal } from "./components/NoteModal";
+import { NotesPanel } from "./components/NotesPanel";
+import { loadNotes, notesStorageKey, saveNotes, type FieldNote, type NoteCategoryId } from "./lib/notes";
+import { pointInsideGeometry } from "./lib/geometry";
 
 import "./index.css";
 
-type ProductResult =
-  | { type: "ndvi-month"; data: NdviMonthResult }
-  | { type: "imagery"; data: ImageryResult }
-  | { type: "zones-basic"; data: BasicZonesResult }
-  | { type: "zones-advanced"; data: AdvancedZonesResult };
-
-type LayerEntry = MapLayerConfig & {
-  label: string;
-  description?: string;
-};
-
-const NAV_ITEMS = [
-  { label: "NDVI MONTH", active: true },
-  { label: "IMAGERY" },
-  { label: "ZONES" }
-];
-
-const PRODUCT_OPTIONS: { id: ProductKind; name: string; description: string }[] = [
-  {
-    id: "ndvi-month",
-    name: "NDVI Month",
-    description: "Monthly NDVI composites for the selected boundary."
-  },
-  {
-    id: "imagery",
-    name: "Daily Imagery",
-    description: "Sentinel-2 true colour mosaics with cloud statistics."
-  },
-  {
-    id: "zones-basic",
-    name: "Basic Zones",
-    description: "Quantile NDVI zones with GeoTIFF, SHP, and CSV downloads."
-  },
-  {
-    id: "zones-advanced",
-    name: "Advanced Zones",
-    description: "Season-aware NDVI analytics for agronomy teams."
-  }
-];
-
 const NDVI_PALETTE = ["#f9f5d7", "#f6cf75", "#ee964b", "#4f9d69", "#226f54", "#193b48"];
-const ZONE_PALETTE_BASE = ["#f5e6b3", "#d1ce7a", "#7fb285", "#4f8f8c", "#3a6b82", "#325272", "#273b5b", "#1e2a44", "#151c31"];
+const ZONE_PALETTE_BASE = [
+  "#f5e6b3",
+  "#d1ce7a",
+  "#7fb285",
+  "#4f8f8c",
+  "#3a6b82",
+  "#325272",
+  "#273b5b",
+  "#1e2a44",
+  "#151c31"
+];
+const DEFAULT_CLAMP: [number, number] = [-0.2, 0.8];
 
-function zonePalette(count: number): string[] {
-  if (count <= ZONE_PALETTE_BASE.length) {
-    return ZONE_PALETTE_BASE.slice(0, count);
-  }
-  return Array.from({ length: count }, (_, index) => {
-    const position = (index / Math.max(count - 1, 1)) * (ZONE_PALETTE_BASE.length - 1);
-    const lower = Math.floor(position);
-    const upper = Math.min(ZONE_PALETTE_BASE.length - 1, Math.ceil(position));
-    if (lower === upper) return ZONE_PALETTE_BASE[lower];
-    return ZONE_PALETTE_BASE[lower];
-  });
+function toDateInput(value: Date): string {
+  const iso = value.toISOString();
+  return iso.slice(0, 10);
+}
+
+function currentSeasonRange() {
+  const today = new Date();
+  const end = toDateInput(today);
+  const startAnchor = new Date(today.getFullYear(), today.getMonth() - 5, 1);
+  return { start: toDateInput(startAnchor), end };
 }
 
 function formatMonthLabel(name: string): string {
@@ -86,727 +63,947 @@ function formatMonthLabel(name: string): string {
   return date.toLocaleDateString(undefined, { month: "short", year: "numeric" });
 }
 
-function formatDateLabel(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString(undefined, {
-    day: "numeric",
-    month: "short",
-    year: "numeric"
+function formatDownloadLabel(key: string): string {
+  return key
+    .replace(/_/g, " ")
+    .replace(/\bndvi\b/i, "NDVI")
+    .replace(/\bgeotiff\b/i, "GeoTIFF")
+    .replace(/\braw\b/i, "Raw")
+    .replace(/\bcolour\b/i, "Colour")
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function zonePalette(count: number): string[] {
+  if (count <= ZONE_PALETTE_BASE.length) {
+    return ZONE_PALETTE_BASE.slice(0, count);
+  }
+  return Array.from({ length: count }, (_, index) => {
+    const position = (index / Math.max(count - 1, 1)) * (ZONE_PALETTE_BASE.length - 1);
+    const lower = Math.floor(position);
+    const upper = Math.min(ZONE_PALETTE_BASE.length - 1, Math.ceil(position));
+    if (lower === upper) return ZONE_PALETTE_BASE[lower];
+    return ZONE_PALETTE_BASE[upper];
   });
 }
 
-function formatDownloadLabel(key: string): string {
-  const label = key
-    .replace(/([A-Z])/g, " $1")
-    .replace(/_/g, " ")
-    .replace(/^\w/, (char) => char.toUpperCase());
-  return label
-    .replace(/\bNdvi\b/g, "NDVI")
-    .replace(/\bColour\b/g, "Colour")
-    .replace(/\bGeotiff\b/g, "GeoTIFF");
+interface LayerEntry extends MapLayerConfig {
+  label: string;
+  subtitle?: string;
+  group?: "ndvi" | "vra" | "weather";
 }
 
-export default function App() {
-  const [product, setProduct] = useState<ProductKind>("ndvi-month");
-  const [aoi, setAoi] = useState<GeometryInput | null>(null);
-  const [startDate, setStartDate] = useState<string>("");
-  const [endDate, setEndDate] = useState<string>("");
-  const [clamp, setClamp] = useState<[number, number] | undefined>();
-  const [imageryBands, setImageryBands] = useState<string[]>(["B4", "B3", "B2"]);
-  const [breaksText, setBreaksText] = useState<string>("-1.0,-0.3,0.3,1.0");
-  const [seasons, setSeasons] = useState<SeasonInput[]>([]);
-  const [layers, setLayers] = useState<LayerEntry[]>([]);
-  const [downloads, setDownloads] = useState<Record<string, string>>({});
-  const [result, setResult] = useState<ProductResult | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [loadingKey, setLoadingKey] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [basicZoneCount, setBasicZoneCount] = useState<number>(5);
-  const [zoneClassCount, setZoneClassCount] = useState<number>(5);
+type SeasonDraft = {
+  crop: string;
+  sowingDate: string;
+  harvestDate: string;
+  yieldAsset?: string;
+  soilAsset?: string;
+};
 
+type VraPrescription = {
+  id: string;
+  mode: "basic" | "advanced";
+  title: string;
+  createdAt: string;
+  classCount: number;
+  downloads: Record<string, string>;
+  layerIds: string[];
+};
+
+const EMPTY_SEASON: SeasonDraft = {
+  crop: "",
+  sowingDate: "",
+  harvestDate: "",
+  yieldAsset: "",
+  soilAsset: ""
+};
+
+export default function App() {
+  const defaults = useMemo(currentSeasonRange, []);
+  const [aoi, setAoi] = useState<GeometryInput | null>(null);
+  const [startDate, setStartDate] = useState<string>(defaults.start);
+  const [endDate, setEndDate] = useState<string>(defaults.end);
+  const [clamp, setClamp] = useState<[number, number]>(DEFAULT_CLAMP);
+
+  const [layers, setLayers] = useState<LayerEntry[]>([]);
+  const [vraLayers, setVraLayers] = useState<LayerEntry[]>([]);
+  const [weatherLayers, setWeatherLayers] = useState<LayerEntry[]>([]);
+
+  const [legendConfig, setLegendConfig] = useState<LegendConfig | null>(null);
+
+  const [ndviResult, setNdviResult] = useState<NdviMonthResult | null>(null);
+  const [downloads, setDownloads] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [weather, setWeather] = useState<WeatherForecastResponse | null>(null);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [weatherError, setWeatherError] = useState<string | null>(null);
+
+  const [notes, setNotes] = useState<FieldNote[]>([]);
+  const [notesVisible, setNotesVisible] = useState(true);
+  const [noteMode, setNoteMode] = useState(false);
+  const [noteModalOpen, setNoteModalOpen] = useState(false);
+  const [pendingLocation, setPendingLocation] = useState<{ lat: number; lon: number } | null>(null);
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+
+  const [vraMode, setVraMode] = useState<"basic" | "advanced">("basic");
+  const [vraZoneCount, setVraZoneCount] = useState(5);
+  const [vraStartDate, setVraStartDate] = useState(defaults.start);
+  const [vraEndDate, setVraEndDate] = useState(defaults.end);
+  const [vraBreaksText, setVraBreaksText] = useState("-0.3,0.0,0.3,0.6");
+  const [vraSeasons, setVraSeasons] = useState<SeasonDraft[]>([]);
+  const [seasonDraft, setSeasonDraft] = useState<SeasonDraft>(EMPTY_SEASON);
+  const [vraLoading, setVraLoading] = useState(false);
+  const [vraError, setVraError] = useState<string | null>(null);
+  const [prescriptions, setPrescriptions] = useState<VraPrescription[]>([]);
+
+  const noteKey = useMemo(() => notesStorageKey(aoi), [aoi]);
+
+  useEffect(() => {
+    const stored = loadNotes(noteKey);
+    setNotes(stored);
+  }, [noteKey]);
+
+  useEffect(() => {
+    saveNotes(noteKey, notes);
+  }, [noteKey, notes]);
+
+  const mapLayers = useMemo(() => [...layers, ...weatherLayers, ...vraLayers], [layers, weatherLayers, vraLayers]);
+  const precipitationLayer = weatherLayers.find((layer) => layer.id === "precipitation-overlay");
   const downloadEntries = Object.entries(downloads);
 
-  const legend = (() => {
-    if (!layers.length) return null;
-    if (product === "ndvi-month") {
-      const minClamp = clamp ? clamp[0] : -0.2;
-      const maxClamp = clamp ? clamp[1] : 0.8;
-      return {
-        type: "gradient" as const,
-        title: "NDVI",
-        min: Math.round(minClamp * 100) / 100,
-        max: Math.round(maxClamp * 100) / 100,
-        colors: NDVI_PALETTE
-      };
-    }
-    if (product === "zones-basic" || product === "zones-advanced") {
-      const palette = zonePalette(zoneClassCount);
-      return {
-        type: "discrete" as const,
-        title: "NDVI Zones",
-        entries: palette.map((color, index) => ({
-          label: `Zone ${index + 1}${index === 0 ? " (Lowest)" : index === palette.length - 1 ? " (Highest)" : ""}`,
-          color
-        }))
-      };
-    }
-    return null;
-  })();
-
-  function clearOutputs() {
-    setLayers([]);
-    setDownloads({});
-    setResult(null);
-    setError(null);
-    setLoading(false);
-    setLoadingKey(null);
-    setZoneClassCount(5);
-  }
-
-  function handleSelectProduct(next: ProductKind) {
-    setProduct(next);
-    clearOutputs();
-  }
+  const trendPoints = useMemo(
+    () =>
+      ndviResult?.items.map((item) => ({
+        label: formatMonthLabel(item.name),
+        value: typeof item.meanNdvi === "number" ? item.meanNdvi : null
+      })) ?? [],
+    [ndviResult]
+  );
 
   function handleAoiChange(geometry: GeometryInput | null) {
     setAoi(geometry);
-    clearOutputs();
+    setLayers([]);
+    setVraLayers([]);
+    setWeatherLayers([]);
+    setLegendConfig(null);
+    setDownloads({});
+    setNdviResult(null);
+    setWeather(null);
+    setNotes([]);
+    setPrescriptions([]);
+    setSelectedNoteId(null);
+    setNoteMode(false);
+    setNoteError(null);
   }
 
-  function toggleLayer(layerId: string) {
-    setLayers((current) =>
+  function handleClampChange(index: 0 | 1, value: string) {
+    const parsed = Number(value);
+    if (Number.isNaN(parsed)) return;
+    setClamp((current) => {
+      const next = [...current] as [number, number];
+      next[index] = parsed;
+      return next;
+    });
+  }
+
+  function toggleLayer(id: string) {
+    setLayers((current) => current.map((layer) => (layer.id === id ? { ...layer, visible: !layer.visible } : layer)));
+  }
+
+  function toggleVraLayers(layerIds: string[]) {
+    setVraLayers((current) => {
+      const shouldShow = !layerIds.some((layerId) => current.find((layer) => layer.id === layerId)?.visible);
+      return current.map((layer) =>
+        layerIds.includes(layer.id) ? { ...layer, visible: shouldShow } : layer
+      );
+    });
+    if (layerIds.length) {
+      setLegendConfig((prev) => prev);
+    }
+  }
+
+  function toggleWeatherOverlay() {
+    setWeatherLayers((current) =>
       current.map((layer) =>
-        layer.id === layerId ? { ...layer, visible: !layer.visible } : layer
+        layer.id === "precipitation-overlay" ? { ...layer, visible: !layer.visible } : layer
       )
     );
   }
 
-  async function runNdviMonth() {
-    if (!aoi) throw new Error("Provide an AOI");
-    const response = await requestNdviMonth({
-      aoi,
-      start: startDate,
-      end: endDate,
-      clamp
-    });
-    const layerEntries: LayerEntry[] = [
-      {
-        id: "ndvi-mean",
-        label: "NDVI Mean",
-        description: "Average NDVI for the selected period.",
-        type: "raster",
-        tile: response.mean,
-        visible: true
-      },
-      ...response.items.map((item) => ({
-        id: `ndvi-${item.name}`,
+  function handleToggleNotesVisibility() {
+    setNotesVisible((value) => !value);
+  }
+
+  function handleStartNoteMode() {
+    if (!aoi) {
+      setNoteError("Upload a field before adding notes.");
+      return;
+    }
+    setNoteMode((value) => !value);
+    setNoteError(null);
+  }
+
+  function handleSelectNote(noteId: string) {
+    setNotesVisible(true);
+    setSelectedNoteId(noteId);
+    setNoteMode(false);
+  }
+
+  function downloadBlob(filename: string, content: string, type: string) {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleExportJson() {
+    downloadBlob("field-notes.json", JSON.stringify(notes, null, 2), "application/json");
+  }
+
+  function handleExportCsv() {
+    const header = ["id", "lat", "lon", "category", "text", "createdAt"];
+    const rows = notes.map((note) => [
+      note.id,
+      note.lat.toFixed(6),
+      note.lon.toFixed(6),
+      note.category,
+      note.text.replace(/"/g, '""'),
+      note.createdAt
+    ]);
+    const csv = [header.join(","), ...rows.map((row) => row.map((cell, index) => (index === 4 ? `"${cell}"` : cell)).join(","))].join("\n");
+    downloadBlob("field-notes.csv", csv, "text/csv");
+  }
+
+  function handleSeasonDraftChange(event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
+    const { name, value } = event.target;
+    setSeasonDraft((current) => ({ ...current, [name]: value }));
+  }
+
+  function addSeason() {
+    if (!seasonDraft.sowingDate || !seasonDraft.harvestDate) {
+      setVraError("Provide sowing and harvest dates for the season.");
+      return;
+    }
+    setVraSeasons((current) => [...current, seasonDraft]);
+    setSeasonDraft(EMPTY_SEASON);
+    setVraError(null);
+  }
+
+  function removeSeason(index: number) {
+    setVraSeasons((current) => current.filter((_, idx) => idx !== index));
+  }
+
+  async function handleMapClickForNote(position: { lat: number; lon: number }) {
+    if (!noteMode) return;
+    if (!aoi || !pointInsideGeometry({ lat: position.lat, lon: position.lon }, aoi)) {
+      setNoteError("Notes must be dropped inside the active field boundary.");
+      return;
+    }
+    setNoteError(null);
+    setPendingLocation(position);
+    setNoteModalOpen(true);
+  }
+
+  function handleSaveNote(payload: { text: string; category: NoteCategoryId; photo?: string | null }) {
+    if (!pendingLocation) return;
+    const newNote: FieldNote = {
+      id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `note-${Date.now()}`,
+      lat: pendingLocation.lat,
+      lon: pendingLocation.lon,
+      text: payload.text,
+      category: payload.category,
+      photo: payload.photo ?? null,
+      createdAt: new Date().toISOString()
+    };
+    setNotes((current) => [newNote, ...current]);
+    setNoteMode(false);
+    setPendingLocation(null);
+    setNoteModalOpen(false);
+    setSelectedNoteId(newNote.id);
+  }
+
+  function handleCancelNoteModal() {
+    setPendingLocation(null);
+    setNoteModalOpen(false);
+  }
+
+  async function handleWeatherFetch(event: FormEvent) {
+    event.preventDefault();
+    if (!aoi) {
+      setWeatherError("Upload a field boundary to fetch weather.");
+      return;
+    }
+    setWeatherLoading(true);
+    setWeatherError(null);
+    try {
+      const response = await requestWeatherForecast({ aoi });
+      setWeather(response);
+      const precipitationLayerConfig = WeatherService.buildPrecipitationLayer(response);
+      if (precipitationLayerConfig) {
+        setWeatherLayers([
+          {
+            ...precipitationLayerConfig,
+            label: "Precipitation radar",
+            subtitle: "RainViewer overlay",
+            visible: false,
+            group: "weather"
+          }
+        ]);
+      } else {
+        setWeatherLayers([]);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unable to load weather.";
+      setWeatherError(message);
+    } finally {
+      setWeatherLoading(false);
+    }
+  }
+
+  async function handleGenerateNdvi(event: FormEvent) {
+    event.preventDefault();
+    if (!aoi) {
+      setError("Upload or draw a field boundary to continue.");
+      return;
+    }
+    if (!validateDateRange(startDate, endDate)) {
+      setError("Choose a valid date range.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await requestNdviMonth({
+        aoi,
+        start: startDate,
+        end: endDate,
+        clamp
+      });
+      const monthLayers: LayerEntry[] = response.items.map((item, index) => ({
+        id: item.name,
         label: formatMonthLabel(item.name),
-        description: "Monthly NDVI composite.",
+        subtitle: "Monthly composite",
         type: "raster",
         tile: item.tile,
-        visible: false
-      }))
-    ];
-    setLayers(layerEntries);
-    setDownloads({ ...response.downloads });
-    setResult({ type: "ndvi-month", data: response });
-  }
-
-  async function runImagery() {
-    if (!aoi) throw new Error("Provide an AOI");
-    const response = await requestImageryDaily({
-      aoi,
-      start: startDate,
-      end: endDate,
-      bands: imageryBands
-    });
-    const imageryLayers: LayerEntry[] = response.days
-      .filter((day) => Boolean(day.tile))
-      .map((day, index) => ({
-        id: `imagery-${day.date}`,
-        label: formatDateLabel(day.date),
-        description: `Cloud cover ${Math.round(day.cloudPct)}%`,
-        type: "raster",
-        tile: day.tile!,
-        visible: index === 0
+        visible: index === response.items.length - 1,
+        group: "ndvi"
       }));
-    if (!imageryLayers.length) {
-      throw new Error("No imagery tiles returned for the selected range.");
-    }
-    setLayers(imageryLayers);
-    setDownloads({});
-    setResult({ type: "imagery", data: response });
-  }
-
-  async function runBasicZones() {
-    if (!aoi) throw new Error("Provide an AOI");
-    const response = await requestBasicZones({
-      aoi,
-      start: startDate,
-      end: endDate,
-      nClasses: basicZoneCount
-    });
-    const layerEntries: LayerEntry[] = [
-      {
-        id: "zones-basic-preview",
-        label: "Zones Preview",
-        description: "Quantile NDVI zones before download.",
+      const meanLayer: LayerEntry = {
+        id: "ndvi-mean",
+        label: "Season mean",
+        subtitle: `${response.items.length || 1} months combined`,
         type: "raster",
-        tile: response.preview.tile,
-        visible: true
-      },
-      {
-        id: "zones-basic-polygons",
-        label: "Zones Polygons",
-        description: "Vector polygons grouped by NDVI zone.",
-        type: "vector",
-        geoJson: response.vectorsGeojson,
-        palette: zonePalette(response.classCount),
-        visible: false
-      }
-    ];
-    setLayers(layerEntries);
-    setDownloads({ ...response.downloads });
-    setResult({ type: "zones-basic", data: response });
-    setZoneClassCount(response.classCount);
-  }
-
-  async function runAdvancedZones() {
-    if (!aoi) throw new Error("Provide an AOI");
-    const breaks = breaksText
-      .split(",")
-      .map((value) => parseFloat(value.trim()))
-      .filter((value) => !Number.isNaN(value));
-    if (breaks.length !== 4) {
-      throw new Error("Advanced zones require four break values.");
-    }
-    if (!seasons.length) {
-      throw new Error("Upload at least one season row.");
-    }
-    const response = await requestAdvancedZones({
-      aoi,
-      breaks,
-      seasons
-    });
-    const layerEntries: LayerEntry[] = [
-      {
-        id: "zones-advanced",
-        label: "Zones Preview",
-        description: "Season-aware NDVI classes.",
-        type: "raster",
-        tile: response.preview.zones,
-        visible: true
-      },
-      {
-        id: "zones-advanced-composite",
-        label: "Composite Preview",
-        description: "Median NDVI composite for the configured seasons.",
-        type: "raster",
-        tile: response.preview.composite,
-        visible: false
-      },
-      {
-        id: "zones-advanced-polygons",
-        label: "Zones Polygons",
-        description: "Vector polygons grouped by NDVI zone.",
-        type: "vector",
-        geoJson: response.vectorsGeojson,
-        palette: zonePalette(response.classCount),
-        visible: false
-      }
-    ];
-    setLayers(layerEntries);
-    setDownloads({ ...response.downloads });
-    setResult({ type: "zones-advanced", data: response });
-    setZoneClassCount(response.classCount);
-  }
-
-  function isLoading(key: string) {
-    return loading && loadingKey === key;
-  }
-
-  function updateClamp(index: number, value: string) {
-    if (!value) {
-      setClamp(undefined);
-      return;
-    }
-    const parsed = parseFloat(value);
-    if (Number.isNaN(parsed)) return;
-    const next: [number, number] = clamp ? [...clamp] as [number, number] : [0, 1];
-    next[index] = parsed;
-    setClamp(next);
-  }
-
-  async function handleSeasonCsv(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const parsed = await parseSeasonCsv(file);
-      setSeasons(parsed);
-      setError(null);
+        tile: response.mean,
+        visible: true,
+        group: "ndvi"
+      };
+      setLayers([meanLayer, ...monthLayers]);
+      setDownloads({ ...(response.downloads ?? {}) });
+      setNdviResult(response);
+      setLegendConfig({
+        type: "gradient",
+        title: "NDVI",
+        min: clamp[0],
+        max: clamp[1],
+        colors: NDVI_PALETTE
+      });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to parse seasons CSV.";
+      const message = err instanceof Error ? err.message : "Failed to fetch NDVI.";
       setError(message);
+    } finally {
+      setLoading(false);
     }
   }
 
-  async function submitWorkflow(
-    event: FormEvent,
-    key: string,
-    runner: () => Promise<void>,
-    needsDate = true
+  function attachPrescriptionLayers(
+    title: string,
+    downloadsMap: Record<string, string>,
+    classCount: number,
+    layersToAdd: LayerEntry[]
   ) {
+    const id = `vra-${Date.now()}`;
+    const paletteColors = layersToAdd.find((layer) => layer.palette)?.palette ?? zonePalette(classCount);
+    const legendEntries = paletteColors.map((color, index) => ({
+      label: `Zone ${index + 1}${index === 0 ? " (Lowest)" : index === paletteColors.length - 1 ? " (Highest)" : ""}`,
+      color
+    }));
+    const nextLayers = layersToAdd.map((layer, index) => ({ ...layer, id: `${id}-${layer.id}-${index}` }));
+    setVraLayers((current) => [...current, ...nextLayers]);
+    setLegendConfig({
+      type: "discrete",
+      title: "VRA Zones",
+      entries: legendEntries
+    });
+    setPrescriptions((current) => [
+      {
+        id,
+        mode: vraMode,
+        title,
+        createdAt: new Date().toISOString(),
+        classCount,
+        downloads: downloadsMap,
+        layerIds: nextLayers.map((layer) => layer.id)
+      },
+      ...current
+    ]);
+  }
+
+  async function handleGenerateBasicZones(event: FormEvent) {
     event.preventDefault();
     if (!aoi) {
-      setError("AOI is required");
+      setVraError("Upload a field before generating zones.");
       return;
     }
-    if (needsDate && !validateDateRange(startDate, endDate)) {
-      setError("Choose a valid date range");
+    if (!validateDateRange(vraStartDate, vraEndDate)) {
+      setVraError("Choose a valid date range for zones.");
       return;
     }
-    setLoading(true);
-    setLoadingKey(key);
-    setError(null);
+    setVraLoading(true);
+    setVraError(null);
     try {
-      await runner();
+      const response: BasicZonesResult = await requestBasicZones({
+        aoi,
+        start: vraStartDate,
+        end: vraEndDate,
+        nClasses: vraZoneCount
+      });
+      const downloadsMap: Record<string, string> = { ...response.downloads };
+      const palette = zonePalette(response.classCount ?? vraZoneCount);
+      const layersToAdd: LayerEntry[] = [
+        {
+          id: "preview",
+          label: `${response.classCount}-class zones preview`,
+          subtitle: "Raster preview",
+          type: "raster",
+          tile: response.preview.tile,
+          visible: false,
+          group: "vra"
+        },
+        {
+          id: "vectors",
+          label: "Zone polygons",
+          subtitle: "Vector prescription",
+          type: "vector",
+          geoJson: response.vectorsGeojson,
+          palette,
+          visible: true,
+          group: "vra"
+        }
+      ];
+      attachPrescriptionLayers(
+        `${response.classCount} NDVI classes`,
+        downloadsMap,
+        response.classCount ?? vraZoneCount,
+        layersToAdd
+      );
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to run workflow.";
-      setError(message);
+      const message = err instanceof Error ? err.message : "Failed to generate basic zones.";
+      setVraError(message);
     } finally {
-      setLoading(false);
-      setLoadingKey(null);
+      setVraLoading(false);
     }
   }
 
-  async function submitAdvancedZones(event: FormEvent) {
+  function buildSeasonPayloads(): SeasonInput[] {
+    return vraSeasons.map((season, index) => ({
+      fieldName: null,
+      fieldId: null,
+      crop: season.crop || null,
+      sowingDate: season.sowingDate,
+      harvestDate: season.harvestDate,
+      emergenceDate: null,
+      floweringDate: null,
+      yieldAsset: season.yieldAsset || null,
+      soilAsset: season.soilAsset || null
+      // A future enhancement can upload yield/soil rasters and assign their GCS paths to yieldAsset/soilAsset.
+    }));
+  }
+
+  async function handleGenerateAdvancedZones(event: FormEvent) {
     event.preventDefault();
     if (!aoi) {
-      setError("AOI is required");
+      setVraError("Upload a field before generating zones.");
       return;
     }
-    const breaks = breaksText
+    const breaks = vraBreaksText
       .split(",")
       .map((value) => parseFloat(value.trim()))
       .filter((value) => !Number.isNaN(value));
     if (breaks.length !== 4) {
-      setError("Advanced zones require four break values.");
+      setVraError("Advanced zones require four break values.");
       return;
     }
-    if (!seasons.length) {
-      setError("Upload at least one season row.");
+    if (!vraSeasons.length) {
+      setVraError("Add at least one season for advanced zones.");
       return;
     }
-    setLoading(true);
-    setLoadingKey("zones-advanced");
-    setError(null);
-    try {
-      await runAdvancedZones();
+    setVraLoading(true);
+    setVraError(null);
+      try {
+        const seasonsPayload = buildSeasonPayloads();
+        const response: AdvancedZonesResult = await requestAdvancedZones({
+          aoi,
+          breaks,
+          seasons: seasonsPayload
+        });
+        const downloadsMap: Record<string, string> = { ...response.downloads };
+        const palette = zonePalette(response.classCount ?? breaks.length + 1);
+        const layersToAdd: LayerEntry[] = [
+          {
+            id: "zones-preview",
+            label: "Advanced zones",
+          subtitle: "Preview",
+          type: "raster",
+          tile: response.preview.zones,
+          visible: true,
+          group: "vra"
+        },
+        {
+          id: "composite-preview",
+          label: "Composite",
+          subtitle: "Season composite",
+          type: "raster",
+          tile: response.preview.composite,
+          visible: false,
+          group: "vra"
+        },
+        {
+          id: "vectors",
+          label: "Zone polygons",
+          subtitle: "Vector prescription",
+          type: "vector",
+          geoJson: response.vectorsGeojson,
+          palette,
+          visible: false,
+          group: "vra"
+        }
+      ];
+      attachPrescriptionLayers(
+        `${response.classCount} advanced classes`,
+        downloadsMap,
+        response.classCount ?? palette.length,
+        layersToAdd
+      );
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to run workflow.";
-      setError(message);
+      const message = err instanceof Error ? err.message : "Failed to generate advanced zones.";
+      setVraError(message);
     } finally {
-      setLoading(false);
-      setLoadingKey(null);
+      setVraLoading(false);
     }
-  }
-
-  function renderResultSummary() {
-    if (!result) return null;
-    if (result.type === "imagery") {
-      return (
-        <p className="text-xs text-slate-500">
-          {result.data.summary.count} scenes • Avg cloud{" "}
-          {result.data.summary.avgCloudPct.toFixed(1)}%
-        </p>
-      );
-    }
-    if (result.type === "ndvi-month") {
-      return (
-        <p className="text-xs text-slate-500">
-          {result.data.items.length} monthly layers plus a mean composite ready to
-          view.
-        </p>
-      );
-    }
-    if (result.type === "zones-basic") {
-      return (
-        <p className="text-xs text-slate-500">
-          Previewing quantile zones; download detailed outputs below.
-        </p>
-      );
-    }
-    if (result.type === "zones-advanced") {
-      return (
-        <p className="text-xs text-slate-500">
-          Composite and zone previews are available together for inspection.
-        </p>
-      );
-    }
-    return null;
-  }
-
-  function renderDateFields(disabled: boolean) {
-    return (
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1">
-          <label className="text-xs text-slate-600">Start Date</label>
-          <input
-            type="date"
-            value={startDate}
-            onChange={(event) => setStartDate(event.target.value)}
-            className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
-            required
-            disabled={disabled}
-          />
-        </div>
-        <div className="space-y-1">
-          <label className="text-xs text-slate-600">End Date</label>
-          <input
-            type="date"
-            value={endDate}
-            onChange={(event) => setEndDate(event.target.value)}
-            className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
-            required
-            disabled={disabled}
-          />
-        </div>
-      </div>
-    );
-  }
-
-  function renderNdviInputs() {
-    return (
-      <form
-        className="space-y-4"
-        onSubmit={(event) => submitWorkflow(event, "ndvi-month", runNdviMonth)}
-      >
-        {renderDateFields(isLoading("ndvi-month"))}
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1">
-            <label className="text-xs text-slate-600">Clamp Min</label>
-            <input
-              type="number"
-              step="0.01"
-              value={clamp?.[0] ?? ""}
-              onChange={(event) => updateClamp(0, event.target.value)}
-              className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
-              placeholder="0"
-              disabled={isLoading("ndvi-month")}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-slate-600">Clamp Max</label>
-            <input
-              type="number"
-              step="0.01"
-              value={clamp?.[1] ?? ""}
-              onChange={(event) => updateClamp(1, event.target.value)}
-              className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
-              placeholder="1"
-              disabled={isLoading("ndvi-month")}
-            />
-          </div>
-        </div>
-        <button
-          type="submit"
-          disabled={isLoading("ndvi-month") || !aoi}
-          className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
-        >
-          {isLoading("ndvi-month") ? "Working…" : "Run NDVI Month"}
-        </button>
-      </form>
-    );
-  }
-
-  function renderImageryInputs() {
-    return (
-      <form
-        className="space-y-4"
-        onSubmit={(event) => submitWorkflow(event, "imagery", runImagery)}
-      >
-        {renderDateFields(isLoading("imagery"))}
-        <div className="space-y-1">
-          <label className="text-xs text-slate-600">Bands (comma separated)</label>
-          <input
-            type="text"
-            value={imageryBands.join(",")}
-            onChange={(event) =>
-              setImageryBands(
-                event.target.value
-                  .split(",")
-                  .map((band) => band.trim())
-                  .filter(Boolean)
-              )
-            }
-            className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
-            placeholder="B4,B3,B2"
-            disabled={isLoading("imagery")}
-          />
-        </div>
-        <button
-          type="submit"
-          disabled={isLoading("imagery") || !aoi}
-          className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
-        >
-          {isLoading("imagery") ? "Working…" : "Run Daily Imagery"}
-        </button>
-      </form>
-    );
-  }
-
-  function renderZonesInputs() {
-    return (
-      <div className="space-y-6">
-        <form
-          className={`space-y-4 rounded-xl border ${
-            product === "zones-basic" ? "border-slate-900" : "border-slate-200"
-          } bg-white p-4`}
-          onSubmit={(event) => submitWorkflow(event, "zones-basic", runBasicZones)}
-        >
-          <div className="space-y-1">
-            <h3 className="text-sm font-semibold text-slate-800">Basic Zones</h3>
-            <p className="text-xs text-slate-500">
-              Quantile NDVI zoning with GeoTIFF, shapefile, and CSV exports.
-            </p>
-        </div>
-        {renderDateFields(isLoading("zones-basic"))}
-        <div className="space-y-1">
-          <label className="text-xs text-slate-600">Number of Zones</label>
-          <input
-            type="number"
-            min={3}
-            max={9}
-            value={basicZoneCount}
-            onChange={(event) => {
-              const next = Number(event.target.value);
-              if (Number.isNaN(next)) {
-                setBasicZoneCount(5);
-                return;
-              }
-              setBasicZoneCount(Math.min(9, Math.max(3, Math.round(next))));
-            }}
-            className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
-            disabled={isLoading("zones-basic")}
-          />
-          <p className="text-xs text-slate-500">Choose between 3 and 9 quantile classes.</p>
-        </div>
-        <button
-          type="submit"
-          disabled={isLoading("zones-basic") || !aoi}
-          className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
-        >
-            {isLoading("zones-basic") ? "Working…" : "Run Basic Zones"}
-          </button>
-        </form>
-        <form
-          className={`space-y-4 rounded-xl border ${
-            product === "zones-advanced" ? "border-slate-900" : "border-slate-200"
-          } bg-white p-4`}
-          onSubmit={submitAdvancedZones}
-        >
-          <div className="space-y-1">
-            <h3 className="text-sm font-semibold text-slate-800">Advanced Zones</h3>
-            <p className="text-xs text-slate-500">
-              Upload seasons and fixed NDVI breaks for agronomic zone insights.
-            </p>
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-slate-600">Fixed Breaks</label>
-            <input
-              type="text"
-              value={breaksText}
-              onChange={(event) => setBreaksText(event.target.value)}
-              className="w-full rounded-md border border-slate-200 px-2 py-1 text-sm"
-              placeholder="-1.0,-0.3,0.3,1.0"
-              disabled={isLoading("zones-advanced")}
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-slate-600">Seasons CSV</label>
-            <input
-              type="file"
-              accept=".csv"
-              onChange={handleSeasonCsv}
-              className="w-full text-sm"
-              disabled={isLoading("zones-advanced")}
-            />
-            <p className="text-xs text-slate-500">Loaded seasons: {seasons.length}</p>
-          </div>
-          <button
-            type="submit"
-            disabled={isLoading("zones-advanced") || !aoi}
-            className="w-full rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
-          >
-            {isLoading("zones-advanced") ? "Working…" : "Run Advanced Zones"}
-          </button>
-        </form>
-      </div>
-    );
-  }
-
-  function renderSidebarForms() {
-    if (product === "ndvi-month") return renderNdviInputs();
-    if (product === "imagery") return renderImageryInputs();
-    return renderZonesInputs();
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-100 lg:h-screen lg:overflow-hidden">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-4">
-          <div className="flex items-center gap-3">
-          </div>
-          <nav className="hidden rounded-full border border-slate-200 bg-slate-50 p-1 text-sm font-semibold text-slate-500 shadow-sm md:flex">
-            {NAV_ITEMS.map((item) => {
-              const isActive = Boolean(item.active);
-              return (
-                <button
-                  key={item.label}
-                  type="button"
-                  className={`rounded-full px-4 py-2 ${
-                    isActive
-                      ? "bg-white text-slate-900 shadow"
-                      : "text-slate-500 hover:text-slate-700"
-                  }`}
-                >
-                  {item.label}
-                </button>
-              );
-            })}
-          </nav>
+    <div className="flex min-h-screen bg-slate-100 text-slate-900">
+      <aside className="flex w-full max-w-md flex-col gap-6 border-r border-slate-200 bg-white/90 px-6 py-8 backdrop-blur">
+        <div className="space-y-1">
+          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Field monitoring</p>
+          <h1 className="text-2xl font-semibold text-slate-900">NDVI crop insight</h1>
+          <p className="text-sm text-slate-500">
+            Upload a paddock boundary, generate NDVI composites, scout the field, and build VRA prescriptions like OneSoil.
+          </p>
         </div>
-      </header>
-      <main className="flex flex-1 min-h-0 flex-col lg:flex-row lg:overflow-hidden">
-        <section className="flex-1 min-h-0 bg-slate-200/40">
-          <div className="h-[420px] min-h-0 w-full border-b border-slate-200 lg:h-full lg:border-none">
-            <Map aoi={aoi} layers={layers} legend={legend} />
+
+        <section className="rounded-2xl border border-slate-100 bg-white/95 p-5 shadow-sm">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Field boundary</p>
+              <h2 className="text-lg font-semibold text-slate-900">Upload or draw</h2>
+            </div>
+            {aoi ? <span className="text-xs font-semibold text-emerald-600">Ready</span> : null}
           </div>
+          <AOIInput value={aoi} onChange={handleAoiChange} />
         </section>
-        <aside className="w-full border-t border-slate-200 bg-white lg:max-w-md lg:border-l lg:border-t-0 lg:flex lg:min-h-0 lg:flex-col lg:overflow-y-auto">
-          <div className="space-y-8 p-6">
-            <div className="space-y-8">
-              <section className="space-y-4">
-                <div>
-                  <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Input
-                  </h2>
-                  <p className="text-sm text-slate-600">
-                    Upload paddock boundaries, choose a workflow, and generate NDVI
-                    products.
-                  </p>
-                </div>
-                <div className="space-y-4">
-                  <div className="flex flex-wrap gap-2">
-                    {PRODUCT_OPTIONS.map((option) => {
-                      const isActive = option.id === product;
-                      return (
-                        <button
-                          key={option.id}
-                          type="button"
-                          onClick={() => handleSelectProduct(option.id)}
-                          className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
-                            isActive
-                              ? "border-slate-900 bg-slate-900 text-white shadow-sm"
-                              : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-800"
-                          }`}
-                        >
-                          {option.name}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="space-y-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                    <AOIInput value={aoi} onChange={handleAoiChange} />
-                    {renderSidebarForms()}
-                    {error ? <p className="text-xs text-rose-600">{error}</p> : null}
-                  </div>
-                </div>
-              </section>
-              <section className="space-y-4">
-                <div>
-                  <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Layers
-                  </h2>
-                  <p className="text-sm text-slate-600">
-                    Toggle map overlays returned by the selected workflow.
-                  </p>
-                </div>
-                <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  {layers.length ? (
-                    <div className="space-y-2">
-                      {layers.map((layer) => (
-                        <label
-                          key={layer.id}
-                          className="flex items-start justify-between gap-4 rounded-lg border border-transparent bg-white px-3 py-2 shadow-sm"
-                        >
-                          <span>
-                            <span className="block text-sm font-semibold text-slate-800">
-                              {layer.label}
-                            </span>
-                            {layer.description ? (
-                              <span className="text-xs text-slate-500">{layer.description}</span>
-                            ) : null}
-                          </span>
-                          <input
-                            type="checkbox"
-                            checked={layer.visible}
-                            onChange={() => toggleLayer(layer.id)}
-                            className="mt-1 h-4 w-4 accent-slate-900"
-                          />
-                        </label>
-                      ))}
-                      {renderResultSummary()}
-                    </div>
-                  ) : (
-                    <p className="text-xs text-slate-500">
-                      Run any workflow to reveal toggleable layers on the map.
-                    </p>
-                  )}
-                </div>
-              </section>
-              <section className="space-y-4">
-                <div>
-                  <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Export Features
-                  </h2>
-                  <p className="text-sm text-slate-600">
-                    Download artefacts like GeoTIFFs, shapefiles, and statistics CSVs.
-                  </p>
-                </div>
-                <div className="space-y-3 rounded-2xl border border-dashed border-slate-300 bg-white p-4">
-                  {downloadEntries.length ? (
-                    <ul className="space-y-2">
-                      {downloadEntries.map(([key, url]) => (
-                        <li
-                          key={key}
-                          className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
-                        >
-                          <span>{formatDownloadLabel(key)}</span>
-                          <a
-                            href={url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="rounded-md bg-slate-900 px-3 py-1 text-xs font-semibold text-white hover:bg-slate-800"
-                          >
-                            Download
-                          </a>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-xs text-slate-500">
-                      Run NDVI Month or Zones workflows to surface download links for raw and coloured
-                      GeoTIFFs, shapefiles, and CSV outputs.
-                    </p>
-                  )}
-                </div>
-              </section>
+
+        <section className="rounded-2xl border border-slate-100 bg-white/95 p-5 shadow-sm">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">NDVI Month</p>
+              <h2 className="text-lg font-semibold text-slate-900">Growing season</h2>
+            </div>
+            {ndviResult ? (
+              <span className="text-xs text-slate-500">{ndviResult.items.length} months</span>
+            ) : null}
+          </div>
+          <form className="space-y-4" onSubmit={handleGenerateNdvi}>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="space-y-1 text-sm text-slate-600">
+                <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Start date</span>
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(event) => setStartDate(event.target.value)}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900"
+                />
+              </label>
+              <label className="space-y-1 text-sm text-slate-600">
+                <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">End date</span>
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={(event) => setEndDate(event.target.value)}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900"
+                />
+              </label>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="space-y-1 text-sm text-slate-600">
+                <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Clamp min</span>
+                <input
+                  type="number"
+                  step="0.05"
+                  value={clamp[0]}
+                  onChange={(event) => handleClampChange(0, event.target.value)}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900"
+                />
+              </label>
+              <label className="space-y-1 text-sm text-slate-600">
+                <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Clamp max</span>
+                <input
+                  type="number"
+                  step="0.05"
+                  value={clamp[1]}
+                  onChange={(event) => handleClampChange(1, event.target.value)}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900"
+                />
+              </label>
+            </div>
+            <button
+              type="submit"
+              disabled={loading || !aoi}
+              className="w-full rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold uppercase tracking-wide text-white shadow-lg shadow-emerald-600/30 transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-slate-300"
+            >
+              {loading ? "Generating..." : "Generate NDVI"}
+            </button>
+            {error ? <p className="text-sm text-rose-600">{error}</p> : null}
+          </form>
+        </section>
+
+        <section className="rounded-2xl border border-slate-100 bg-white/95 p-5 shadow-sm">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">VRA Maps</p>
+              <h2 className="text-lg font-semibold text-slate-900">Productivity zones</h2>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setVraMode("basic")}
+                className={`rounded-full px-4 py-1 text-xs font-semibold uppercase tracking-wide ${
+                  vraMode === "basic" ? "bg-emerald-600 text-white" : "bg-slate-200 text-slate-600"
+                }`}
+              >
+                Basic
+              </button>
+              <button
+                type="button"
+                onClick={() => setVraMode("advanced")}
+                className={`rounded-full px-4 py-1 text-xs font-semibold uppercase tracking-wide ${
+                  vraMode === "advanced" ? "bg-emerald-600 text-white" : "bg-slate-200 text-slate-600"
+                }`}
+              >
+                Advanced
+              </button>
             </div>
           </div>
-        </aside>
-      </main>
+          {/* Future enhancement: expose an export CRS selector once the backend accepts an export_crs parameter so shapefiles can match machinery coordinate systems out of the box. */}
+          {vraMode === "basic" ? (
+            <form className="space-y-4" onSubmit={handleGenerateBasicZones}>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="space-y-1 text-sm text-slate-600">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Zones</span>
+                  <input
+                    type="number"
+                    min={3}
+                    max={9}
+                    value={vraZoneCount}
+                    onChange={(event) => setVraZoneCount(Number(event.target.value))}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900"
+                  />
+                </label>
+                <label className="space-y-1 text-sm text-slate-600">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Date range</span>
+                  <input
+                    type="text"
+                    readOnly
+                    value={`${vraStartDate} → ${vraEndDate}`}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900"
+                  />
+                </label>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <input
+                  type="date"
+                  value={vraStartDate}
+                  onChange={(event) => setVraStartDate(event.target.value)}
+                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900"
+                />
+                <input
+                  type="date"
+                  value={vraEndDate}
+                  onChange={(event) => setVraEndDate(event.target.value)}
+                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={vraLoading || !aoi}
+                className="w-full rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold uppercase tracking-wide text-white shadow-lg shadow-slate-900/20 disabled:cursor-not-allowed disabled:bg-slate-400"
+              >
+                {vraLoading ? "Building zones..." : "Generate basic zones"}
+              </button>
+            </form>
+          ) : (
+            <div className="space-y-4">
+              <form className="space-y-3" onSubmit={handleGenerateAdvancedZones}>
+                <label className="space-y-1 text-sm text-slate-600">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Breaks (4 values)</span>
+                  <input
+                    type="text"
+                    value={vraBreaksText}
+                    onChange={(event) => setVraBreaksText(event.target.value)}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900"
+                  />
+                </label>
+                <div className="rounded-xl border border-slate-200 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Season builder</p>
+                  <p className="text-xs text-slate-500">
+                    Add seasons with crop + dates. Future yield/soil uploads can populate the asset fields (stored via SeasonInput.yieldAsset/soilAsset).
+                  </p>
+                  <div className="mt-3 grid grid-cols-2 gap-3">
+                    <input
+                      name="crop"
+                      value={seasonDraft.crop}
+                      onChange={handleSeasonDraftChange}
+                      placeholder="Crop"
+                      className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    />
+                    <input
+                      type="date"
+                      name="sowingDate"
+                      value={seasonDraft.sowingDate}
+                      onChange={handleSeasonDraftChange}
+                      className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    />
+                    <input
+                      type="date"
+                      name="harvestDate"
+                      value={seasonDraft.harvestDate}
+                      onChange={handleSeasonDraftChange}
+                      className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    />
+                    <input
+                      name="yieldAsset"
+                      value={seasonDraft.yieldAsset}
+                      onChange={handleSeasonDraftChange}
+                      placeholder="Yield layer ref"
+                      className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    />
+                    <input
+                      name="soilAsset"
+                      value={seasonDraft.soilAsset}
+                      onChange={handleSeasonDraftChange}
+                      placeholder="Soil layer ref"
+                      className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="mt-3 rounded-xl border border-dashed border-emerald-300 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-emerald-700"
+                    onClick={addSeason}
+                  >
+                    Add season
+                  </button>
+                  <ul className="mt-3 space-y-2 text-sm">
+                    {vraSeasons.map((season, index) => (
+                      <li key={`${season.crop}-${index}`} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2">
+                        <div>
+                          <p className="font-semibold text-slate-800">{season.crop || `Season ${index + 1}`}</p>
+                          <p className="text-xs text-slate-500">{season.sowingDate} → {season.harvestDate}</p>
+                        </div>
+                        <button type="button" className="text-xs text-rose-600" onClick={() => removeSeason(index)}>
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <button
+                  type="submit"
+                  disabled={vraLoading || !aoi}
+                  className="w-full rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold uppercase tracking-wide text-white shadow-lg shadow-slate-900/20 disabled:cursor-not-allowed disabled:bg-slate-400"
+                >
+                  {vraLoading ? "Building advanced zones..." : "Generate advanced zones"}
+                </button>
+              </form>
+            </div>
+          )}
+          {vraError ? <p className="mt-3 text-sm text-rose-600">{vraError}</p> : null}
+          {prescriptions.length ? (
+            <div className="mt-4 space-y-3">
+              {prescriptions.map((entry) => {
+                const visible = entry.layerIds.some((layerId) => vraLayers.find((layer) => layer.id === layerId)?.visible);
+                return (
+                  <div key={entry.id} className="rounded-2xl border border-slate-100 bg-white px-4 py-3 shadow-sm">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-900">{entry.title}</p>
+                        <p className="text-xs text-slate-500">{entry.classCount} classes • {new Date(entry.createdAt).toLocaleString()}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => toggleVraLayers(entry.layerIds)}
+                        className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide ${
+                          visible ? "bg-emerald-600 text-white" : "bg-slate-200 text-slate-600"
+                        }`}
+                      >
+                        {visible ? "Hide" : "Show"}
+                      </button>
+                    </div>
+                    <div className="mt-2 space-x-2 text-xs">
+                      {Object.entries(entry.downloads).map(([label, url]) => (
+                        <a key={label} href={url} target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline">
+                          {formatDownloadLabel(label)}
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="mt-4 text-sm text-slate-500">Run a VRA workflow to store prescriptions. Each entry can be exported for machinery consoles.</p>
+          )}
+        </section>
+
+        <section className="rounded-2xl border border-slate-100 bg-white/95 p-5 shadow-sm">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Downloads</p>
+              <h2 className="text-lg font-semibold text-slate-900">NDVI outputs</h2>
+            </div>
+            <span className="text-xs text-slate-500">Raw + coloured</span>
+          </div>
+          {downloadEntries.length ? (
+            <div className="space-y-2">
+              {downloadEntries.map(([label, url]) => (
+                <a
+                  key={label}
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:border-emerald-200 hover:bg-emerald-50"
+                >
+                  <span>{formatDownloadLabel(label)}</span>
+                  <span className="text-xs uppercase tracking-wide text-emerald-600">Download</span>
+                </a>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-slate-500">Downloads appear once NDVI tiles are generated.</p>
+          )}
+        </section>
+
+        <section className="rounded-2xl border border-slate-100 bg-white/95 p-5 shadow-sm">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Trend</p>
+              <h2 className="text-lg font-semibold text-slate-900">NDVI over time</h2>
+            </div>
+            <span className="text-xs text-slate-500">Avg per month</span>
+          </div>
+          <NdviTrendChart points={trendPoints} clamp={clamp} />
+        </section>
+
+        <section className="rounded-2xl border border-slate-100 bg-white/95 p-5 shadow-sm">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Weather</p>
+              <h2 className="text-lg font-semibold text-slate-900">5-day field outlook</h2>
+            </div>
+            {weather ? <span className="text-xs text-slate-500">{weather.forecast.length} days</span> : null}
+          </div>
+          <form className="space-y-3" onSubmit={handleWeatherFetch}>
+            <button
+              type="submit"
+              disabled={weatherLoading || !aoi}
+              className="w-full rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold uppercase tracking-wide text-white shadow-lg shadow-slate-900/20 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+            >
+              {weatherLoading ? "Loading forecast..." : weather ? "Refresh weather" : "Load weather"}
+            </button>
+            {weatherError ? <p className="text-sm text-rose-600">{weatherError}</p> : null}
+          </form>
+          {weather ? (
+            <div className="mt-4 space-y-6">
+              <WeatherForecast days={weather.forecast} recommendation={weather.sprayRecommendation} />
+              {precipitationLayer ? (
+                <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-700">Precipitation overlay</p>
+                    <p className="text-xs text-slate-500">RainViewer radar tiles</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={toggleWeatherOverlay}
+                    className={`rounded-full px-4 py-2 text-xs font-semibold uppercase tracking-wide transition ${
+                      precipitationLayer.visible
+                        ? "bg-emerald-600 text-white"
+                        : "bg-white text-slate-600 shadow"
+                    }`}
+                  >
+                    {precipitationLayer.visible ? "Hide overlay" : "Show overlay"}
+                  </button>
+                </div>
+              ) : null}
+              <WeatherCharts chart={weather.chart} base={weather.gddBaseC} />
+            </div>
+          ) : (
+            <p className="mt-4 text-sm text-slate-500">
+              Fetch the forecast to view weather, precipitation, and spray recommendations for this field.
+            </p>
+          )}
+        </section>
+
+        <NotesPanel
+          notes={notes}
+          notesVisible={notesVisible}
+          noteMode={noteMode}
+          onToggleVisibility={handleToggleNotesVisibility}
+          onStartNote={handleStartNoteMode}
+          onSelectNote={handleSelectNote}
+          onExportCsv={handleExportCsv}
+          onExportJson={handleExportJson}
+        />
+        {noteError ? <p className="text-sm text-rose-600">{noteError}</p> : null}
+      </aside>
+
+      <section className="relative flex flex-1 flex-col">
+        <div className="flex-1">
+          <Map
+            aoi={aoi}
+            layers={mapLayers}
+            legend={legendConfig}
+            noteMode={noteMode}
+            notes={notes}
+            showNotes={notesVisible}
+            selectedNoteId={selectedNoteId}
+            onMapClickForNote={handleMapClickForNote}
+            onSelectNote={setSelectedNoteId}
+          />
+        </div>
+      </section>
+
+      <NoteModal
+        open={noteModalOpen}
+        location={pendingLocation}
+        onClose={handleCancelNoteModal}
+        onSave={handleSaveNote}
+      />
     </div>
   );
 }

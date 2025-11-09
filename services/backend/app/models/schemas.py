@@ -50,6 +50,7 @@ class NDVIMonthRequest(CamelModel):
 class NDVIMonthItem(CamelModel):
     name: str
     tile: TileResponse
+    mean_ndvi: Optional[float] = Field(default=None, alias="meanNdvi")
 
 
 class NDVIMonthResponse(CamelModel):
@@ -188,3 +189,46 @@ class TileSessionResponse(CamelModel):
     min_zoom: int = Field(alias="minZoom")
     max_zoom: int = Field(alias="maxZoom")
     expires_at: Optional[str] = Field(default=None, alias="expiresAt")
+
+
+class WeatherForecastRequest(CamelModel):
+    aoi: Dict[str, Any]
+    base_temp_c: float = Field(default=10.0, alias="baseTempC")
+
+
+class WeatherForecastDay(CamelModel):
+    date: date
+    temp_min_c: float = Field(alias="tempMinC")
+    temp_max_c: float = Field(alias="tempMaxC")
+    precipitation_mm: float = Field(alias="precipitationMm")
+    wind_avg_kmh: float = Field(alias="windAvgKmh")
+    wind_max_kmh: float = Field(alias="windMaxKmh")
+    description: str
+    icon: Optional[str] = None
+    gdd: float
+    spray_ok: bool = Field(alias="sprayOk")
+
+
+class WeatherSeriesPoint(CamelModel):
+    date: date
+    value: float
+    cumulative: float
+
+
+class WeatherChart(CamelModel):
+    gdd: List[WeatherSeriesPoint]
+    precipitation: List[WeatherSeriesPoint]
+
+
+class SprayRecommendation(CamelModel):
+    best_days: List[date] = Field(alias="bestDays")
+    has_window: bool = Field(alias="hasWindow")
+
+
+class WeatherForecastResponse(CamelModel):
+    location: Dict[str, float]
+    forecast: List[WeatherForecastDay]
+    gdd_base_c: float = Field(alias="gddBaseC")
+    chart: WeatherChart
+    spray_recommendation: SprayRecommendation = Field(alias="sprayRecommendation")
+    precipitation_tile: Optional[TileResponse] = Field(default=None, alias="precipitationTile")
