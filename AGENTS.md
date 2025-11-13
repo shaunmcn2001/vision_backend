@@ -197,3 +197,4 @@ be exercised end-to-end via the bundled UI or HTTP clients.
 | 2025-11-08 | Codex Agent | Swapped weather data to Open-Meteo and kept RainViewer overlays so forecasts no longer require API keys. |
 | 2025-11-13 | gpt-5-codex | Added NDVI mean/aggregate summaries, CSV downloads, and unit tests covering multi-year payloads. |
 | 2025-11-13 | gpt-5-codex | Extended frontend NDVI tools with historical comparisons, map toggles, tables/charts, and Vitest coverage. |
+| 2025-11-13 | gpt-5-codex | Added frontend KML/KMZ ingestion with AOI input routing, validation, and accompanying tests. |
