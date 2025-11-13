@@ -53,10 +53,30 @@ class NDVIMonthItem(CamelModel):
     mean_ndvi: Optional[float] = Field(default=None, alias="meanNdvi")
 
 
+class NDVIMonthlyAverage(CamelModel):
+    year: int
+    month: int
+    label: str
+    mean_ndvi: Optional[float] = Field(default=None, alias="meanNdvi")
+
+
+class NDVIYearlyAverage(CamelModel):
+    year: int
+    mean_ndvi: Optional[float] = Field(default=None, alias="meanNdvi")
+
+
 class NDVIMonthResponse(CamelModel):
     items: List[NDVIMonthItem]
     mean: TileResponse
     downloads: Dict[str, str] = Field(default_factory=dict)
+    overall_mean_ndvi: Optional[float] = Field(default=None, alias="overallMeanNdvi")
+    yearly_averages: List[NDVIYearlyAverage] = Field(
+        default_factory=list, alias="yearlyAverages"
+    )
+    last_year_monthly_averages: List[NDVIMonthlyAverage] = Field(
+        default_factory=list, alias="lastYearMonthlyAverages"
+    )
+    csv_downloads: Dict[str, str] = Field(default_factory=dict, alias="csvDownloads")
 
 
 class ImageryDailyRequest(CamelModel):

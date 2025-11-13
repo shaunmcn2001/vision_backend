@@ -24,6 +24,8 @@ from app.models.schemas import (
     NDVIMonthItem,
     NDVIMonthRequest,
     NDVIMonthResponse,
+    NDVIMonthlyAverage,
+    NDVIYearlyAverage,
     TileResponse,
 )
 from app.services.advanced_zones import SeasonDefinition, compute_advanced_layers
@@ -41,10 +43,16 @@ from app.services.zones_workflow import (
     classify_zones,
     dissolve_by_class,
     dissolved_zone_statistics,
+    NdviMonthlyStat,
+    csv_data_url,
+    compute_yearly_ndvi_averages,
+    last_year_monthly_stats,
     mean_ndvi,
     monthly_ndvi,
+    monthly_stats_to_rows,
     zone_palette,
     vectorize_zones,
+    yearly_averages_to_rows,
     zone_statistics,
 )
 
@@ -164,6 +172,7 @@ def ndvi_month(request: NDVIMonthRequest) -> NDVIMonthResponse:
 
     items: List[NDVIMonthItem] = []
     downloads: Dict[str, str] = {}
+    monthly_stats: List[NdviMonthlyStat] = []
     for idx, month_start in enumerate(months):
         if idx >= collection_size:
             break
@@ -195,9 +204,18 @@ def ndvi_month(request: NDVIMonthRequest) -> NDVIMonthResponse:
                 mean_ndvi=mean_value,
             )
         )
+        monthly_stats.append(
+            NdviMonthlyStat(
+                year=month_start.year,
+                month=month_start.month,
+                label=label,
+                mean_ndvi=mean_value,
+            )
+        )
 
     mean_image = mean_ndvi(request.aoi, request.start, request.end)
     mean_tile = create_tile_session(mean_image, vis_params=vis_params)
+    overall_mean_value = _mean_ndvi_value(mean_image, geometry)
     try:
         downloads["ndvi_mean_raw_geotiff"] = image_geotiff_url(
             mean_image,
@@ -214,7 +232,46 @@ def ndvi_month(request: NDVIMonthRequest) -> NDVIMonthResponse:
         )
     except DownloadTooLargeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return NDVIMonthResponse(items=items, mean=_tile_response(mean_tile), downloads=downloads)
+    yearly_averages = compute_yearly_ndvi_averages(monthly_stats)
+    last_year_monthly = last_year_monthly_stats(monthly_stats)
+
+    csv_downloads: Dict[str, str] = {}
+    monthly_rows = monthly_stats_to_rows(monthly_stats)
+    if monthly_rows:
+        csv_downloads["ndvi_monthly_stats_csv"] = csv_data_url(
+            ["year", "month", "label", "mean_ndvi"], monthly_rows
+        )
+    yearly_rows = yearly_averages_to_rows(yearly_averages)
+    if yearly_rows:
+        csv_downloads["ndvi_yearly_stats_csv"] = csv_data_url(
+            ["year", "mean_ndvi"], yearly_rows
+        )
+    last_year_rows = monthly_stats_to_rows(last_year_monthly)
+    if last_year_rows:
+        csv_downloads["ndvi_last_year_monthly_stats_csv"] = csv_data_url(
+            ["year", "month", "label", "mean_ndvi"], last_year_rows
+        )
+
+    return NDVIMonthResponse(
+        items=items,
+        mean=_tile_response(mean_tile),
+        downloads=downloads,
+        overall_mean_ndvi=overall_mean_value,
+        yearly_averages=[
+            NDVIYearlyAverage(year=avg.year, mean_ndvi=avg.mean_ndvi)
+            for avg in yearly_averages
+        ],
+        last_year_monthly_averages=[
+            NDVIMonthlyAverage(
+                year=stat.year,
+                month=stat.month,
+                label=stat.label,
+                mean_ndvi=stat.mean_ndvi,
+            )
+            for stat in last_year_monthly
+        ],
+        csv_downloads=csv_downloads,
+    )
 
 
 def _iterate_days(start: date, end: date) -> Iterable[date]:

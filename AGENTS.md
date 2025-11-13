@@ -195,3 +195,4 @@ be exercised end-to-end via the bundled UI or HTTP clients.
 | 2025-11-08 | Codex Agent | Integrated weather forecasts, GDD charts, and precipitation overlays with backend APIs and a OneSoil-style weather panel. |
 | 2025-11-08 | Codex Agent | Added VRA mapping workflows, prescription management, and field scouting notes with map annotations and exports. |
 | 2025-11-08 | Codex Agent | Swapped weather data to Open-Meteo and kept RainViewer overlays so forecasts no longer require API keys. |
+| 2025-11-13 | gpt-5-codex | Added NDVI mean/aggregate summaries, CSV downloads, and unit tests covering multi-year payloads. |
