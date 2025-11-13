@@ -18,6 +18,9 @@ import { validateDateRange } from "./lib/validators";
 import { AOIInput } from "./components/AOIInput";
 import { Map, type MapLayerConfig, type LegendConfig } from "./components/Map";
 import { NdviTrendChart } from "./components/NdviTrendChart";
+import { NdviYearlyChart } from "./components/NdviYearlyChart";
+import { NdviYearlyTable } from "./components/NdviYearlyTable";
+import { NdviMonthlyTable, type NdviMonthlyTableRow } from "./components/NdviMonthlyTable";
 import { WeatherForecast } from "./components/WeatherForecast";
 import { WeatherCharts } from "./components/WeatherCharts";
 import { WeatherService } from "./lib/weather";
@@ -41,6 +44,14 @@ const ZONE_PALETTE_BASE = [
   "#151c31"
 ];
 const DEFAULT_CLAMP: [number, number] = [-0.2, 0.8];
+
+const HISTORICAL_PERIODS = [
+  { key: "1y", label: "1-year average", years: 1 },
+  { key: "5y", label: "5-year average", years: 5 },
+  { key: "10y", label: "10-year average", years: 10 }
+] as const;
+
+type HistoricalPeriodKey = (typeof HISTORICAL_PERIODS)[number]["key"];
 
 function toDateInput(value: Date): string {
   const iso = value.toISOString();
@@ -133,6 +144,10 @@ export default function App() {
 
   const [ndviResult, setNdviResult] = useState<NdviMonthResult | null>(null);
   const [downloads, setDownloads] = useState<Record<string, string>>({});
+  const [historicalSummaries, setHistoricalSummaries] = useState<
+    Partial<Record<HistoricalPeriodKey, NdviMonthResult>>
+  >({});
+  const [historicalError, setHistoricalError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -183,6 +198,42 @@ export default function App() {
     [ndviResult]
   );
 
+  const summaryCards = useMemo(
+    () => {
+      const cards: Array<{ key: string; label: string; value: number | null }> = [];
+      if (ndviResult) {
+        cards.push({
+          key: "season",
+          label: "Season average",
+          value: typeof ndviResult.overallMeanNdvi === "number" ? ndviResult.overallMeanNdvi : null
+        });
+      }
+      HISTORICAL_PERIODS.forEach((period) => {
+        const summary = historicalSummaries[period.key];
+        cards.push({
+          key: period.key,
+          label: period.label,
+          value: summary && typeof summary.overallMeanNdvi === "number" ? summary.overallMeanNdvi : null
+        });
+      });
+      return cards;
+    },
+    [ndviResult, historicalSummaries]
+  );
+
+  const yearlyAverages = historicalSummaries["10y"]?.yearlyAverages ?? ndviResult?.yearlyAverages ?? [];
+
+  const monthlyHistoryRows = useMemo<NdviMonthlyTableRow[]>(() => {
+    const source = historicalSummaries["1y"]?.lastYearMonthlyAverages ?? ndviResult?.lastYearMonthlyAverages ?? [];
+    return source.map((entry) => ({
+      label: entry.label,
+      formattedLabel: formatMonthLabel(entry.label),
+      year: entry.year,
+      month: entry.month,
+      meanNdvi: typeof entry.meanNdvi === "number" ? entry.meanNdvi : null
+    }));
+  }, [historicalSummaries, ndviResult]);
+
   function handleAoiChange(geometry: GeometryInput | null) {
     setAoi(geometry);
     setLayers([]);
@@ -191,6 +242,8 @@ export default function App() {
     setLegendConfig(null);
     setDownloads({});
     setNdviResult(null);
+    setHistoricalSummaries({});
+    setHistoricalError(null);
     setWeather(null);
     setNotes([]);
     setPrescriptions([]);
@@ -378,12 +431,46 @@ export default function App() {
     }
     setLoading(true);
     setError(null);
+    setHistoricalSummaries({});
+    setHistoricalError(null);
     try {
-      const response = await requestNdviMonth({
-        aoi,
-        start: startDate,
-        end: endDate,
-        clamp
+      const today = new Date();
+      const comparisonEnd = toDateInput(today);
+      const requests: Array<Promise<NdviMonthResult>> = [
+        requestNdviMonth({
+          aoi,
+          start: startDate,
+          end: endDate,
+          clamp
+        }),
+        ...HISTORICAL_PERIODS.map((period) => {
+          const start = new Date(today);
+          start.setFullYear(start.getFullYear() - period.years);
+          return requestNdviMonth({
+            aoi,
+            start: toDateInput(start),
+            end: comparisonEnd,
+            clamp
+          });
+        })
+      ];
+      const results = await Promise.allSettled(requests);
+      const [seasonResult, ...historicalResults] = results;
+      if (seasonResult.status !== "fulfilled") {
+        throw seasonResult.reason instanceof Error
+          ? seasonResult.reason
+          : new Error("Failed to fetch NDVI.");
+      }
+      const response = seasonResult.value;
+      const historical: Partial<Record<HistoricalPeriodKey, NdviMonthResult>> = {};
+      const failedPeriods: string[] = [];
+      historicalResults.forEach((result, index) => {
+        const period = HISTORICAL_PERIODS[index];
+        if (result.status === "fulfilled") {
+          historical[period.key] = result.value;
+        } else {
+          failedPeriods.push(period.label);
+        }
       });
       const monthLayers: LayerEntry[] = response.items.map((item, index) => ({
         id: item.name,
@@ -403,9 +490,25 @@ export default function App() {
         visible: true,
         group: "ndvi"
       };
-      setLayers([meanLayer, ...monthLayers]);
-      setDownloads({ ...(response.downloads ?? {}) });
+      const historicalLayers = HISTORICAL_PERIODS.flatMap((period) => {
+        const summary = historical[period.key];
+        if (!summary) return [];
+        return [
+          {
+            id: `ndvi-${period.key}-mean`,
+            label: period.label,
+            subtitle: `${period.years}-year mean`,
+            type: "raster" as const,
+            tile: summary.mean,
+            visible: false,
+            group: "ndvi" as const
+          }
+        ];
+      });
+      setLayers([meanLayer, ...historicalLayers, ...monthLayers]);
+      setDownloads({ ...(response.downloads ?? {}), ...(response.csvDownloads ?? {}) });
       setNdviResult(response);
+      setHistoricalSummaries(historical);
       setLegendConfig({
         type: "gradient",
         title: "NDVI",
@@ -413,9 +516,13 @@ export default function App() {
         max: clamp[1],
         colors: NDVI_PALETTE
       });
+      if (failedPeriods.length) {
+        setHistoricalError(`Some historical comparisons failed: ${failedPeriods.join(", ")}.`);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to fetch NDVI.";
       setError(message);
+      setHistoricalSummaries({});
     } finally {
       setLoading(false);
     }
@@ -684,6 +791,53 @@ export default function App() {
           </form>
         </section>
 
+        {ndviResult ? (
+          <section className="rounded-2xl border border-slate-100 bg-white/95 p-5 shadow-sm">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">NDVI Insights</p>
+                <h2 className="text-lg font-semibold text-slate-900">Historical comparisons</h2>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              {summaryCards.map((card) => (
+                <div key={card.key} className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">{card.label}</p>
+                  <p className="text-xl font-semibold text-slate-900">
+                    {typeof card.value === "number" ? card.value.toFixed(3) : "—"}
+                  </p>
+                </div>
+              ))}
+            </div>
+            {historicalError ? <p className="mt-3 text-sm text-rose-600">{historicalError}</p> : null}
+            {layers.length ? (
+              <div className="mt-5 space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Map layers</p>
+                {layers.map((layer) => (
+                  <div
+                    key={layer.id}
+                    className="flex items-center justify-between rounded-xl border border-slate-200 px-4 py-2"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800">{layer.label}</p>
+                      {layer.subtitle ? <p className="text-xs text-slate-500">{layer.subtitle}</p> : null}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => toggleLayer(layer.id)}
+                      className={`rounded-full px-4 py-1 text-xs font-semibold uppercase tracking-wide ${
+                        layer.visible ? "bg-emerald-600 text-white" : "bg-slate-200 text-slate-600"
+                      }`}
+                    >
+                      {layer.visible ? "Hide" : "Show"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
         <section className="rounded-2xl border border-slate-100 bg-white/95 p-5 shadow-sm">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -919,6 +1073,33 @@ export default function App() {
           </div>
           <NdviTrendChart points={trendPoints} clamp={clamp} />
         </section>
+
+        {ndviResult ? (
+          <section className="rounded-2xl border border-slate-100 bg-white/95 p-5 shadow-sm">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Yearly history</p>
+                <h2 className="text-lg font-semibold text-slate-900">10-year NDVI averages</h2>
+              </div>
+            </div>
+            <div className="space-y-5">
+              <NdviYearlyChart averages={yearlyAverages} clamp={clamp} />
+              <NdviYearlyTable averages={yearlyAverages} />
+            </div>
+          </section>
+        ) : null}
+
+        {ndviResult ? (
+          <section className="rounded-2xl border border-slate-100 bg-white/95 p-5 shadow-sm">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Last 12 months</p>
+                <h2 className="text-lg font-semibold text-slate-900">Recent NDVI monthly averages</h2>
+              </div>
+            </div>
+            <NdviMonthlyTable rows={monthlyHistoryRows} />
+          </section>
+        ) : null}
 
         <section className="rounded-2xl border border-slate-100 bg-white/95 p-5 shadow-sm">
           <div className="mb-4 flex items-center justify-between">

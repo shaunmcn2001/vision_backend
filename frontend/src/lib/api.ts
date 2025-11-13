@@ -14,10 +14,28 @@ export type NdviMonthItem = {
   meanNdvi?: number | null;
 };
 
+export type NdviYearlyAverage = {
+  year: number;
+  meanNdvi?: number | null;
+};
+
+export type NdviMonthlyAverage = {
+  year: number;
+  month: number;
+  label: string;
+  meanNdvi?: number | null;
+};
+
+export type NdviCsvDownloads = Record<string, string>;
+
 export type NdviMonthResult = {
   items: NdviMonthItem[];
   mean: TileResponse;
   downloads: DownloadsMap;
+  overallMeanNdvi?: number | null;
+  yearlyAverages: NdviYearlyAverage[];
+  lastYearMonthlyAverages: NdviMonthlyAverage[];
+  csvDownloads: NdviCsvDownloads;
 };
 
 export type WeatherForecastDay = {
