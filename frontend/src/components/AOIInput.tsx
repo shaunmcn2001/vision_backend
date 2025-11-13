@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Label } from "@radix-ui/react-label";
 
 import type { GeometryInput } from "../lib/api";
+import { parseKmlOrKmz } from "../lib/kml";
 import { parseShapefileZip } from "../lib/shp";
 import { parseGeoJsonText } from "../lib/validators";
 
@@ -16,10 +17,18 @@ export function AOIInput({ value, onChange }: AOIInputProps) {
 
   async function handleFileInput(file: File | undefined) {
     if (!file) return;
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    const supported = ["zip", "kml", "kmz"];
+    if (!extension || !supported.includes(extension)) {
+      setError("Unsupported file format. Please upload a .zip, .kml, or .kmz file.");
+      onChange(null);
+      return;
+    }
     try {
-      const geometry = await parseShapefileZip(file);
+      const geometry =
+        extension === "zip" ? await parseShapefileZip(file) : await parseKmlOrKmz(file);
       if (!geometry) {
-        setError("Unable to read shapefile geometry.");
+        setError("Unable to read AOI geometry from the selected file.");
         return;
       }
       onChange({
@@ -34,7 +43,7 @@ export function AOIInput({ value, onChange }: AOIInputProps) {
       });
       setError(null);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to parse shapefile";
+      const message = err instanceof Error ? err.message : "Failed to parse AOI";
       setError(message);
     }
   }
@@ -53,10 +62,12 @@ export function AOIInput({ value, onChange }: AOIInputProps) {
   return (
     <div className="space-y-4">
       <div className="space-y-2">
-        <Label className="text-sm font-medium text-slate-700">Upload AOI (Shapefile ZIP)</Label>
+        <Label className="text-sm font-medium text-slate-700">
+          Upload AOI (Shapefile ZIP, KML, or KMZ)
+        </Label>
         <input
           type="file"
-          accept=".zip"
+          accept=".zip,.kml,.kmz"
           className="block w-full text-sm text-slate-700"
           onChange={(event) => handleFileInput(event.target.files?.[0])}
         />
@@ -81,7 +92,9 @@ export function AOIInput({ value, onChange }: AOIInputProps) {
       {value ? (
         <p className="text-xs text-emerald-600">AOI ready.</p>
       ) : (
-        <p className="text-xs text-slate-500">Upload a shapefile or paste GeoJSON to continue.</p>
+        <p className="text-xs text-slate-500">
+          Upload a shapefile, KML/KMZ, or paste GeoJSON to continue.
+        </p>
       )}
       {error ? <p className="text-xs text-rose-600">{error}</p> : null}
     </div>
