@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import csv
+from dataclasses import dataclass
 from datetime import date, timedelta
+from io import StringIO
 from typing import Any, Dict, List, Mapping, Sequence
 
 import ee
@@ -148,6 +152,89 @@ def mean_ndvi(aoi: Mapping[str, Any], start: date, end: date) -> ee.Image:
             collection.mean().rename("NDVI").clip(geometry),
         )
     )
+
+
+@dataclass(frozen=True)
+class NdviMonthlyStat:
+    """Representation of a monthly NDVI mean value."""
+
+    year: int
+    month: int
+    label: str
+    mean_ndvi: float | None
+
+
+@dataclass(frozen=True)
+class NdviYearlyAverage:
+    """Representation of a yearly NDVI mean value."""
+
+    year: int
+    mean_ndvi: float | None
+
+
+def compute_yearly_ndvi_averages(stats: Sequence[NdviMonthlyStat]) -> List[NdviYearlyAverage]:
+    """Aggregate monthly NDVI values into yearly averages."""
+
+    if not stats:
+        return []
+
+    years = sorted({stat.year for stat in stats})
+    yearly: List[NdviYearlyAverage] = []
+    for year in years:
+        values = [stat.mean_ndvi for stat in stats if stat.year == year and stat.mean_ndvi is not None]
+        mean_value = sum(values) / len(values) if values else None
+        yearly.append(NdviYearlyAverage(year=year, mean_ndvi=mean_value))
+    return yearly
+
+
+def last_year_monthly_stats(stats: Sequence[NdviMonthlyStat]) -> List[NdviMonthlyStat]:
+    """Return the monthly stats for the most recent year, ordered by month."""
+
+    if not stats:
+        return []
+
+    last_year = max(stat.year for stat in stats)
+    return sorted((stat for stat in stats if stat.year == last_year), key=lambda item: item.month)
+
+
+def monthly_stats_to_rows(stats: Sequence[NdviMonthlyStat]) -> List[Dict[str, object]]:
+    """Convert monthly stats into serialisable dictionaries."""
+
+    ordered = sorted(stats, key=lambda stat: (stat.year, stat.month))
+    return [
+        {
+            "year": stat.year,
+            "month": stat.month,
+            "label": stat.label,
+            "mean_ndvi": stat.mean_ndvi,
+        }
+        for stat in ordered
+    ]
+
+
+def yearly_averages_to_rows(averages: Sequence[NdviYearlyAverage]) -> List[Dict[str, object]]:
+    """Convert yearly averages into serialisable dictionaries."""
+
+    return [
+        {
+            "year": avg.year,
+            "mean_ndvi": avg.mean_ndvi,
+        }
+        for avg in sorted(averages, key=lambda value: value.year)
+    ]
+
+
+def csv_data_url(headers: Sequence[str], rows: Sequence[Mapping[str, object]]) -> str:
+    """Build a base64 data URL containing the provided CSV rows."""
+
+    buffer = StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=list(headers))
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({header: row.get(header) for header in headers})
+    data = buffer.getvalue().encode("utf-8")
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:text/csv;base64,{encoded}"
 
 
 def classify_zones(
